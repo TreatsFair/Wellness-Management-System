@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+
 import '../../core/utils/responsive.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -22,9 +24,71 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _handleSignIn() async {
+    final email    = _emailController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (email.isEmpty || password.isEmpty) {
+      _showError('Please enter your email and password');
+      return;
+    }
+
     setState(() => _isLoading = true);
-    await Future.delayed(const Duration(seconds: 1));
-    setState(() => _isLoading = false);
+
+    try {
+      await FirebaseAuth.instance.signInWithEmailAndPassword(
+        email:    email,
+        password: password,
+      );
+    } on FirebaseAuthException catch (e) {
+      debugPrint('Firebase sign-in failed: ${e.code} ${e.message}');
+      String message = 'Sign in failed';
+      if (e.code == 'user-not-found')  message = 'No account found for this email';
+      if (e.code == 'wrong-password')  message = 'Incorrect password';
+      if (e.code == 'invalid-credential') message = 'Invalid email or password';
+      if (e.code == 'invalid-email')   message = 'Invalid email address';
+      if (e.code == 'user-disabled')   message = 'This account has been disabled';
+      if (e.code == 'too-many-requests') message = 'Too many attempts. Try again later';
+      _showError(message);
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _handleForgotPassword() async {
+    final email = _emailController.text.trim();
+
+    if (email.isEmpty) {
+      _showError('Enter your email above, then tap Forgot Password');
+      return;
+    }
+
+    try {
+      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Reset email sent - check your inbox'),
+            backgroundColor: Color(0xFF1B6B72),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } on FirebaseAuthException catch (e) {
+      String message = 'Failed to send reset email';
+      if (e.code == 'user-not-found') message = 'No account found for this email';
+      if (e.code == 'invalid-email') message = 'Invalid email address';
+      if (mounted) _showError(message);
+    }
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: const Color(0xFFE53935),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   @override
@@ -57,7 +121,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       child: Image.asset(
                         'assets/images/logo/treats_logo.png',
                         fit: BoxFit.cover,
-                        errorBuilder: (_, __, ___) => const Icon(
+                        errorBuilder: (_, _, _) => const Icon(
                           Icons.spa_outlined,
                           color: Colors.white,
                           size: 40,
@@ -165,7 +229,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         // Forgot password
                         Center(
                           child: GestureDetector(
-                            onTap: () {},
+                            onTap: _handleForgotPassword,
                             child: const Text(
                               'Forgot Password?',
                               style: TextStyle(
