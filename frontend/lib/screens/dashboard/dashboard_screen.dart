@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../customers/customer_screen.dart';
+
 // TODO: replace with Firestore call in Week 7.
 class _DashboardStats {
   final int todayAppointments;
@@ -254,27 +256,35 @@ class _DashboardScreenState extends State<DashboardScreen> {
     var profile = _placeholderBusinessProfile;
     var normalizedRole = 'staff';
 
-    try {
-      final userByUidSnapshot = uid == null
-          ? null
-          : await FirebaseFirestore.instance.collection('users').doc(uid).get();
-      final userByEmailSnapshot =
-          userByUidSnapshot?.exists == true || email == null
-              ? null
-              : await FirebaseFirestore.instance
-                    .collection('users')
-                    .where('email', isEqualTo: email)
-                    .limit(1)
-                    .get();
+    Map<String, dynamic>? userData;
+    if (email != null) {
+      try {
+        final userByEmailSnapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .where('email', isEqualTo: email.trim().toLowerCase())
+            .limit(1)
+            .get();
+        if (userByEmailSnapshot.docs.isNotEmpty) {
+          userData = userByEmailSnapshot.docs.first.data();
+        }
+      } on FirebaseException catch (e) {
+        debugPrint('Unable to load user role by email: ${e.code}');
+      }
+    }
 
-      final userData = userByUidSnapshot?.data() ??
-          (userByEmailSnapshot?.docs.isNotEmpty == true
-              ? userByEmailSnapshot!.docs.first.data()
-              : null);
-      final role = (userData?['role'] as String?)?.toLowerCase().trim();
+    if (userData == null && uid != null) {
+      try {
+        final userByUidSnapshot =
+            await FirebaseFirestore.instance.collection('users').doc(uid).get();
+        userData = userByUidSnapshot.data();
+      } on FirebaseException catch (e) {
+        debugPrint('Unable to load user role by uid: ${e.code}');
+      }
+    }
+
+    if (userData != null) {
+      final role = (userData['role'] as String?)?.toLowerCase().trim();
       normalizedRole = role == 'admin' ? 'admin' : 'staff';
-    } on FirebaseException catch (e) {
-      debugPrint('Unable to load user role: ${e.code}');
     }
 
     try {
@@ -603,32 +613,38 @@ class _TabletMembersCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final members = _placeholderRecentMembers;
 
-    return _TabletCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.people_outline,
-              bg: const Color(0xFFE3F2FD),
-              color: const Color(0xFF1B6B72),
-            ),
-            const SizedBox(width: 12),
-            const Text('Members',
-              style: TextStyle(
-                fontSize: 16, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
-          const SizedBox(height: 16),
-          const Text('Recently added',
-            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-          const SizedBox(height: 8),
-          for (final member in members) ...[
-            _MemberRow(name: member.name, phone: member.phone),
-            if (member != members.last) const SizedBox(height: 6),
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomerScreen()),
+      ),
+      child: _TabletCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              _IconBox(
+                icon: Icons.people_outline,
+                bg: const Color(0xFFE3F2FD),
+                color: const Color(0xFF1B6B72),
+              ),
+              const SizedBox(width: 12),
+              const Text('Members',
+                style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                )),
+            ]),
+            const SizedBox(height: 16),
+            const Text('Recently added',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
+            const SizedBox(height: 8),
+            for (final member in members) ...[
+              _MemberRow(name: member.name, phone: member.phone),
+              if (member != members.last) const SizedBox(height: 6),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -884,7 +900,7 @@ class _PhoneLayout extends StatelessWidget {
                 ),
                 const SizedBox(height: 12),
 
-                // Row 2: POS + Customers
+                // Row 2: POS + Members
                 Row(
                   children: [
                     Expanded(child: _PhonePosCard()),
@@ -1187,40 +1203,46 @@ class _PhoneCustomersCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final stats = _DashboardStats.placeholder;
 
-    return _PhoneCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.people_outline,
-              bg: const Color(0xFFE3F2FD),
-              color: const Color(0xFF1B6B72),
-              size: 32,
-            ),
-            const SizedBox(width: 8),
-            const Text('Customers',
-              style: TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600,
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const CustomerScreen()),
+      ),
+      child: _PhoneCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              _IconBox(
+                icon: Icons.people_outline,
+                bg: const Color(0xFFE3F2FD),
+                color: const Color(0xFF1B6B72),
+                size: 32,
+              ),
+              const SizedBox(width: 8),
+              const Text('Members',
+                style: TextStyle(
+                  fontSize: 13, fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                )),
+            ]),
+            const SizedBox(height: 10),
+            const Text('Total',
+              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+            const SizedBox(height: 4),
+            Text('${stats.totalCustomers}',
+              style: const TextStyle(
+                fontSize: 28, fontWeight: FontWeight.bold,
                 color: Color(0xFF1A1A2E),
               )),
-          ]),
-          const SizedBox(height: 10),
-          const Text('Total',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
-          const SizedBox(height: 4),
-          Text('${stats.totalCustomers}',
-            style: const TextStyle(
-              fontSize: 28, fontWeight: FontWeight.bold,
-              color: Color(0xFF1A1A2E),
-            )),
-          const SizedBox(height: 4),
-          Text('+${stats.newCustomersThisWeek} this week',
-            style: const TextStyle(
-              fontSize: 11, color: Color(0xFF1B6B72),
-              fontWeight: FontWeight.w500,
-            )),
-        ],
+            const SizedBox(height: 4),
+            Text('+${stats.newCustomersThisWeek} this week',
+              style: const TextStyle(
+                fontSize: 11, color: Color(0xFF1B6B72),
+                fontWeight: FontWeight.w500,
+              )),
+          ],
+        ),
       ),
     );
   }
