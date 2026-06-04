@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../customers/customer_screen.dart';
+import '../therapists/therapist_screen.dart';
 
 // TODO: replace with Firestore call in Week 7.
 class _DashboardStats {
@@ -259,13 +260,39 @@ class _DashboardScreenState extends State<DashboardScreen> {
     Map<String, dynamic>? userData;
     if (email != null) {
       try {
-        final userByEmailSnapshot = await FirebaseFirestore.instance
-            .collection('users')
-            .where('email', isEqualTo: email.trim().toLowerCase())
-            .limit(1)
-            .get();
-        if (userByEmailSnapshot.docs.isNotEmpty) {
-          userData = userByEmailSnapshot.docs.first.data();
+        final trimmedEmail = email.trim();
+        final emailCandidates = {
+          trimmedEmail.toLowerCase(),
+          trimmedEmail,
+        }.where((value) => value.isNotEmpty);
+        final userDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
+
+        for (final emailCandidate in emailCandidates) {
+          final userByEmailSnapshot = await FirebaseFirestore.instance
+              .collection('users')
+              .where('email', isEqualTo: emailCandidate)
+              .get(const GetOptions(source: Source.server));
+          userDocs.addAll(userByEmailSnapshot.docs);
+        }
+
+        if (userDocs.isNotEmpty) {
+          QueryDocumentSnapshot<Map<String, dynamic>>? selectedDoc;
+          for (final doc in userDocs) {
+            if (doc.id == uid || doc.data()['uid'] == uid) {
+              selectedDoc = doc;
+              break;
+            }
+          }
+          if (selectedDoc == null) {
+            for (final doc in userDocs) {
+              if ((doc.data()['role'] as String?)?.toLowerCase().trim() ==
+                  'admin') {
+                selectedDoc = doc;
+                break;
+              }
+            }
+          }
+          userData = (selectedDoc ?? userDocs.first).data();
         }
       } on FirebaseException catch (e) {
         debugPrint('Unable to load user role by email: ${e.code}');
@@ -275,7 +302,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
     if (userData == null && uid != null) {
       try {
         final userByUidSnapshot =
-            await FirebaseFirestore.instance.collection('users').doc(uid).get();
+            await FirebaseFirestore.instance
+                .collection('users')
+                .doc(uid)
+                .get(const GetOptions(source: Source.server));
         userData = userByUidSnapshot.data();
       } on FirebaseException catch (e) {
         debugPrint('Unable to load user role by uid: ${e.code}');
@@ -469,7 +499,7 @@ class _TabletLayout extends StatelessWidget {
                       const SizedBox(width: 16),
                       // Therapists card
                       Expanded(
-                        child: _TabletTherapistsCard(),
+                        child: _TabletTherapistsCard(role: role),
                       ),
                     ],
                   ),
@@ -766,44 +796,56 @@ class _TabletAppointmentCard extends StatelessWidget {
 }
 
 class _TabletTherapistsCard extends StatelessWidget {
+  final String role;
+
+  const _TabletTherapistsCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
     final therapists = _placeholderTherapists.take(2).toList();
 
-    return _TabletCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.people_outline,
-              bg: const Color(0xFFF3E8FF),
-              color: const Color(0xFF7C3AED),
-            ),
-            const SizedBox(width: 12),
-            const Text('Therapists',
-              style: TextStyle(
-                fontSize: 16, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
-          const SizedBox(height: 16),
-          const Text('Status Today',
-            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-          const SizedBox(height: 10),
-          for (final therapist in therapists) ...[
-            _TherapistRow(
-              name: therapist.name,
-              status: therapist.status,
-              statusColor: therapist.isFree
-                  ? const Color(0xFF4CAF50)
-                  : const Color(0xFFF59E0B),
-              done: '${therapist.doneCount} done',
-            ),
-            if (therapist != therapists.last)
-              const Divider(height: 16, color: Color(0xFFF0F0F0)),
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => TherapistsScreen(userRole: role),
+        ),
+      ),
+      child: _TabletCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              _IconBox(
+                icon: Icons.people_outline,
+                bg: const Color(0xFFF3E8FF),
+                color: const Color(0xFF7C3AED),
+              ),
+              const SizedBox(width: 12),
+              const Text('Therapists',
+                style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                )),
+            ]),
+            const SizedBox(height: 16),
+            const Text('Status Today',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
+            const SizedBox(height: 10),
+            for (final therapist in therapists) ...[
+              _TherapistRow(
+                name: therapist.name,
+                status: therapist.status,
+                statusColor: therapist.isFree
+                    ? const Color(0xFF4CAF50)
+                    : const Color(0xFFF59E0B),
+                done: '${therapist.doneCount} done',
+              ),
+              if (therapist != therapists.last)
+                const Divider(height: 16, color: Color(0xFFF0F0F0)),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }
@@ -921,7 +963,7 @@ class _PhoneLayout extends StatelessWidget {
                 // ── Staff Status section ──────────────────────
                 const _SectionLabel('Staff Status'),
                 const SizedBox(height: 12),
-                _PhoneStaffStatusCard(),
+                _PhoneStaffStatusCard(role: role),
 
                 const SizedBox(height: 24),
 
@@ -1296,6 +1338,10 @@ class _PhoneAnalyticsCard extends StatelessWidget {
 }
 
 class _PhoneStaffStatusCard extends StatelessWidget {
+  final String role;
+
+  const _PhoneStaffStatusCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
     final therapists = _placeholderTherapists;
@@ -1312,11 +1358,19 @@ class _PhoneStaffStatusCard extends StatelessWidget {
                   fontSize: 14, fontWeight: FontWeight.w600,
                   color: Color(0xFF1A1A2E),
                 )),
-              Text('View All',
-                style: const TextStyle(
-                  fontSize: 13, color: Color(0xFF1B6B72),
-                  fontWeight: FontWeight.w500,
-                )),
+              GestureDetector(
+                onTap: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => TherapistsScreen(userRole: role),
+                  ),
+                ),
+                child: const Text('View All',
+                  style: TextStyle(
+                    fontSize: 13, color: Color(0xFF1B6B72),
+                    fontWeight: FontWeight.w500,
+                  )),
+              ),
             ],
           ),
           const SizedBox(height: 12),

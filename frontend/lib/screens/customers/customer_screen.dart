@@ -54,7 +54,9 @@ class CustomerModel {
       final now   = DateTime.now();
       int age     = now.year - dob.year;
       if (now.month < dob.month ||
-          (now.month == dob.month && now.day < dob.day)) age--;
+          (now.month == dob.month && now.day < dob.day)) {
+        age--;
+      }
       return age;
     } catch (_) {
       return 0;
@@ -417,7 +419,7 @@ class _TabletListItem extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: isSelected
-              ? const Color(0xFF1B6B72).withOpacity(0.08)
+              ? const Color(0xFF1B6B72).withValues(alpha: 0.08)
               : Colors.transparent,
           borderRadius: BorderRadius.circular(12),
           border: isSelected
@@ -572,7 +574,7 @@ class _PhoneListCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color:      Colors.black.withOpacity(0.04),
+              color:      Colors.black.withValues(alpha: 0.04),
               blurRadius: 6,
               offset:     const Offset(0, 2),
             ),
@@ -1248,7 +1250,7 @@ class _Card extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withOpacity(0.04),
+            color:      Colors.black.withValues(alpha: 0.04),
             blurRadius: 8,
             offset:     const Offset(0, 2),
           ),
@@ -1283,7 +1285,7 @@ class _StatCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withOpacity(0.04),
+            color:      Colors.black.withValues(alpha: 0.04),
             blurRadius: 6,
             offset:     const Offset(0, 2),
           ),
