@@ -2,7 +2,9 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
+import '../appointments/appointment_screen.dart';
 import '../customers/customer_screen.dart';
+import '../orders/order_screen.dart';
 import '../therapists/therapist_screen.dart';
 
 // TODO: replace with Firestore call in Week 7.
@@ -59,16 +61,6 @@ class _TherapistStatus {
     required this.status,
     required this.isFree,
     required this.doneCount,
-  });
-}
-
-class _MemberSummary {
-  final String name;
-  final String phone;
-
-  const _MemberSummary({
-    required this.name,
-    required this.phone,
   });
 }
 
@@ -165,12 +157,6 @@ const _placeholderTherapists = [
     isFree: false,
     doneCount: 4,
   ),
-];
-
-// TODO: replace with Firestore call in Week 7.
-const _placeholderRecentMembers = [
-  _MemberSummary(name: 'Ahmad Razif', phone: '(6012) 345-6789'),
-  _MemberSummary(name: 'Siti Nurhaliza', phone: '(6015) 987-6543'),
 ];
 
 // TODO: replace with Firestore call in Week 7.
@@ -301,11 +287,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     if (userData == null && uid != null) {
       try {
-        final userByUidSnapshot =
-            await FirebaseFirestore.instance
-                .collection('users')
-                .doc(uid)
-                .get(const GetOptions(source: Source.server));
+        final userByUidSnapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .get(const GetOptions(source: Source.server));
         userData = userByUidSnapshot.data();
       } on FirebaseException catch (e) {
         debugPrint('Unable to load user role by uid: ${e.code}');
@@ -369,16 +354,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .collection('settings')
           .doc(settingsDocumentId)
           .set({
-        'businessName': profile.name,
-        'location': profile.location,
-        'updatedAt': FieldValue.serverTimestamp(),
-        'updatedBy': uid,
-      }, SetOptions(merge: true));
+            'businessName': profile.name,
+            'location': profile.location,
+            'updatedAt': FieldValue.serverTimestamp(),
+            'updatedBy': uid,
+          }, SetOptions(merge: true));
 
       if (!mounted) return;
       setState(() {
-        _businessProfile =
-            profile.copyWith(settingsDocumentId: settingsDocumentId);
+        _businessProfile = profile.copyWith(
+          settingsDocumentId: settingsDocumentId,
+        );
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -472,7 +458,6 @@ class _TabletLayout extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-
                 // Main section label
                 const _SectionLabel('Main'),
                 const SizedBox(height: 12),
@@ -482,25 +467,17 @@ class _TabletLayout extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Members card
-                      Expanded(
-                        child: _TabletMembersCard(),
-                      ),
+                      // Quick Book card
+                      Expanded(child: _TabletQuickBookCard(role: role)),
                       const SizedBox(width: 16),
                       // Orders card
-                      Expanded(
-                        child: _TabletOrdersCard(),
-                      ),
+                      Expanded(child: _TabletOrdersCard()),
                       const SizedBox(width: 16),
                       // Appointment card
-                      Expanded(
-                        child: _TabletAppointmentCard(),
-                      ),
+                      Expanded(child: _TabletAppointmentCard()),
                       const SizedBox(width: 16),
                       // Therapists card
-                      Expanded(
-                        child: _TabletTherapistsCard(role: role),
-                      ),
+                      Expanded(child: _TabletTherapistsCard(role: role)),
                     ],
                   ),
                 ),
@@ -514,34 +491,48 @@ class _TabletLayout extends StatelessWidget {
                 // 4-column others row
                 Row(
                   children: [
-                    Expanded(child: _TabletOtherCard(
-                      icon: Icons.history_outlined,
-                      label: 'History',
-                      iconBg: const Color(0xFFE8F4F8),
-                      iconColor: const Color(0xFF5BA4B5),
-                    )),
+                    Expanded(
+                      child: _TabletOtherCard(
+                        icon: Icons.history_outlined,
+                        label: 'History',
+                        iconBg: const Color(0xFFE8F4F8),
+                        iconColor: const Color(0xFF5BA4B5),
+                      ),
+                    ),
                     const SizedBox(width: 16),
-                    Expanded(child: _TabletOtherCard(
-                      icon: Icons.person_outline,
-                      label: 'Attendance',
-                      iconBg: const Color(0xFFFFF3E0),
-                      iconColor: const Color(0xFFF59E0B),
-                    )),
+                    Expanded(
+                      child: _TabletOtherCard(
+                        icon: Icons.people_outline,
+                        label: 'Members',
+                        iconBg: const Color(0xFFE3F2FD),
+                        iconColor: const Color(0xFF1B6B72),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => const CustomerScreen(),
+                          ),
+                        ),
+                      ),
+                    ),
                     const SizedBox(width: 16),
-                    Expanded(child: _TabletOtherCard(
-                      icon: Icons.settings_outlined,
-                      label: 'Settings',
-                      iconBg: const Color(0xFFE8F5E9),
-                      iconColor: const Color(0xFF4CAF50),
-                      onTap: onOpenSettings,
-                    )),
+                    Expanded(
+                      child: _TabletOtherCard(
+                        icon: Icons.settings_outlined,
+                        label: 'Settings',
+                        iconBg: const Color(0xFFE8F5E9),
+                        iconColor: const Color(0xFF4CAF50),
+                        onTap: onOpenSettings,
+                      ),
+                    ),
                     const SizedBox(width: 16),
-                    Expanded(child: _TabletOtherCard(
-                      icon: Icons.bar_chart_outlined,
-                      label: 'Reports',
-                      iconBg: const Color(0xFFEDE7F6),
-                      iconColor: const Color(0xFF7C3AED),
-                    )),
+                    Expanded(
+                      child: _TabletOtherCard(
+                        icon: Icons.bar_chart_outlined,
+                        label: 'Reports',
+                        iconBg: const Color(0xFFEDE7F6),
+                        iconColor: const Color(0xFF7C3AED),
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -588,35 +579,42 @@ class _TabletTopBar extends StatelessWidget {
               child: Row(
                 children: [
                   Container(
-                    width: 40, height: 40,
+                    width: 40,
+                    height: 40,
                     decoration: const BoxDecoration(
                       shape: BoxShape.circle,
                       color: Color(0xFF1B6B72),
                     ),
                     child: Center(
-                      child: Text(profile.logoInitial,
+                      child: Text(
+                        profile.logoInitial,
                         style: const TextStyle(
                           color: Colors.white,
                           fontWeight: FontWeight.bold,
                           fontSize: 16,
-                        )),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(profile.name,
+                      Text(
+                        profile.name,
                         style: const TextStyle(
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF1A1A2E),
-                        )),
-                      Text(profile.location,
+                        ),
+                      ),
+                      Text(
+                        profile.location,
                         style: const TextStyle(
                           fontSize: 12,
                           color: Color(0xFF9E9E9E),
-                        )),
+                        ),
+                      ),
                     ],
                   ),
                 ],
@@ -624,10 +622,7 @@ class _TabletTopBar extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          _RolePill(
-            role: role,
-            isLoading: isLoadingSettings,
-          ),
+          _RolePill(role: role, isLoading: isLoadingSettings),
           const SizedBox(width: 12),
           const _NotificationButton(),
           const SizedBox(width: 12),
@@ -638,41 +633,78 @@ class _TabletTopBar extends StatelessWidget {
   }
 }
 
-class _TabletMembersCard extends StatelessWidget {
+class _TabletQuickBookCard extends StatelessWidget {
+  final String role;
+
+  const _TabletQuickBookCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
-    final members = _placeholderRecentMembers;
-
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => const CustomerScreen()),
+        MaterialPageRoute(builder: (_) => NewAppointmentScreen(userRole: role)),
       ),
-      child: _TabletCard(
+      child: Container(
+        padding: const EdgeInsets.all(24),
+        decoration: BoxDecoration(
+          color: const Color(0xFF23848A),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x1A000000),
+              blurRadius: 8,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              _IconBox(
-                icon: Icons.people_outline,
-                bg: const Color(0xFFE3F2FD),
-                color: const Color(0xFF1B6B72),
+            Row(
+              children: [
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(
+                    Icons.add,
+                    color: Color(0xFF23848A),
+                    size: 26,
+                  ),
+                ),
+                const SizedBox(width: 14),
+                const Text(
+                  'Quick Book',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            const Spacer(),
+            const Text(
+              'Create new appointment',
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: Colors.white,
               ),
-              const SizedBox(width: 12),
-              const Text('Members',
-                style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
-                )),
-            ]),
+            ),
             const SizedBox(height: 16),
-            const Text('Recently added',
-              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-            const SizedBox(height: 8),
-            for (final member in members) ...[
-              _MemberRow(name: member.name, phone: member.phone),
-              if (member != members.last) const SizedBox(height: 6),
-            ],
+            Text(
+              'AI-optimised scheduling',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Colors.white.withValues(alpha: 0.82),
+              ),
+            ),
           ],
         ),
       ),
@@ -685,73 +717,102 @@ class _TabletOrdersCard extends StatelessWidget {
   Widget build(BuildContext context) {
     const order = _placeholderPendingOrder;
 
-    return _TabletCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            Stack(
-              clipBehavior: Clip.none,
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
+      ),
+      child: _TabletCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
               children: [
-                _IconBox(
-                  icon: Icons.shopping_cart_outlined,
-                  bg: const Color(0xFFFFF3E0),
-                  color: const Color(0xFFF59E0B),
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    _IconBox(
+                      icon: Icons.shopping_cart_outlined,
+                      bg: const Color(0xFFFFF3E0),
+                      color: const Color(0xFFF59E0B),
+                    ),
+                    Positioned(
+                      top: -4,
+                      right: -4,
+                      child: Container(
+                        width: 18,
+                        height: 18,
+                        decoration: const BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: Color(0xFFE53935),
+                        ),
+                        child: Center(
+                          child: Text(
+                            '${order.pendingCount}',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                Positioned(
-                  top: -4, right: -4,
-                  child: Container(
-                    width: 18, height: 18,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0xFFE53935),
-                    ),
-                    child: Center(
-                      child: Text('${order.pendingCount}',
-                        style: const TextStyle(
-                          color: Colors.white, fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                        )),
-                    ),
+                const SizedBox(width: 12),
+                const Text(
+                  'Orders',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
                   ),
                 ),
               ],
             ),
-            const SizedBox(width: 12),
-            const Text('Orders',
-              style: TextStyle(
-                fontSize: 16, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
-          const SizedBox(height: 16),
-          const Text('Pending order',
-            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-          const SizedBox(height: 8),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(order.customerName,
-                    style: const TextStyle(
-                      fontSize: 14, fontWeight: FontWeight.w500,
-                      color: Color(0xFF1A1A2E),
-                    )),
-                  const SizedBox(height: 2),
-                  Text(order.phone,
-                    style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-                ],
-              ),
-              Text('RM ${order.amount.toStringAsFixed(0)}',
-                style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.bold,
-                  color: Color(0xFF1B6B72),
-                )),
-            ],
-          ),
-        ],
+            const SizedBox(height: 16),
+            const Text(
+              'Pending order',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      order.customerName,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      order.phone,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF9E9E9E),
+                      ),
+                    ),
+                  ],
+                ),
+                Text(
+                  'RM ${order.amount.toStringAsFixed(0)}',
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.bold,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -766,22 +827,29 @@ class _TabletAppointmentCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.calendar_today_outlined,
-              bg: const Color(0xFFE8F5E9),
-              color: const Color(0xFF1B6B72),
-            ),
-            const SizedBox(width: 12),
-            const Text('Appointment',
-              style: TextStyle(
-                fontSize: 16, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
+          Row(
+            children: [
+              _IconBox(
+                icon: Icons.calendar_today_outlined,
+                bg: const Color(0xFFE8F5E9),
+                color: const Color(0xFF1B6B72),
+              ),
+              const SizedBox(width: 12),
+              const Text(
+                'Appointment',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
-          const Text('Total',
-            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
+          const Text(
+            'Total',
+            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+          ),
           const SizedBox(height: 10),
           _AppointmentRow(label: 'Today', count: '${stats.todayAppointments}'),
           const SizedBox(height: 10),
@@ -807,30 +875,35 @@ class _TabletTherapistsCard extends StatelessWidget {
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
-        MaterialPageRoute(
-          builder: (_) => TherapistsScreen(userRole: role),
-        ),
+        MaterialPageRoute(builder: (_) => TherapistsScreen(userRole: role)),
       ),
       child: _TabletCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              _IconBox(
-                icon: Icons.people_outline,
-                bg: const Color(0xFFF3E8FF),
-                color: const Color(0xFF7C3AED),
-              ),
-              const SizedBox(width: 12),
-              const Text('Therapists',
-                style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
-                )),
-            ]),
+            Row(
+              children: [
+                _IconBox(
+                  icon: Icons.people_outline,
+                  bg: const Color(0xFFF3E8FF),
+                  color: const Color(0xFF7C3AED),
+                ),
+                const SizedBox(width: 12),
+                const Text(
+                  'Therapists',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 16),
-            const Text('Status Today',
-              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
+            const Text(
+              'Status Today',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            ),
             const SizedBox(height: 10),
             for (final therapist in therapists) ...[
               _TherapistRow(
@@ -878,11 +951,14 @@ class _TabletOtherCard extends StatelessWidget {
             children: [
               _IconBox(icon: icon, bg: iconBg, color: iconColor),
               const SizedBox(width: 12),
-              Text(label,
+              Text(
+                label,
                 style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.w500,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w500,
                   color: Color(0xFF1A1A2E),
-                )),
+                ),
+              ),
             ],
           ),
         ),
@@ -913,7 +989,6 @@ class _PhoneLayout extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-
           // ── Top bar ──────────────────────────────────────────
           _PhoneTopBar(
             profile: profile,
@@ -927,7 +1002,6 @@ class _PhoneLayout extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-
                 // ── Main section ─────────────────────────────
                 const _SectionLabel('Main'),
                 const SizedBox(height: 12),
@@ -937,7 +1011,7 @@ class _PhoneLayout extends StatelessWidget {
                   children: [
                     Expanded(child: _PhoneAppointmentCard()),
                     const SizedBox(width: 12),
-                    Expanded(child: _PhoneQuickBookCard()),
+                    Expanded(child: _PhoneQuickBookCard(role: role)),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -985,10 +1059,16 @@ class _PhoneLayout extends StatelessWidget {
                       iconColor: const Color(0xFF5BA4B5),
                     ),
                     _PhoneOtherCard(
-                      icon: Icons.person_outline,
-                      label: 'Attendance',
-                      iconBg: const Color(0xFFFFF3E0),
-                      iconColor: const Color(0xFFF59E0B),
+                      icon: Icons.people_outline,
+                      label: 'Members',
+                      iconBg: const Color(0xFFE3F2FD),
+                      iconColor: const Color(0xFF1B6B72),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const CustomerScreen(),
+                        ),
+                      ),
                     ),
                     _PhoneOtherCard(
                       icon: Icons.settings_outlined,
@@ -1052,18 +1132,21 @@ class _PhoneTopBar extends StatelessWidget {
                 child: Row(
                   children: [
                     Container(
-                      width: 36, height: 36,
+                      width: 36,
+                      height: 36,
                       decoration: const BoxDecoration(
                         shape: BoxShape.circle,
                         color: Color(0xFF1B6B72),
                       ),
                       child: Center(
-                        child: Text(profile.logoInitial,
+                        child: Text(
+                          profile.logoInitial,
                           style: const TextStyle(
                             color: Colors.white,
                             fontWeight: FontWeight.bold,
                             fontSize: 14,
-                          )),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 10),
@@ -1071,21 +1154,25 @@ class _PhoneTopBar extends StatelessWidget {
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text(profile.name,
+                          Text(
+                            profile.name,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.bold,
                               color: Color(0xFF1A1A2E),
-                            )),
-                          Text(profile.location,
+                            ),
+                          ),
+                          Text(
+                            profile.location,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
                               fontSize: 11,
                               color: Color(0xFF9E9E9E),
-                            )),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -1095,11 +1182,7 @@ class _PhoneTopBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          _RolePill(
-            role: role,
-            isLoading: isLoadingSettings,
-            compact: true,
-          ),
+          _RolePill(role: role, isLoading: isLoadingSettings, compact: true),
           const SizedBox(width: 8),
           const _NotificationButton(compact: true),
           const SizedBox(width: 8),
@@ -1115,85 +1198,125 @@ class _PhoneAppointmentCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final stats = _DashboardStats.placeholder;
 
-    return _PhoneCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.calendar_today_outlined,
-              bg: const Color(0xFFE8F5E9),
-              color: const Color(0xFF1B6B72),
-              size: 32,
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
+      ),
+      child: _PhoneCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _IconBox(
+                  icon: Icons.calendar_today_outlined,
+                  bg: const Color(0xFFE8F5E9),
+                  color: const Color(0xFF1B6B72),
+                  size: 32,
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'Appointments',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ],
             ),
-            const SizedBox(width: 8),
-            const Text('Appointments',
-              style: TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600,
+            const SizedBox(height: 10),
+            const Text(
+              'Total Today',
+              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '${stats.todayAppointments}',
+              style: const TextStyle(
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
                 color: Color(0xFF1A1A2E),
-              )),
-          ]),
-          const SizedBox(height: 10),
-          const Text('Total Today',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
-          const SizedBox(height: 4),
-          Text('${stats.todayAppointments}',
-            style: const TextStyle(
-              fontSize: 28, fontWeight: FontWeight.bold,
-              color: Color(0xFF1A1A2E),
-            )),
-          const SizedBox(height: 4),
-          Row(children: [
-            Text('${stats.doneAppointments} Done  ',
-              style: const TextStyle(
-                fontSize: 11, color: Color(0xFF4CAF50),
-                fontWeight: FontWeight.w500,
-              )),
-            Text('${stats.pendingAppointments} Pending',
-              style: const TextStyle(
-                fontSize: 11, color: Color(0xFFF59E0B),
-                fontWeight: FontWeight.w500,
-              )),
-          ]),
-        ],
+              ),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Text(
+                  '${stats.doneAppointments} Done  ',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF4CAF50),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                Text(
+                  '${stats.pendingAppointments} Pending',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFFF59E0B),
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 class _PhoneQuickBookCard extends StatelessWidget {
+  final String role;
+
+  const _PhoneQuickBookCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: const Color(0xFF1B6B72),
-        borderRadius: BorderRadius.circular(16),
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => NewAppointmentScreen(userRole: role)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 36, height: 36,
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.2),
-              borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: const Color(0xFF1B6B72),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(Icons.add, color: Colors.white, size: 20),
             ),
-            child: const Icon(Icons.add, color: Colors.white, size: 20),
-          ),
-          const SizedBox(height: 12),
-          const Text('Quick Book',
-            style: TextStyle(
-              fontSize: 15, fontWeight: FontWeight.bold,
-              color: Colors.white,
-            )),
-          const SizedBox(height: 4),
-          Text('Create new\nappointment',
-            style: TextStyle(
-              fontSize: 11,
-              color: Colors.white.withValues(alpha: 0.85),
-            )),
-        ],
+            const SizedBox(height: 12),
+            const Text(
+              'Quick Book',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              'Create new\nappointment',
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.white.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1208,32 +1331,44 @@ class _PhonePosCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.shopping_cart_outlined,
-              bg: const Color(0xFFFFF3E0),
-              color: const Color(0xFFF59E0B),
-              size: 32,
-            ),
-            const SizedBox(width: 8),
-            const Text('POS',
-              style: TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
+          Row(
+            children: [
+              _IconBox(
+                icon: Icons.shopping_cart_outlined,
+                bg: const Color(0xFFFFF3E0),
+                color: const Color(0xFFF59E0B),
+                size: 32,
+              ),
+              const SizedBox(width: 8),
+              const Text(
+                'POS',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 10),
-          const Text('Today Sales',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+          const Text(
+            'Today Sales',
+            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+          ),
           const SizedBox(height: 4),
-          Text('RM ${stats.todaySales.toStringAsFixed(0)}',
+          Text(
+            'RM ${stats.todaySales.toStringAsFixed(0)}',
             style: const TextStyle(
-              fontSize: 20, fontWeight: FontWeight.bold,
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
               color: Color(0xFF1A1A2E),
-            )),
+            ),
+          ),
           const SizedBox(height: 4),
-          Text('${stats.totalTransactions} transactions',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+          Text(
+            '${stats.totalTransactions} transactions',
+            style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+          ),
         ],
       ),
     );
@@ -1254,35 +1389,48 @@ class _PhoneCustomersCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [
-              _IconBox(
-                icon: Icons.people_outline,
-                bg: const Color(0xFFE3F2FD),
-                color: const Color(0xFF1B6B72),
-                size: 32,
-              ),
-              const SizedBox(width: 8),
-              const Text('Members',
-                style: TextStyle(
-                  fontSize: 13, fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
-                )),
-            ]),
+            Row(
+              children: [
+                _IconBox(
+                  icon: Icons.people_outline,
+                  bg: const Color(0xFFE3F2FD),
+                  color: const Color(0xFF1B6B72),
+                  size: 32,
+                ),
+                const SizedBox(width: 8),
+                const Text(
+                  'Members',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 10),
-            const Text('Total',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+            const Text(
+              'Total',
+              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+            ),
             const SizedBox(height: 4),
-            Text('${stats.totalCustomers}',
+            Text(
+              '${stats.totalCustomers}',
               style: const TextStyle(
-                fontSize: 28, fontWeight: FontWeight.bold,
+                fontSize: 28,
+                fontWeight: FontWeight.bold,
                 color: Color(0xFF1A1A2E),
-              )),
+              ),
+            ),
             const SizedBox(height: 4),
-            Text('+${stats.newCustomersThisWeek} this week',
+            Text(
+              '+${stats.newCustomersThisWeek} this week',
               style: const TextStyle(
-                fontSize: 11, color: Color(0xFF1B6B72),
+                fontSize: 11,
+                color: Color(0xFF1B6B72),
                 fontWeight: FontWeight.w500,
-              )),
+              ),
+            ),
           ],
         ),
       ),
@@ -1299,20 +1447,25 @@ class _PhoneAnalyticsCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            _IconBox(
-              icon: Icons.attach_money,
-              bg: const Color(0xFFE8F5E9),
-              color: const Color(0xFF1B6B72),
-              size: 32,
-            ),
-            const SizedBox(width: 10),
-            const Text('Revenue Summary',
-              style: TextStyle(
-                fontSize: 14, fontWeight: FontWeight.w600,
-                color: Color(0xFF1A1A2E),
-              )),
-          ]),
+          Row(
+            children: [
+              _IconBox(
+                icon: Icons.attach_money,
+                bg: const Color(0xFFE8F5E9),
+                color: const Color(0xFF1B6B72),
+                size: 32,
+              ),
+              const SizedBox(width: 10),
+              const Text(
+                'Revenue Summary',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 16),
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1353,11 +1506,14 @@ class _PhoneStaffStatusCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text('Therapists Today',
+              const Text(
+                'Therapists Today',
                 style: TextStyle(
-                  fontSize: 14, fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
                   color: Color(0xFF1A1A2E),
-                )),
+                ),
+              ),
               GestureDetector(
                 onTap: () => Navigator.push(
                   context,
@@ -1365,11 +1521,14 @@ class _PhoneStaffStatusCard extends StatelessWidget {
                     builder: (_) => TherapistsScreen(userRole: role),
                   ),
                 ),
-                child: const Text('View All',
+                child: const Text(
+                  'View All',
                   style: TextStyle(
-                    fontSize: 13, color: Color(0xFF1B6B72),
+                    fontSize: 13,
+                    color: Color(0xFF1B6B72),
                     fontWeight: FontWeight.w500,
-                  )),
+                  ),
+                ),
               ),
             ],
           ),
@@ -1419,11 +1578,14 @@ class _PhoneOtherCard extends StatelessWidget {
             children: [
               _IconBox(icon: icon, bg: iconBg, color: iconColor, size: 32),
               const SizedBox(width: 10),
-              Text(label,
+              Text(
+                label,
                 style: const TextStyle(
-                  fontSize: 13, fontWeight: FontWeight.w500,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
                   color: Color(0xFF1A1A2E),
-                )),
+                ),
+              ),
             ],
           ),
         ),
@@ -1479,24 +1641,30 @@ class _BusinessProfileDialog extends StatelessWidget {
                   shape: BoxShape.circle,
                   color: Color(0xFF1B6B72),
                 ),
-                child: Text(profile.logoInitial,
+                child: Text(
+                  profile.logoInitial,
                   style: const TextStyle(
                     color: Colors.white,
                     fontSize: 32,
                     fontWeight: FontWeight.w600,
-                  )),
+                  ),
+                ),
               ),
               const SizedBox(height: 18),
-              Text(profile.name,
+              Text(
+                profile.name,
                 textAlign: TextAlign.center,
                 style: const TextStyle(
                   fontSize: 28,
                   fontWeight: FontWeight.bold,
                   color: Color(0xFF1A1A2E),
-                )),
+                ),
+              ),
               const SizedBox(height: 6),
-              Text(email,
-                style: const TextStyle(fontSize: 14, color: Color(0xFF9E9E9E))),
+              Text(
+                email,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF9E9E9E)),
+              ),
               const SizedBox(height: 24),
               _BusinessProfileRow(
                 icon: Icons.storefront_outlined,
@@ -1599,15 +1767,18 @@ class _BusinessProfileRow extends StatelessWidget {
             child: Icon(icon, color: iconColor, size: 18),
           ),
           SizedBox(width: compact ? 10 : 14),
-          Text(label,
+          Text(
+            label,
             style: const TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
               color: Color(0xFF1A1A2E),
-            )),
+            ),
+          ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(value,
+            child: Text(
+              value,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.right,
@@ -1615,15 +1786,12 @@ class _BusinessProfileRow extends StatelessWidget {
                 fontSize: 14,
                 color: Color(0xFF8A8F98),
                 fontWeight: FontWeight.w500,
-              )),
+              ),
+            ),
           ),
           if (showChevron) ...[
             const SizedBox(width: 4),
-            const Icon(
-              Icons.chevron_right,
-              size: 18,
-              color: Color(0xFFB0B5BD),
-            ),
+            const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB0B5BD)),
           ],
         ],
       ),
@@ -1645,7 +1813,11 @@ class _RolePill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isAdmin = role == 'admin';
-    final label = isLoading ? '...' : isAdmin ? 'Admin' : 'Staff';
+    final label = isLoading
+        ? '...'
+        : isAdmin
+        ? 'Admin'
+        : 'Staff';
     final showIcon = isLoading;
 
     return Container(
@@ -1668,12 +1840,14 @@ class _RolePill extends StatelessWidget {
             ),
             SizedBox(width: compact ? 4 : 8),
           ],
-          Text(label,
+          Text(
+            label,
             style: TextStyle(
               fontSize: compact ? 12 : 16,
               fontWeight: FontWeight.w500,
               color: const Color(0xFF1A1A2E),
-            )),
+            ),
+          ),
         ],
       ),
     );
@@ -1728,12 +1902,14 @@ class _NotificationButton extends StatelessWidget {
                 shape: BoxShape.circle,
                 color: Color(0xFFE53935),
               ),
-              child: Text('${_placeholderTransactions.length}',
+              child: Text(
+                '${_placeholderTransactions.length}',
                 style: const TextStyle(
                   color: Colors.white,
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
-                )),
+                ),
+              ),
             ),
           ),
         ],
@@ -1787,21 +1963,25 @@ class _NotificationDialog extends StatelessWidget {
               ),
               const SizedBox(height: 18),
               const Center(
-                child: Text('Recent Transactions',
+                child: Text(
+                  'Recent Transactions',
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
                     color: Color(0xFF1A1A2E),
-                  )),
+                  ),
+                ),
               ),
               const SizedBox(height: 6),
               Center(
-                child: Text('${_placeholderTransactions.length} new transactions',
+                child: Text(
+                  '${_placeholderTransactions.length} new transactions',
                   style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF9E9E9E),
-                  )),
+                  ),
+                ),
               ),
               const SizedBox(height: 24),
               Flexible(
@@ -1854,38 +2034,46 @@ class _TransactionTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(transaction.customerName,
+                Text(
+                  transaction.customerName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
                     color: Color(0xFF1A1A2E),
-                  )),
+                  ),
+                ),
                 const SizedBox(height: 4),
-                Text(transaction.serviceName,
+                Text(
+                  transaction.serviceName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF5F6B7A),
-                  )),
+                  ),
+                ),
                 const SizedBox(height: 12),
-                Text('${transaction.date}  -  ${transaction.time}',
+                Text(
+                  '${transaction.date}  -  ${transaction.time}',
                   style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF5F6B7A),
-                  )),
+                  ),
+                ),
               ],
             ),
           ),
           const SizedBox(width: 12),
-          Text('RM ${transaction.amount.toStringAsFixed(0)}',
+          Text(
+            'RM ${transaction.amount.toStringAsFixed(0)}',
             style: const TextStyle(
               fontSize: 15,
               fontWeight: FontWeight.w600,
               color: Color(0xFF1B6B72),
-            )),
+            ),
+          ),
         ],
       ),
     );
@@ -1909,10 +2097,7 @@ class _SettingsButton extends StatelessWidget {
   final VoidCallback onPressed;
   final bool compact;
 
-  const _SettingsButton({
-    required this.onPressed,
-    this.compact = false,
-  });
+  const _SettingsButton({required this.onPressed, this.compact = false});
 
   @override
   Widget build(BuildContext context) {
@@ -1942,10 +2127,7 @@ class _BusinessSettingsDialog extends StatefulWidget {
   final _BusinessProfile profile;
   final bool isAdmin;
 
-  const _BusinessSettingsDialog({
-    required this.profile,
-    required this.isAdmin,
-  });
+  const _BusinessSettingsDialog({required this.profile, required this.isAdmin});
 
   @override
   State<_BusinessSettingsDialog> createState() =>
@@ -1987,7 +2169,9 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
       builder: (context) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
         title: const Text('Log out?'),
-        content: const Text('Are you sure you want to log out of this account?'),
+        content: const Text(
+          'Are you sure you want to log out of this account?',
+        ),
         actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
         actions: [
           TextButton(
@@ -2030,12 +2214,14 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
               child: Row(
                 children: [
                   const Expanded(
-                    child: Text('Business Settings',
+                    child: Text(
+                      'Business Settings',
                       style: TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
                         color: Color(0xFF1A1A2E),
-                      )),
+                      ),
+                    ),
                   ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
@@ -2086,12 +2272,14 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                       enabled: widget.isAdmin,
                     ),
                     const SizedBox(height: 24),
-                    const Text('Business Logo',
+                    const Text(
+                      'Business Logo',
                       style: TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
                         color: Color(0xFF5F6B7A),
-                      )),
+                      ),
+                    ),
                     const SizedBox(height: 12),
                     Row(
                       children: [
@@ -2103,12 +2291,14 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                             color: const Color(0xFF1B6B72),
                             borderRadius: BorderRadius.circular(12),
                           ),
-                          child: Text(widget.profile.logoInitial,
+                          child: Text(
+                            widget.profile.logoInitial,
                             style: const TextStyle(
                               color: Colors.white,
                               fontSize: 26,
                               fontWeight: FontWeight.w500,
-                            )),
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 20),
                         Expanded(
@@ -2133,11 +2323,10 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                       ],
                     ),
                     const SizedBox(height: 12),
-                    const Text('Recommended: Square image, min 200x200px',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: Color(0xFF5F6B7A),
-                      )),
+                    const Text(
+                      'Recommended: Square image, min 200x200px',
+                      style: TextStyle(fontSize: 14, color: Color(0xFF5F6B7A)),
+                    ),
                     const SizedBox(height: 24),
                     ElevatedButton.icon(
                       onPressed: _signOut,
@@ -2232,12 +2421,14 @@ class _BusinessSettingsField extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
+        Text(
+          label,
           style: const TextStyle(
             fontSize: 16,
             fontWeight: FontWeight.w600,
             color: Color(0xFF5F6B7A),
-          )),
+          ),
+        ),
         const SizedBox(height: 10),
         TextField(
           controller: controller,
@@ -2278,12 +2469,14 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(text,
+    return Text(
+      text,
       style: const TextStyle(
         fontSize: 16,
         fontWeight: FontWeight.w600,
         color: Color(0xFF1A1A2E),
-      ));
+      ),
+    );
   }
 }
 
@@ -2352,34 +2545,13 @@ class _IconBox extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width: size, height: size,
+      width: size,
+      height: size,
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(10),
       ),
       child: Icon(icon, color: color, size: size * 0.55),
-    );
-  }
-}
-
-class _MemberRow extends StatelessWidget {
-  final String name;
-  final String phone;
-  const _MemberRow({required this.name, required this.phone});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(name,
-          style: const TextStyle(
-            fontSize: 13, fontWeight: FontWeight.w500,
-            color: Color(0xFF1A1A2E),
-          )),
-        Text(phone,
-          style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E))),
-      ],
     );
   }
 }
@@ -2394,13 +2566,18 @@ class _AppointmentRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E))),
-        Text(count,
+        Text(
+          label,
+          style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
+        ),
+        Text(
+          count,
           style: const TextStyle(
-            fontSize: 20, fontWeight: FontWeight.bold,
+            fontSize: 20,
+            fontWeight: FontWeight.bold,
             color: Color(0xFF1B6B72),
-          )),
+          ),
+        ),
       ],
     );
   }
@@ -2425,28 +2602,31 @@ class _TherapistRow extends StatelessWidget {
       children: [
         // Status dot
         Container(
-          width: 8, height: 8,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: statusColor,
-          ),
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
         ),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(name,
+              Text(
+                name,
                 style: const TextStyle(
-                  fontSize: 13, fontWeight: FontWeight.w500,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w500,
                   color: Color(0xFF1A1A2E),
-                )),
-              Text(status,
+                ),
+              ),
+              Text(
+                status,
                 style: TextStyle(
                   fontSize: 11,
                   color: statusColor,
                   fontWeight: FontWeight.w500,
-                )),
+                ),
+              ),
             ],
           ),
         ),
@@ -2456,11 +2636,14 @@ class _TherapistRow extends StatelessWidget {
             color: const Color(0xFFF5F5F5),
             borderRadius: BorderRadius.circular(8),
           ),
-          child: Text(done,
+          child: Text(
+            done,
             style: const TextStyle(
-              fontSize: 11, color: Color(0xFF9E9E9E),
+              fontSize: 11,
+              color: Color(0xFF9E9E9E),
               fontWeight: FontWeight.w500,
-            )),
+            ),
+          ),
         ),
       ],
     );
@@ -2477,14 +2660,19 @@ class _AnalyticsStat extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
-          style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E))),
+        Text(
+          label,
+          style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+        ),
         const SizedBox(height: 4),
-        Text(value,
+        Text(
+          value,
           style: const TextStyle(
-            fontSize: 15, fontWeight: FontWeight.bold,
+            fontSize: 15,
+            fontWeight: FontWeight.bold,
             color: Color(0xFF1A1A2E),
-          )),
+          ),
+        ),
       ],
     );
   }
