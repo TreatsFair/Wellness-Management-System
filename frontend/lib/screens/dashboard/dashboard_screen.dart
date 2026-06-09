@@ -5,7 +5,7 @@ import 'package:flutter/material.dart';
 import '../appointments/appointment_screen.dart';
 import '../customers/customer_screen.dart';
 import '../orders/order_screen.dart';
-import '../therapists/therapist_screen.dart';
+import '../management/management_screen.dart';
 
 // TODO: replace with Firestore call in Week 7.
 class _DashboardStats {
@@ -517,11 +517,16 @@ class _TabletLayout extends StatelessWidget {
                     const SizedBox(width: 16),
                     Expanded(
                       child: _TabletOtherCard(
-                        icon: Icons.settings_outlined,
-                        label: 'Settings',
+                        icon: Icons.tune_outlined,
+                        label: 'Management',
                         iconBg: const Color(0xFFE8F5E9),
                         iconColor: const Color(0xFF4CAF50),
-                        onTap: onOpenSettings,
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ManagementScreen(userRole: role),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -875,7 +880,7 @@ class _TabletTherapistsCard extends StatelessWidget {
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => TherapistsScreen(userRole: role)),
+        MaterialPageRoute(builder: (_) => const TherapistAvailabilityScreen()),
       ),
       child: _TabletCard(
         child: Column(
@@ -1071,12 +1076,17 @@ class _PhoneLayout extends StatelessWidget {
                       ),
                     ),
                     _PhoneOtherCard(
-                      icon: Icons.settings_outlined,
-                      label: 'Settings',
+                      icon: Icons.tune_outlined,
+                      label: 'Management',
                       iconBg: const Color(0xFFE8F5E9),
                       iconColor: const Color(0xFF4CAF50),
-                      onTap: onOpenSettings,
-                    ),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ManagementScreen(userRole: role),
+                          ),
+                        ),
+                      ),
                     _PhoneOtherCard(
                       icon: Icons.bar_chart_outlined,
                       label: 'Reports',
@@ -1518,7 +1528,7 @@ class _PhoneStaffStatusCard extends StatelessWidget {
                 onTap: () => Navigator.push(
                   context,
                   MaterialPageRoute(
-                    builder: (_) => TherapistsScreen(userRole: role),
+                    builder: (_) => const TherapistAvailabilityScreen(),
                   ),
                 ),
                 child: const Text(

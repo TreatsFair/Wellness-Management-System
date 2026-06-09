@@ -318,6 +318,7 @@ class _TabletLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         // Left — member list
         Container(
@@ -340,20 +341,7 @@ class _TabletLayout extends StatelessWidget {
                           color: Color(0xFF1A1A2E),
                         )),
                     ),
-                    // Add button
-                    Container(
-                      width: 36, height: 36,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Color(0xFF1B6B72),
-                      ),
-                      child: IconButton(
-                        padding: EdgeInsets.zero,
-                        icon: const Icon(Icons.add,
-                          color: Colors.white, size: 20),
-                        onPressed: onAdd,
-                      ),
-                    ),
+                    const SizedBox(width: 36, height: 36),
                   ],
                 ),
               ),
@@ -385,14 +373,29 @@ class _TabletLayout extends StatelessWidget {
 
         // Right — detail panel
         Expanded(
-          child: selected == null
-              ? const Center(
-                  child: Text('Select a member to view details',
-                    style: TextStyle(color: Color(0xFF9E9E9E))))
-              : _DetailPanel(
-                  customer: selected!,
-                  onEdit: () => onEdit(selected!),
-                ),
+          child: Column(
+            children: [
+              _TabletDetailHeader(
+                title: 'Member Details',
+                addLabel: 'Add Member',
+                onAdd: onAdd,
+              ),
+              Expanded(
+                child: selected == null
+                    ? const Center(
+                        child: Text(
+                          'Select a member to view details',
+                          style: TextStyle(color: Color(0xFF9E9E9E)),
+                        ),
+                      )
+                    : _DetailPanel(
+                        customer: selected!,
+                        onEdit: () => onEdit(selected!),
+                        showTabletHeader: false,
+                      ),
+              ),
+            ],
+          ),
         ),
       ],
     );
@@ -484,21 +487,24 @@ class _PhoneLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final horizontalPadding =
+        MediaQuery.of(context).size.width < 360 ? 12.0 : 16.0;
+
     return Column(
       children: [
         // Header
         Container(
           color: Colors.white,
-          padding: const EdgeInsets.fromLTRB(4, 12, 16, 12),
+          padding: EdgeInsets.fromLTRB(4, 12, horizontalPadding, 12),
           child: Row(
             children: [
               const BackButton(),
               const Expanded(
                 child: Text('Members',
-                  textAlign: TextAlign.center,
+                  textAlign: TextAlign.start,
                   style: TextStyle(
                     fontSize: 18,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w700,
                     color: Color(0xFF1A1A2E),
                   )),
               ),
@@ -521,7 +527,12 @@ class _PhoneLayout extends StatelessWidget {
 
         // Search
         Padding(
-          padding: const EdgeInsets.all(12),
+          padding: EdgeInsets.fromLTRB(
+            horizontalPadding,
+            12,
+            horizontalPadding,
+            12,
+          ),
           child: _SearchBar(controller: searchController),
         ),
 
@@ -531,7 +542,12 @@ class _PhoneLayout extends StatelessWidget {
             onRefresh: () async => onRefresh(),
             color: const Color(0xFF1B6B72),
             child: ListView.builder(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
+              padding: EdgeInsets.fromLTRB(
+                horizontalPadding,
+                0,
+                horizontalPadding,
+                20,
+              ),
               itemCount: customers.length,
               itemBuilder: (_, i) => _PhoneListCard(
                 customer: customers[i],
@@ -679,24 +695,28 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         backgroundColor: Colors.white,
         elevation:       0,
         leading:         const BackButton(color: Color(0xFF1A1A2E)),
+        centerTitle: true,
         title: const Text('Member Details',
           style: TextStyle(
             fontSize:   18,
-            fontWeight: FontWeight.bold,
+            fontWeight: FontWeight.w700,
             color:      Color(0xFF1A1A2E),
           )),
         actions: [
-          IconButton(
+          _CircleIconButton(
             onPressed: () => _editAndReturn(context),
-            icon: const Icon(Icons.edit_outlined, color: Color(0xFF1B6B72)),
+            icon: Icons.edit_outlined,
+            tooltip: 'Edit member',
           ),
+          const SizedBox(width: 12),
         ],
       ),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: EdgeInsets.all(MediaQuery.of(context).size.width < 360 ? 12 : 16),
         child: _DetailPanel(
           customer: _customer,
           onEdit: () => _editAndReturn(context),
+          showInlineEdit: false,
         ),
       ),
     );
@@ -709,10 +729,14 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
 class _DetailPanel extends StatelessWidget {
   final CustomerModel customer;
   final VoidCallback? onEdit;
+  final bool showTabletHeader;
+  final bool showInlineEdit;
 
   const _DetailPanel({
     required this.customer,
     this.onEdit,
+    this.showTabletHeader = true,
+    this.showInlineEdit = true,
   });
 
   @override
@@ -725,9 +749,9 @@ class _DetailPanel extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
 
-          if (isTablet)
+          if (isTablet && showTabletHeader)
             Padding(
-              padding: EdgeInsets.only(bottom: 20),
+              padding: const EdgeInsets.only(bottom: 20),
               child: Row(
                 children: [
                   const Expanded(
@@ -754,39 +778,66 @@ class _DetailPanel extends StatelessWidget {
               children: [
                 _Avatar(customer: customer, radius: 32),
                 const SizedBox(width: 16),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(customer.name,
-                      style: const TextStyle(
-                        fontSize:   20,
-                        fontWeight: FontWeight.bold,
-                        color:      Color(0xFF1A1A2E),
-                      )),
-                    const SizedBox(height: 6),
-                    Row(children: [
-                      const Icon(Icons.transgender,
-                        size: 14, color: Color(0xFF9E9E9E)),
-                      const SizedBox(width: 4),
-                      Text(customer.gender,
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(customer.name,
                         style: const TextStyle(
-                          fontSize: 13, color: Color(0xFF9E9E9E))),
-                      const SizedBox(width: 12),
-                      Text('Age: ${customer.age}',
-                        style: const TextStyle(
-                          fontSize: 13, color: Color(0xFF9E9E9E))),
-                    ]),
-                    const SizedBox(height: 4),
-                    Row(children: [
-                      const Icon(Icons.phone_outlined,
-                        size: 14, color: Color(0xFF9E9E9E)),
-                      const SizedBox(width: 4),
-                      Text(customer.phone,
-                        style: const TextStyle(
-                          fontSize: 13, color: Color(0xFF9E9E9E))),
-                    ]),
-                  ],
+                          fontSize:   20,
+                          fontWeight: FontWeight.bold,
+                          color:      Color(0xFF1A1A2E),
+                        )),
+                      const SizedBox(height: 6),
+                      Row(children: [
+                        const Icon(Icons.transgender,
+                          size: 14, color: Color(0xFF9E9E9E)),
+                        const SizedBox(width: 4),
+                        Text(customer.gender,
+                          style: const TextStyle(
+                            fontSize: 13, color: Color(0xFF9E9E9E))),
+                        const SizedBox(width: 12),
+                        Text('Age: ${customer.age}',
+                          style: const TextStyle(
+                            fontSize: 13, color: Color(0xFF9E9E9E))),
+                      ]),
+                      const SizedBox(height: 4),
+                      Row(children: [
+                        const Icon(Icons.phone_outlined,
+                          size: 14, color: Color(0xFF9E9E9E)),
+                        const SizedBox(width: 4),
+                        Text(customer.phone,
+                          style: const TextStyle(
+                            fontSize: 13, color: Color(0xFF9E9E9E))),
+                      ]),
+                    ],
+                  ),
                 ),
+                if (showInlineEdit) ...[
+                  const SizedBox(width: 16),
+                  OutlinedButton.icon(
+                    onPressed: onEdit,
+                    icon: const Icon(
+                      Icons.edit_outlined,
+                      size: 16,
+                      color: Color(0xFF1B6B72),
+                    ),
+                    label: const Text(
+                      'Edit',
+                      style: TextStyle(color: Color(0xFF1B6B72)),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Color(0xFF1B6B72)),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 18,
+                        vertical: 14,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -904,6 +955,90 @@ class _DetailPanel extends StatelessWidget {
   }
 }
 
+class _CircleIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onPressed;
+  final String tooltip;
+
+  const _CircleIconButton({
+    required this.icon,
+    required this.onPressed,
+    required this.tooltip,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 38,
+      height: 38,
+      child: IconButton(
+        onPressed: onPressed,
+        tooltip: tooltip,
+        padding: EdgeInsets.zero,
+        icon: Icon(icon, size: 20),
+        color: const Color(0xFF1B6B72),
+        style: IconButton.styleFrom(
+          backgroundColor: const Color(0xFFE8F5F5),
+          shape: const CircleBorder(),
+        ),
+      ),
+    );
+  }
+}
+
+class _TabletDetailHeader extends StatelessWidget {
+  final String title;
+  final String addLabel;
+  final VoidCallback onAdd;
+
+  const _TabletDetailHeader({
+    required this.title,
+    required this.addLabel,
+    required this.onAdd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 76,
+      padding: const EdgeInsets.symmetric(horizontal: 30),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFE6E8EB)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              title,
+              style: const TextStyle(
+                fontSize: 22,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+          ),
+          OutlinedButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add, size: 18),
+            label: Text(addLabel),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: const Color(0xFF1B6B72),
+              side: const BorderSide(color: Color(0xFF1B6B72)),
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────
 // SHARED SMALL WIDGETS
 // ─────────────────────────────────────────────────────────────────
@@ -930,6 +1065,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
   late final TextEditingController _joinDateController;
   late final TextEditingController _notesController;
   bool _saving = false;
+  bool _closing = false;
 
   bool get _isEditing => widget.customer != null;
 
@@ -959,6 +1095,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
   }
 
   Future<void> _save() async {
+    if (_saving || _closing) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
@@ -998,7 +1135,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
         lastVisit: widget.customer?.lastVisit ?? '-',
       );
 
-      if (mounted) Navigator.of(context).pop(savedCustomer);
+      _close(savedCustomer);
     } catch (_) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -1010,6 +1147,14 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
         ),
       );
     }
+  }
+
+  void _close([CustomerModel? result]) {
+    if (_closing || !mounted) return;
+    _closing = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop(result);
+    });
   }
 
   @override
@@ -1043,7 +1188,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                       IconButton(
                         onPressed: _saving
                             ? null
-                            : () => Navigator.of(context).pop(false),
+                            : () => _close(),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -1094,7 +1239,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                         child: TextButton(
                           onPressed: _saving
                               ? null
-                              : () => Navigator.of(context).pop(false),
+                              : () => _close(),
                           style: TextButton.styleFrom(
                             minimumSize: const Size.fromHeight(52),
                             backgroundColor: const Color(0xFFF1F3F6),

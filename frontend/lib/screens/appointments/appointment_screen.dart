@@ -37,14 +37,14 @@ List<String> _readSpecializations(Map<String, dynamic> data) {
 // ── Models ────────────────────────────────────────────────────────
 
 class _Service {
-  final String id, name, emoji, roomType, category;
+  final String id, name, imageUrl, roomType, category;
   final int duration;
   final double price;
 
   const _Service({
     required this.id,
     required this.name,
-    required this.emoji,
+    required this.imageUrl,
     required this.roomType,
     required this.category,
     required this.duration,
@@ -56,7 +56,7 @@ class _Service {
     return _Service(
       id: doc.id,
       name: d['name']?.toString() ?? '',
-      emoji: d['iconEmoji'] ?? '💆',
+      imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
       roomType: _normalizeRoomType(d['roomType']),
       category: d['category']?.toString().trim() ?? 'Services',
       duration: _parseInt(d['duration'], fallback: 60),
@@ -76,6 +76,13 @@ class _Service {
     if (value is String) return double.tryParse(value) ?? 0;
     return 0;
   }
+}
+
+bool _isActiveDoc(Map<String, dynamic> data) {
+  final value = data['isActive'] ?? data['active'];
+  if (value is bool) return value;
+  if (value is String) return value.toLowerCase().trim() == 'true';
+  return true;
 }
 
 class _Therapist {
@@ -143,7 +150,7 @@ class _Therapist {
 }
 
 class _RoomZone {
-  final String id, name, type, floor;
+  final String id, name, type, floor, imageUrl;
   final int totalSlots, freeSlots;
 
   const _RoomZone({
@@ -151,11 +158,10 @@ class _RoomZone {
     required this.name,
     required this.type,
     required this.floor,
+    required this.imageUrl,
     required this.totalSlots,
     required this.freeSlots,
   });
-
-  String get icon => type == 'foot_chair' ? '🪑' : '🛏';
 }
 
 class _TimeSlot {
@@ -267,16 +273,16 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
       for (final doc in snap.docs) {
         final d = doc.data();
-        final active = d['isActive'];
+        final active = _isActiveDoc(d);
         debugLines.add(
-          '${doc.id}: isActive=${_debugValue(active)}, '
+          '${doc.id}: isActive/active=${_debugValue(active)}, '
           'category=${_debugValue(d['category'])}, '
           'roomType=${_debugValue(d['roomType'])}, '
           'duration=${_debugValue(d['duration'])}, '
           'price=${_debugValue(d['price'])}',
         );
 
-        if (active == true) {
+        if (active) {
           services.add(_Service.fromDoc(doc));
         }
       }
@@ -325,12 +331,12 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   Future<void> _loadRooms() async {
     final snap = await FirebaseFirestore.instance
         .collection('rooms')
-        .where('isActive', isEqualTo: true)
         .get();
 
     final zones = <_RoomZone>[];
     for (final doc in snap.docs) {
       final d = doc.data();
+      if (!_isActiveDoc(d)) continue;
       final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
       final freeSlots = await _countFreeSlots(
         doc.id,
@@ -343,6 +349,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           name: d['name'] ?? '',
           type: _normalizeRoomType(d['type'] ?? d['roomType']),
           floor: d['floor'] ?? '',
+          imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
           totalSlots: totalSlots,
           freeSlots: freeSlots,
         ),
@@ -2004,7 +2011,7 @@ class _ServiceCard extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 if (showEmoji) ...[
-                  Text(service.emoji, style: const TextStyle(fontSize: 22)),
+                  _ServiceImage(imageUrl: service.imageUrl),
                   const SizedBox(height: 6),
                 ],
                 Text(
@@ -2043,6 +2050,39 @@ class _ServiceCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ServiceImage extends StatelessWidget {
+  final String imageUrl;
+
+  const _ServiceImage({required this.imageUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 38,
+        height: 38,
+        color: const Color(0xFFE8F5F5),
+        child: imageUrl.isEmpty
+            ? const Icon(
+                Icons.spa_outlined,
+                color: Color(0xFF1B6B72),
+                size: 22,
+              )
+            : Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, error, stackTrace) => const Icon(
+                  Icons.spa_outlined,
+                  color: Color(0xFF1B6B72),
+                  size: 22,
+                ),
+              ),
       ),
     );
   }
@@ -2191,7 +2231,7 @@ class _RoomZoneCard extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Text(zone.icon, style: const TextStyle(fontSize: 22)),
+            _RoomImage(imageUrl: zone.imageUrl, roomType: zone.type),
             const SizedBox(width: 12),
             Expanded(
               child: Column(
@@ -2232,6 +2272,39 @@ class _RoomZoneCard extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _RoomImage extends StatelessWidget {
+  final String imageUrl;
+  final String roomType;
+
+  const _RoomImage({required this.imageUrl, required this.roomType});
+
+  IconData get _fallbackIcon =>
+      roomType == 'foot_chair' ? Icons.chair_outlined : Icons.meeting_room_outlined;
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 38,
+        height: 38,
+        color: const Color(0xFFEDE7F6),
+        child: imageUrl.isEmpty
+            ? Icon(_fallbackIcon, color: const Color(0xFF7C3AED), size: 22)
+            : Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, error, stackTrace) => Icon(
+                  _fallbackIcon,
+                  color: const Color(0xFF7C3AED),
+                  size: 22,
+                ),
+              ),
       ),
     );
   }
