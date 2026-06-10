@@ -11,29 +11,6 @@ String _normalizeRoomType(Object? value) {
   return normalized;
 }
 
-String _normalizeServiceToken(Object? value) {
-  return value?.toString().trim().toLowerCase().replaceAll(
-        RegExp(r'[\s-]+'),
-        '_',
-      ) ??
-      '';
-}
-
-List<String> _readSpecializations(Map<String, dynamic> data) {
-  final raw = data['specializations'] ?? data['specialization'];
-  if (raw is Iterable) {
-    return raw.map(_normalizeServiceToken).where((s) => s.isNotEmpty).toList();
-  }
-  if (raw is String) {
-    return raw
-        .split(',')
-        .map(_normalizeServiceToken)
-        .where((s) => s.isNotEmpty)
-        .toList();
-  }
-  return const [];
-}
-
 // ── Models (reuse same pattern as appointment) ────────────────────
 
 class _WalkInService {
@@ -90,7 +67,6 @@ class _WalkInTherapist {
   final bool isFree;
   final String busyUntil;
   final int freeInMinutes;
-  final List<String> specializations;
 
   const _WalkInTherapist({
     required this.id,
@@ -98,7 +74,6 @@ class _WalkInTherapist {
     required this.isFree,
     required this.busyUntil,
     required this.freeInMinutes,
-    required this.specializations,
   });
 
   factory _WalkInTherapist.fromDoc(
@@ -114,7 +89,6 @@ class _WalkInTherapist {
       isFree: isFree,
       busyUntil: busyUntil,
       freeInMinutes: freeInMinutes,
-      specializations: _readSpecializations(d),
     );
   }
 
@@ -139,22 +113,6 @@ class _WalkInTherapist {
     return colors[name.length % colors.length];
   }
 
-  bool canDoService(String roomType) {
-    final serviceRoomType = _normalizeRoomType(roomType);
-    if (serviceRoomType.isEmpty) return true;
-    final normalized = specializations.toSet();
-    if (normalized.isEmpty) return true;
-    if (serviceRoomType == 'body_room') {
-      return normalized.contains('body_massage') ||
-          normalized.contains('body_room');
-    }
-    if (serviceRoomType == 'foot_chair') {
-      return normalized.contains('foot_therapy') ||
-          normalized.contains('foot_massage') ||
-          normalized.contains('foot_chair');
-    }
-    return false;
-  }
 }
 
 class _WalkInZone {
@@ -242,10 +200,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   List<_WalkInCustomer> _filteredCustomers = [];
   List<_StartTimeOption> _startOptions = [];
   bool _loadingData = true;
-  int _serviceDocCount = 0;
-  int _serviceActiveCount = 0;
   String? _serviceLoadError;
-  List<String> _serviceDebugLines = [];
 
   final _searchController = TextEditingController();
 
@@ -294,54 +249,26 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           .collection('services')
           .get();
       final services = <_WalkInService>[];
-      final debugLines = <String>[];
 
       for (final doc in snap.docs) {
         final d = doc.data();
         final active = _isActiveDoc(d);
-        debugLines.add(
-          '${doc.id}: isActive/active=${_debugValue(active)}, '
-          'category=${_debugValue(d['category'])}, '
-          'roomType=${_debugValue(d['roomType'])}, '
-          'duration=${_debugValue(d['duration'])}, '
-          'price=${_debugValue(d['price'])}',
-        );
 
         if (active) {
           services.add(_WalkInService.fromDoc(doc));
         }
       }
 
-      debugPrint(
-        'Order services debug: ${snap.docs.length} docs, '
-        '${services.length} active',
-      );
-      for (final line in debugLines) {
-        debugPrint('Order service: $line');
-      }
-
       setState(() {
         _services = services;
-        _serviceDocCount = snap.docs.length;
-        _serviceActiveCount = services.length;
         _serviceLoadError = null;
-        _serviceDebugLines = debugLines;
       });
     } catch (e) {
-      debugPrint('Order services load failed: $e');
       setState(() {
         _services = [];
-        _serviceDocCount = 0;
-        _serviceActiveCount = 0;
         _serviceLoadError = e.toString();
-        _serviceDebugLines = [];
       });
     }
-  }
-
-  String _debugValue(Object? value) {
-    if (value == null) return 'null';
-    return '"$value" (${value.runtimeType})';
   }
 
   Future<void> _loadTherapistsLive() async {
@@ -954,14 +881,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               .toList(),
         ),
         if (filtered.isEmpty || _serviceLoadError != null) ...[
-          _ServiceDebugPanel(
-            totalDocs: _serviceDocCount,
-            activeDocs: _serviceActiveCount,
-            visibleDocs: filtered.length,
-            selectedTab: _serviceTab,
-            error: _serviceLoadError,
-            lines: _serviceDebugLines,
-          ),
+          _ServiceEmptyState(tab: _serviceTab, error: _serviceLoadError),
           const SizedBox(height: 12),
         ],
         GridView.builder(
@@ -985,22 +905,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Widget _buildAvailabilitySection() {
-    final compatibleTherapists = _therapists
-        .where(
-          (t) =>
-              _selectedService == null ||
-              t.canDoService(_selectedService!.roomType),
-        )
-        .toList();
-
-    final incompatibleTherapists = _therapists
-        .where(
-          (t) =>
-              _selectedService != null &&
-              !t.canDoService(_selectedService!.roomType),
-        )
-        .toList();
-
     final compatibleZones = _zones
         .where(
           (z) =>
@@ -1021,7 +925,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
         const _WalkInSubLabel('Available Therapists Now'),
         const SizedBox(height: 10),
-        ...compatibleTherapists.map(
+        ..._therapists.map(
           (t) => Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: _WalkInTherapistRow(
@@ -1029,17 +933,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               isSelected: _selectedTherapist?.id == t.id,
               isDisabled: false,
               onTap: () => _onTherapistSelected(t),
-            ),
-          ),
-        ),
-        ...incompatibleTherapists.map(
-          (t) => Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _WalkInTherapistRow(
-              therapist: t,
-              isSelected: false,
-              isDisabled: true,
-              onTap: null,
             ),
           ),
         ),
@@ -2150,73 +2043,49 @@ class _WalkInCustomerSearch extends StatelessWidget {
   }
 }
 
-class _ServiceDebugPanel extends StatelessWidget {
-  final int totalDocs;
-  final int activeDocs;
-  final int visibleDocs;
-  final String selectedTab;
+class _ServiceEmptyState extends StatelessWidget {
+  final String tab;
   final String? error;
-  final List<String> lines;
 
-  const _ServiceDebugPanel({
-    required this.totalDocs,
-    required this.activeDocs,
-    required this.visibleDocs,
-    required this.selectedTab,
-    required this.error,
-    required this.lines,
-  });
+  const _ServiceEmptyState({required this.tab, required this.error});
 
   @override
   Widget build(BuildContext context) {
-    final preview = lines.take(5).toList();
+    final hasError = error != null;
 
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E1),
+        color: hasError ? const Color(0xFFFFF1F2) : const Color(0xFFF8FAFC),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFFFD54F)),
+        border: Border.all(
+          color: hasError ? const Color(0xFFFECACA) : const Color(0xFFE5E7EB),
+        ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          const Text(
-            'Service Debug',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1A1A2E),
-            ),
+          Icon(
+            hasError ? Icons.error_outline : Icons.inventory_2_outlined,
+            color: hasError ? const Color(0xFFE53935) : const Color(0xFF6B7280),
+            size: 20,
           ),
-          const SizedBox(height: 6),
-          Text(
-            'Firestore docs: $totalDocs | isActive true: $activeDocs | '
-            'visible in "$selectedTab": $visibleDocs',
-            style: const TextStyle(fontSize: 12, color: Color(0xFF5F6B7A)),
-          ),
-          if (error != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              'Load error: $error',
-              style: const TextStyle(fontSize: 12, color: Color(0xFFE53935)),
-            ),
-          ],
-          if (preview.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            for (final line in preview)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  line,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF5F6B7A),
-                  ),
-                ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              hasError
+                  ? 'Unable to load services right now.'
+                  : 'No $tab available right now.',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: hasError
+                    ? const Color(0xFFB91C1C)
+                    : const Color(0xFF4B5563),
               ),
-          ],
+            ),
+          ),
         ],
       ),
     );

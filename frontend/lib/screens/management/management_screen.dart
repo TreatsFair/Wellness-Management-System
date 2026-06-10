@@ -952,7 +952,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                   const SizedBox(height: 12),
                   _FormField(label: 'Room Type', controller: _roomType, hint: 'body_room / foot_chair'),
                   const SizedBox(height: 12),
-                  _FormField(label: 'Image URL', controller: _imageUrl, hint: 'https://...'),
+                  _FormField(label: 'Service Picture URL', controller: _imageUrl, hint: 'https://...'),
                 ] else ...[
                   _FormField(label: 'Room Type', controller: _roomType, hint: 'body_room / foot_chair'),
                   const SizedBox(height: 12),
@@ -966,7 +966,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                   const SizedBox(height: 12),
                   _FormField(label: 'Equipment', controller: _equipment, maxLines: 3),
                   const SizedBox(height: 12),
-                  _FormField(label: 'Image URL', controller: _imageUrl, hint: 'https://...'),
+                  _FormField(label: 'Room Picture URL', controller: _imageUrl, hint: 'https://...'),
                 ],
                 const SizedBox(height: 12),
                 SwitchListTile(

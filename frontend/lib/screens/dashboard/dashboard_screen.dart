@@ -3,11 +3,11 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
 import '../appointments/appointment_screen.dart';
+import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
 import '../orders/order_screen.dart';
 import '../management/management_screen.dart';
 
-// TODO: replace with Firestore call in Week 7.
 class _DashboardStats {
   final int todayAppointments;
   final int tomorrowAppointments;
@@ -122,7 +122,6 @@ class _TransactionSummary {
   });
 }
 
-// TODO: replace with Firestore call in Week 7.
 const _placeholderBusinessProfile = _BusinessProfile(
   name: 'The Best Family Wellness',
   location: 'Kuala Lumpur',
@@ -131,7 +130,6 @@ const _placeholderBusinessProfile = _BusinessProfile(
 
 const _businessSettingsDocumentId = 'mAERFw4PbxfgzILaNV1X';
 
-// TODO: replace with Firestore call in Week 7.
 const _placeholderTherapists = [
   _TherapistStatus(
     name: 'Aisha Rahman',
@@ -159,7 +157,6 @@ const _placeholderTherapists = [
   ),
 ];
 
-// TODO: replace with Firestore call in Week 7.
 const _placeholderPendingOrder = _PendingOrder(
   customerName: 'Lim Wei Xin',
   phone: '(6010) 234-5678',
@@ -167,7 +164,6 @@ const _placeholderPendingOrder = _PendingOrder(
   pendingCount: 2,
 );
 
-// TODO: replace with Firestore call in Week 7.
 const _placeholderTransactions = [
   _TransactionSummary(
     customerName: 'Lim Wei Xin',
@@ -280,8 +276,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           }
           userData = (selectedDoc ?? userDocs.first).data();
         }
-      } on FirebaseException catch (e) {
-        debugPrint('Unable to load user role by email: ${e.code}');
+      } on FirebaseException {
+        // Keep the default staff role when the optional user lookup fails.
       }
     }
 
@@ -292,8 +288,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             .doc(uid)
             .get(const GetOptions(source: Source.server));
         userData = userByUidSnapshot.data();
-      } on FirebaseException catch (e) {
-        debugPrint('Unable to load user role by uid: ${e.code}');
+      } on FirebaseException {
+        // Keep the default staff role when the optional user lookup fails.
       }
     }
 
@@ -320,8 +316,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           settingsDocumentId: settingsDoc.id,
         );
       }
-    } on FirebaseException catch (e) {
-      debugPrint('Unable to load business settings: ${e.code}');
+    } on FirebaseException {
+      // Keep the placeholder business profile when settings are unavailable.
     }
 
     if (!mounted) return;
@@ -474,7 +470,7 @@ class _TabletLayout extends StatelessWidget {
                       Expanded(child: _TabletOrdersCard()),
                       const SizedBox(width: 16),
                       // Appointment card
-                      Expanded(child: _TabletAppointmentCard()),
+                      Expanded(child: _TabletAppointmentCard(role: role)),
                       const SizedBox(width: 16),
                       // Therapists card
                       Expanded(child: _TabletTherapistsCard(role: role)),
@@ -824,45 +820,55 @@ class _TabletOrdersCard extends StatelessWidget {
 }
 
 class _TabletAppointmentCard extends StatelessWidget {
+  final String role;
+
+  const _TabletAppointmentCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
     final stats = _DashboardStats.placeholder;
 
-    return _TabletCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              _IconBox(
-                icon: Icons.calendar_today_outlined,
-                bg: const Color(0xFFE8F5E9),
-                color: const Color(0xFF1B6B72),
-              ),
-              const SizedBox(width: 12),
-              const Text(
-                'Appointment',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
+    return GestureDetector(
+      onTap: () => Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
+      ),
+      child: _TabletCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _IconBox(
+                  icon: Icons.calendar_today_outlined,
+                  bg: const Color(0xFFE8F5E9),
+                  color: const Color(0xFF1B6B72),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-          const Text(
-            'Total',
-            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-          ),
-          const SizedBox(height: 10),
-          _AppointmentRow(label: 'Today', count: '${stats.todayAppointments}'),
-          const SizedBox(height: 10),
-          _AppointmentRow(
-            label: 'Tomorrow',
-            count: '${stats.tomorrowAppointments}',
-          ),
-        ],
+                const SizedBox(width: 12),
+                const Text(
+                  'Appointment',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Total',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            ),
+            const SizedBox(height: 10),
+            _AppointmentRow(label: 'Today', count: '${stats.todayAppointments}'),
+            const SizedBox(height: 10),
+            _AppointmentRow(
+              label: 'Tomorrow',
+              count: '${stats.tomorrowAppointments}',
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1014,7 +1020,7 @@ class _PhoneLayout extends StatelessWidget {
                 // Row 1: Appointments + Quick Book
                 Row(
                   children: [
-                    Expanded(child: _PhoneAppointmentCard()),
+                    Expanded(child: _PhoneAppointmentCard(role: role)),
                     const SizedBox(width: 12),
                     Expanded(child: _PhoneQuickBookCard(role: role)),
                   ],
@@ -1204,6 +1210,10 @@ class _PhoneTopBar extends StatelessWidget {
 }
 
 class _PhoneAppointmentCard extends StatelessWidget {
+  final String role;
+
+  const _PhoneAppointmentCard({required this.role});
+
   @override
   Widget build(BuildContext context) {
     final stats = _DashboardStats.placeholder;
@@ -1211,7 +1221,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
     return GestureDetector(
       onTap: () => Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
+        MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
       ),
       child: _PhoneCard(
         child: Column(

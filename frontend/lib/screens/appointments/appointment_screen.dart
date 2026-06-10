@@ -1,1395 +1,867 @@
-import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
-String _normalizeRoomType(Object? value) {
-  final raw = value?.toString().trim().toLowerCase() ?? '';
-  if (raw.isEmpty || raw == '-') return '';
-  final normalized = raw.replaceAll(RegExp(r'[\s-]+'), '_');
-  if (normalized.contains('body')) return 'body_room';
-  if (normalized.contains('foot')) return 'foot_chair';
-  return normalized;
+import '../booking/booking_screen.dart';
+
+DateTime _stripTime(DateTime date) => DateTime(date.year, date.month, date.day);
+
+int _timeToMinutes(String time) {
+  final parts = time.split(':');
+  if (parts.length < 2) return 0;
+  final hour = int.tryParse(parts[0]) ?? 0;
+  final minute = int.tryParse(parts[1]) ?? 0;
+  return hour * 60 + minute;
 }
 
-String _normalizeServiceToken(Object? value) {
-  return value?.toString().trim().toLowerCase().replaceAll(
-        RegExp(r'[\s-]+'),
-        '_',
-      ) ??
-      '';
+String _hourLabel(int hour) {
+  final normalized = hour % 24;
+  final displayHour = normalized == 0
+      ? 12
+      : normalized > 12
+      ? normalized - 12
+      : normalized;
+  return '$displayHour${normalized < 12 ? 'am' : 'pm'}';
 }
 
-List<String> _readSpecializations(Map<String, dynamic> data) {
-  final raw = data['specializations'] ?? data['specialization'];
-  if (raw is Iterable) {
-    return raw.map(_normalizeServiceToken).where((s) => s.isNotEmpty).toList();
-  }
-  if (raw is String) {
-    return raw
-        .split(',')
-        .map(_normalizeServiceToken)
-        .where((s) => s.isNotEmpty)
-        .toList();
-  }
-  return const [];
+double _readDouble(Object? value) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? 0;
+  return 0;
 }
 
-// ── Models ────────────────────────────────────────────────────────
-
-class _Service {
-  final String id, name, imageUrl, roomType, category;
-  final int duration;
+class _ScheduleAppointment {
+  final String id;
+  final String dateKey;
+  final DateTime date;
+  final String startTime;
+  final String endTime;
+  final String status;
+  final String customerName;
+  final String customerPhone;
+  final String serviceName;
+  final String serviceDescription;
+  final String therapistName;
+  final String roomName;
+  final String notes;
   final double price;
 
-  const _Service({
+  const _ScheduleAppointment({
     required this.id,
-    required this.name,
-    required this.imageUrl,
-    required this.roomType,
-    required this.category,
-    required this.duration,
+    required this.dateKey,
+    required this.date,
+    required this.startTime,
+    required this.endTime,
+    required this.status,
+    required this.customerName,
+    required this.customerPhone,
+    required this.serviceName,
+    required this.serviceDescription,
+    required this.therapistName,
+    required this.roomName,
+    required this.notes,
     required this.price,
   });
 
-  factory _Service.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
-    return _Service(
+  factory _ScheduleAppointment.fromDoc(
+    QueryDocumentSnapshot<Map<String, dynamic>> doc, {
+    required Map<String, Map<String, dynamic>> customers,
+    required Map<String, Map<String, dynamic>> services,
+    required Map<String, Map<String, dynamic>> therapists,
+    required Map<String, Map<String, dynamic>> rooms,
+  }) {
+    final data = doc.data();
+    final customer = customers[data['customerId']?.toString() ?? ''];
+    final service = services[data['serviceId']?.toString() ?? ''];
+    final therapist = therapists[data['therapistId']?.toString() ?? ''];
+    final room = rooms[data['roomId']?.toString() ?? ''];
+    final dateKey = _readDateKey(data['date']);
+
+    return _ScheduleAppointment(
       id: doc.id,
-      name: d['name']?.toString() ?? '',
-      imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
-      roomType: _normalizeRoomType(d['roomType']),
-      category: d['category']?.toString().trim() ?? 'Services',
-      duration: _parseInt(d['duration'], fallback: 60),
-      price: _parseDouble(d['price']),
+      dateKey: dateKey,
+      date: _readDate(dateKey, data['date']),
+      startTime: data['startTime']?.toString() ?? '09:00',
+      endTime: data['endTime']?.toString() ?? '10:00',
+      status: data['status']?.toString().trim().toLowerCase() ?? 'pending',
+      customerName:
+          data['customerName']?.toString() ??
+          customer?['name']?.toString() ??
+          'Customer',
+      customerPhone:
+          data['customerPhone']?.toString() ??
+          customer?['phone']?.toString() ??
+          '-',
+      serviceName:
+          data['serviceName']?.toString() ??
+          service?['name']?.toString() ??
+          'Service',
+      serviceDescription:
+          data['serviceDescription']?.toString() ??
+          service?['description']?.toString() ??
+          'Wellness treatment',
+      therapistName:
+          data['therapistName']?.toString() ??
+          therapist?['name']?.toString() ??
+          'Unassigned',
+      roomName:
+          data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
+      notes: data['notes']?.toString() ?? '',
+      price: _readDouble(data['totalPrice'] ?? data['price']),
     );
   }
 
-  static int _parseInt(Object? value, {required int fallback}) {
-    if (value is int) return value;
-    if (value is num) return value.round();
-    if (value is String) return int.tryParse(value) ?? fallback;
-    return fallback;
+  static String _readDateKey(Object? value) {
+    if (value is Timestamp) return DateFormat('yyyy-MM-dd').format(value.toDate());
+    final raw = value?.toString().trim() ?? '';
+    if (raw.isEmpty) return DateFormat('yyyy-MM-dd').format(DateTime.now());
+    return raw.length >= 10 ? raw.substring(0, 10) : raw;
   }
 
-  static double _parseDouble(Object? value) {
-    if (value is num) return value.toDouble();
-    if (value is String) return double.tryParse(value) ?? 0;
-    return 0;
+  static DateTime _readDate(String dateKey, Object? value) {
+    if (value is Timestamp) return _stripTime(value.toDate());
+    return DateTime.tryParse(dateKey) ?? _stripTime(DateTime.now());
   }
-}
 
-bool _isActiveDoc(Map<String, dynamic> data) {
-  final value = data['isActive'] ?? data['active'];
-  if (value is bool) return value;
-  if (value is String) return value.toLowerCase().trim() == 'true';
-  return true;
-}
+  int get startMinutes => _timeToMinutes(startTime);
+  int get endMinutes => _timeToMinutes(endTime);
+  int get hour => startMinutes ~/ 60;
+  int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
+  String get timeRange => '$startTime - $endTime';
+  bool get isPending => status == 'pending';
+  bool get isConfirmed => status == 'confirmed';
+  bool get isInProgress => status == 'in_progress';
+  bool get isCompleted => status == 'completed';
+  bool get isCancelled => status == 'cancelled' || status == 'canceled';
 
-class _Therapist {
-  final String id, name;
-  final bool isFree;
-  final String busyUntil;
-  final List<String> specializations;
-
-  const _Therapist({
-    required this.id,
-    required this.name,
-    required this.isFree,
-    required this.busyUntil,
-    required this.specializations,
-  });
-
-  factory _Therapist.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
-    return _Therapist(
-      id: doc.id,
-      name: d['name'] ?? '',
-      isFree: d['availabilityStatus'] ?? true,
-      busyUntil: d['busyUntil'] ?? '',
-      specializations: _readSpecializations(d),
-    );
+  String get statusLabel {
+    switch (status) {
+      case 'confirmed':
+        return 'Confirmed';
+      case 'in_progress':
+        return 'In Progress';
+      case 'completed':
+        return 'Completed';
+      case 'cancelled':
+      case 'canceled':
+        return 'Cancelled';
+      default:
+        return 'Pending';
+    }
   }
 
   String get initials {
-    final p = name.trim().split(' ');
-    return p.length >= 2
-        ? '${p[0][0]}${p[1][0]}'.toUpperCase()
-        : name.isNotEmpty
-        ? name[0].toUpperCase()
-        : '?';
-  }
-
-  Color get avatarColor {
-    final colors = [
-      const Color(0xFF1B6B72),
-      const Color(0xFF7C3AED),
-      const Color(0xFF2196F3),
-      const Color(0xFF4CAF50),
-      const Color(0xFFE91E8C),
-      const Color(0xFFFF5722),
-    ];
-    return colors[name.length % colors.length];
-  }
-
-  bool canDoService(String roomType) {
-    final serviceRoomType = _normalizeRoomType(roomType);
-    if (serviceRoomType.isEmpty) return true;
-    final normalized = specializations.toSet();
-    if (normalized.isEmpty) return true;
-    if (serviceRoomType == 'body_room') {
-      return normalized.contains('body_massage') ||
-          normalized.contains('body_room');
+    final parts = customerName.trim().split(RegExp(r'\s+'));
+    if (parts.length >= 2) {
+      return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
     }
-    if (serviceRoomType == 'foot_chair') {
-      return normalized.contains('foot_therapy') ||
-          normalized.contains('foot_massage') ||
-          normalized.contains('foot_chair');
-    }
-    return false;
+    return customerName.isEmpty ? '?' : customerName[0].toUpperCase();
+  }
+
+  bool matches(String query) {
+    final q = query.trim().toLowerCase();
+    if (q.isEmpty) return true;
+    return customerName.toLowerCase().contains(q) ||
+        customerPhone.toLowerCase().contains(q) ||
+        serviceName.toLowerCase().contains(q) ||
+        therapistName.toLowerCase().contains(q) ||
+        roomName.toLowerCase().contains(q);
   }
 }
 
-class _RoomZone {
-  final String id, name, type, floor, imageUrl;
-  final int totalSlots, freeSlots;
-
-  const _RoomZone({
-    required this.id,
-    required this.name,
-    required this.type,
-    required this.floor,
-    required this.imageUrl,
-    required this.totalSlots,
-    required this.freeSlots,
-  });
-}
-
-class _TimeSlot {
-  final String start, end;
-  final bool isRecommended, isAvailable;
-
-  const _TimeSlot({
-    required this.start,
-    required this.end,
-    required this.isRecommended,
-    required this.isAvailable,
-  });
-
-  String get label => '$start–$end';
-}
-
-class _Customer {
-  final String id, name, phone;
-  const _Customer({required this.id, required this.name, required this.phone});
-
-  factory _Customer.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
-    return _Customer(
-      id: doc.id,
-      name: d['name'] ?? '',
-      phone: d['phone'] ?? '',
-    );
-  }
-}
-
-// ── Main Screen ───────────────────────────────────────────────────
-
-class NewAppointmentScreen extends StatefulWidget {
+class AppointmentsScreen extends StatefulWidget {
   final String userRole;
-  const NewAppointmentScreen({super.key, required this.userRole});
+
+  const AppointmentsScreen({super.key, required this.userRole});
 
   @override
-  State<NewAppointmentScreen> createState() => _NewAppointmentScreenState();
+  State<AppointmentsScreen> createState() => _AppointmentsScreenState();
 }
 
-class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
-  // State
-  DateTime _selectedDate = DateTime.now();
-  _Customer? _selectedCustomer;
-  _Service? _selectedService;
-  _Therapist? _selectedTherapist;
-  _RoomZone? _selectedRoom;
-  _TimeSlot? _selectedSlot;
-  String _serviceTab = 'Services';
-  bool _summaryExpanded = false;
-  bool _isConfirming = false;
-
-  // Data
-  List<_Service> _services = [];
-  List<_Therapist> _therapists = [];
-  List<_RoomZone> _rooms = [];
-  List<_TimeSlot> _slots = [];
-  List<_Customer> _customers = [];
-  List<_Customer> _filteredCustomers = [];
-  bool _loadingData = true;
-  int _serviceDocCount = 0;
-  int _serviceActiveCount = 0;
-  String? _serviceLoadError;
-  List<String> _serviceDebugLines = [];
-
-  final _customerSearchController = TextEditingController();
-
-  // CSP — operating hours
+class _AppointmentsScreenState extends State<AppointmentsScreen> {
   static const int _openHour = 9;
-  static const int _closeHour = 21;
-  static const int _slotStep = 30; // minutes
+  static const int _closeHour = 24;
+
+  late DateTime _selectedDate;
+  late DateTime _windowStart;
+  final _searchController = TextEditingController();
+  List<_ScheduleAppointment> _appointments = [];
+  _ScheduleAppointment? _selectedAppointment;
+  bool _loading = true;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    _loadData();
-    _customerSearchController.addListener(_filterCustomers);
+    _selectedDate = _stripTime(DateTime.now());
+    _windowStart = _startOfWeek(_selectedDate);
+    _searchController.addListener(() => setState(() {}));
+    _loadAppointments();
   }
 
   @override
   void dispose() {
-    _customerSearchController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
-  // ── Data Loading ───────────────────────────────────────────────
-
-  Future<void> _loadData() async {
-    setState(() => _loadingData = true);
-    try {
-      await Future.wait([
-        _loadServices(),
-        _loadTherapists(),
-        _loadRooms(),
-        _loadCustomers(),
-      ]);
-    } finally {
-      setState(() => _loadingData = false);
-    }
+  static DateTime _startOfWeek(DateTime date) {
+    final clean = _stripTime(date);
+    return clean.subtract(Duration(days: clean.weekday % 7));
   }
 
-  Future<void> _loadServices() async {
-    try {
-      final snap = await FirebaseFirestore.instance
-          .collection('services')
-          .get(const GetOptions(source: Source.server));
-      final services = <_Service>[];
-      final debugLines = <String>[];
+  String _dateKey(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
 
-      for (final doc in snap.docs) {
-        final d = doc.data();
-        final active = _isActiveDoc(d);
-        debugLines.add(
-          '${doc.id}: isActive/active=${_debugValue(active)}, '
-          'category=${_debugValue(d['category'])}, '
-          'roomType=${_debugValue(d['roomType'])}, '
-          'duration=${_debugValue(d['duration'])}, '
-          'price=${_debugValue(d['price'])}',
-        );
+  List<DateTime> get _visibleDays =>
+      List.generate(7, (index) => _windowStart.add(Duration(days: index)));
 
-        if (active) {
-          services.add(_Service.fromDoc(doc));
-        }
-      }
+  List<_ScheduleAppointment> get _filteredAppointments {
+    return _appointments.where((a) => a.matches(_searchController.text)).toList();
+  }
 
-      debugPrint(
-        'Quick Book services debug: ${snap.docs.length} docs, '
-        '${services.length} active',
+  List<_ScheduleAppointment> get _selectedDayAppointments {
+    final key = _dateKey(_selectedDate);
+    final list = _filteredAppointments.where((a) => a.dateKey == key).toList();
+    list.sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+    return list;
+  }
+
+  List<_ScheduleAppointment> _appointmentsForDay(DateTime date) {
+    final key = _dateKey(date);
+    return _appointments.where((a) => a.dateKey == key).toList();
+  }
+
+  int get _pendingCount =>
+      _selectedDayAppointments.where((a) => a.isPending).length;
+
+  double get _selectedDaySales => _selectedDayAppointments.fold<double>(
+        0,
+        (total, appointment) => total + appointment.price,
       );
-      for (final line in debugLines) {
-        debugPrint('Quick Book service: $line');
+
+  Future<void> _loadAppointments() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
+      final startKey = _dateKey(_windowStart);
+      final endKey = _dateKey(_windowStart.add(const Duration(days: 6)));
+      final appointmentSnap = await FirebaseFirestore.instance
+          .collection('appointments')
+          .where('date', isGreaterThanOrEqualTo: startKey)
+          .where('date', isLessThanOrEqualTo: endKey)
+          .get();
+      final customerSnap =
+          await FirebaseFirestore.instance.collection('customers').get();
+      final serviceSnap =
+          await FirebaseFirestore.instance.collection('services').get();
+      final therapistSnap =
+          await FirebaseFirestore.instance.collection('therapists').get();
+      final roomSnap =
+          await FirebaseFirestore.instance.collection('rooms').get();
+
+      Map<String, Map<String, dynamic>> toMap(
+        QuerySnapshot<Map<String, dynamic>> snap,
+      ) {
+        return {for (final doc in snap.docs) doc.id: doc.data()};
       }
 
+      final customers = toMap(customerSnap);
+      final services = toMap(serviceSnap);
+      final therapists = toMap(therapistSnap);
+      final rooms = toMap(roomSnap);
+
+      final appointments = appointmentSnap.docs
+          .where((doc) {
+            final type = doc.data()['type']?.toString().trim().toLowerCase();
+            return type == null || type.isEmpty || type == 'appointment';
+          })
+          .map(
+            (doc) => _ScheduleAppointment.fromDoc(
+              doc,
+              customers: customers,
+              services: services,
+              therapists: therapists,
+              rooms: rooms,
+            ),
+          )
+          .where((appointment) => !appointment.isCancelled)
+          .toList()
+        ..sort((a, b) {
+          final dateCompare = a.dateKey.compareTo(b.dateKey);
+          if (dateCompare != 0) return dateCompare;
+          return a.startMinutes.compareTo(b.startMinutes);
+        });
+
+      if (!mounted) return;
       setState(() {
-        _services = services;
-        _serviceDocCount = snap.docs.length;
-        _serviceActiveCount = services.length;
-        _serviceLoadError = null;
-        _serviceDebugLines = debugLines;
+        _appointments = appointments;
+        if (_selectedAppointment != null) {
+          final matches = appointments
+              .where((a) => a.id == _selectedAppointment!.id)
+              .toList();
+          _selectedAppointment = matches.isEmpty ? null : matches.first;
+        }
       });
     } catch (e) {
-      debugPrint('Quick Book services load failed: $e');
-      setState(() {
-        _services = [];
-        _serviceDocCount = 0;
-        _serviceActiveCount = 0;
-        _serviceLoadError = e.toString();
-        _serviceDebugLines = [];
-      });
+      if (mounted) setState(() => _error = e.toString());
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 
-  String _debugValue(Object? value) {
-    if (value == null) return 'null';
-    return '"$value" (${value.runtimeType})';
-  }
-
-  Future<void> _loadTherapists() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('therapists')
-        .get();
+  void _moveDays(int days) {
     setState(() {
-      _therapists = snap.docs.map((d) => _Therapist.fromDoc(d)).toList();
+      _windowStart = _windowStart.add(Duration(days: days));
+      _selectedDate = _selectedDate.add(Duration(days: days));
+      _selectedAppointment = null;
     });
+    _loadAppointments();
   }
 
-  Future<void> _loadRooms() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('rooms')
-        .get();
-
-    final zones = <_RoomZone>[];
-    for (final doc in snap.docs) {
-      final d = doc.data();
-      if (!_isActiveDoc(d)) continue;
-      final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
-      final freeSlots = await _countFreeSlots(
-        doc.id,
-        totalSlots,
-        _selectedDate,
-      );
-      zones.add(
-        _RoomZone(
-          id: doc.id,
-          name: d['name'] ?? '',
-          type: _normalizeRoomType(d['type'] ?? d['roomType']),
-          floor: d['floor'] ?? '',
-          imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
-          totalSlots: totalSlots,
-          freeSlots: freeSlots,
-        ),
-      );
-    }
-    setState(() => _rooms = zones);
-  }
-
-  int _parseInt(Object? value, {required int fallback}) {
-    if (value is int) return value;
-    if (value is num) return value.round();
-    if (value is String) return int.tryParse(value) ?? fallback;
-    return fallback;
-  }
-
-  Future<int> _countFreeSlots(
-    String roomId,
-    int totalSlots,
-    DateTime date,
-  ) async {
-    final dateStr = DateFormat('yyyy-MM-dd').format(date);
-    final snap = await FirebaseFirestore.instance
-        .collection('appointments')
-        .where('roomId', isEqualTo: roomId)
-        .where('date', isEqualTo: dateStr)
-        .where('status', whereIn: ['confirmed', 'in_progress'])
-        .get();
-    return (totalSlots - snap.docs.length).clamp(0, totalSlots);
-  }
-
-  Future<void> _loadCustomers() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('customers')
-        .orderBy('name')
-        .get();
-    setState(() {
-      _customers = snap.docs.map((d) => _Customer.fromDoc(d)).toList();
-      _filteredCustomers = _customers;
-    });
-  }
-
-  void _filterCustomers() {
-    final q = _customerSearchController.text.toLowerCase();
-    setState(() {
-      _filteredCustomers = _customers
-          .where(
-            (c) =>
-                c.name.toLowerCase().contains(q) ||
-                c.phone.toLowerCase().contains(q),
-          )
-          .toList();
-    });
-  }
-
-  String _todayString() => DateFormat('yyyy-MM-dd').format(DateTime.now());
-
-  Future<void> _openAddCustomerDialog() async {
-    final savedCustomer = await showDialog<_Customer>(
+  Future<void> _openCalendarPicker() async {
+    final picked = await showDialog<DateTime>(
       context: context,
-      builder: (context) => _QuickCustomerDialog(
-        defaultJoinDate: _todayString(),
-        customerBuilder: (id, data) => _Customer(
-          id: id,
-          name: data['name'] ?? '',
-          phone: data['phone'] ?? '',
+      builder: (context) => _MonthCalendarDialog(initialDate: _selectedDate),
+    );
+    if (picked == null) return;
+
+    setState(() {
+      _selectedDate = _stripTime(picked);
+      _windowStart = _startOfWeek(picked);
+      _selectedAppointment = null;
+    });
+    _loadAppointments();
+  }
+
+  void _selectDate(DateTime date) {
+    setState(() {
+      _selectedDate = _stripTime(date);
+      _selectedAppointment = null;
+    });
+  }
+
+  Future<void> _openBooking() async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NewAppointmentScreen(userRole: widget.userRole),
+      ),
+    );
+    if (mounted) _loadAppointments();
+  }
+
+  Future<void> _updateStatus(
+    _ScheduleAppointment appointment,
+    String status,
+  ) async {
+    await FirebaseFirestore.instance
+        .collection('appointments')
+        .doc(appointment.id)
+        .update({
+      'status': status,
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    await _loadAppointments();
+  }
+
+  Future<void> _cancelAppointment(_ScheduleAppointment appointment) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Cancel appointment?'),
+        content: Text(
+          '${appointment.customerName} at ${appointment.timeRange} will be marked as cancelled.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Keep'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFE53935),
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Cancel Appointment'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await _updateStatus(appointment, 'cancelled');
+    if (mounted) setState(() => _selectedAppointment = null);
+  }
+
+  Future<void> _openEdit(_ScheduleAppointment appointment) async {
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _AppointmentEditSheet(appointment: appointment),
+    );
+    if (saved == true && mounted) {
+      await _loadAppointments();
+    }
+  }
+
+  void _showMobileSummary(_ScheduleAppointment appointment) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      isScrollControlled: true,
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            0,
+            16,
+            MediaQuery.of(context).viewInsets.bottom + 16,
+          ),
+          child: _AppointmentSummaryPanel(
+            appointment: appointment,
+            compact: true,
+            onClose: () => Navigator.pop(context),
+            onConfirm: appointment.isPending
+                ? () async {
+                    Navigator.pop(context);
+                    await _updateStatus(appointment, 'confirmed');
+                  }
+                : null,
+            onEdit: () async {
+              Navigator.pop(context);
+              await _openEdit(appointment);
+            },
+            onStart: appointment.isConfirmed
+                ? () async {
+                    Navigator.pop(context);
+                    await _updateStatus(appointment, 'in_progress');
+                  }
+                : null,
+            onComplete: appointment.isConfirmed || appointment.isInProgress
+                ? () async {
+                    Navigator.pop(context);
+                    await _updateStatus(appointment, 'completed');
+                  }
+                : null,
+            onCancel: appointment.isCompleted
+                ? null
+                : () async {
+                    Navigator.pop(context);
+                    await _cancelAppointment(appointment);
+                  },
+          ),
         ),
       ),
     );
-
-    if (savedCustomer == null) return;
-
-    setState(() {
-      _customers = [..._customers, savedCustomer]
-        ..sort((a, b) => a.name.compareTo(b.name));
-      _filteredCustomers = _customers;
-      _selectedCustomer = savedCustomer;
-      _customerSearchController.text = savedCustomer.name;
-    });
   }
 
-  // ── CSP — Slot Generation ──────────────────────────────────────
-
-  Future<void> _generateSlots() async {
-    if (_selectedService == null) return;
-    if (_selectedTherapist == null) return;
-    if (_selectedRoom == null) return;
-
-    final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-    final duration = _selectedService!.duration;
-
-    // Fetch existing appointments for therapist and room on date
-    final therapistSnap = await FirebaseFirestore.instance
-        .collection('appointments')
-        .where('therapistId', isEqualTo: _selectedTherapist!.id)
-        .where('date', isEqualTo: dateStr)
-        .where('status', whereIn: ['confirmed', 'in_progress'])
-        .get();
-
-    final roomSnap = await FirebaseFirestore.instance
-        .collection('appointments')
-        .where('roomId', isEqualTo: _selectedRoom!.id)
-        .where('date', isEqualTo: dateStr)
-        .where('status', whereIn: ['confirmed', 'in_progress'])
-        .get();
-
-    // Build blocked intervals
-    final blocked = <Map<String, int>>[];
-    for (final doc in [...therapistSnap.docs, ...roomSnap.docs]) {
-      final d = doc.data();
-      final start = _timeToMinutes(d['startTime'] ?? '09:00');
-      final end = _timeToMinutes(d['endTime'] ?? '10:00');
-      blocked.add({'start': start, 'end': end});
-    }
-
-    // Generate candidate slots
-    final open = _openHour * 60;
-    final close = _closeHour * 60;
-    final slots = <_TimeSlot>[];
-    var cursor = open;
-
-    while (cursor + duration <= close) {
-      final slotEnd = cursor + duration;
-      final available = !_hasOverlap(cursor, slotEnd, blocked);
-
-      if (available) {
-        // Heuristic: slot is "recommended" if it starts right after
-        // an existing booking (minimises gap)
-        final isRecommended =
-            blocked.any((b) => b['end'] == cursor) ||
-            blocked.isEmpty && cursor == open;
-
-        slots.add(
-          _TimeSlot(
-            start: _minutesToTime(cursor),
-            end: _minutesToTime(slotEnd),
-            isRecommended: isRecommended,
-            isAvailable: true,
-          ),
-        );
-      } else {
-        // Show as unavailable
-        slots.add(
-          _TimeSlot(
-            start: _minutesToTime(cursor),
-            end: _minutesToTime(cursor + duration),
-            isRecommended: false,
-            isAvailable: false,
-          ),
-        );
-      }
-      cursor += _slotStep;
-    }
-
-    // If no recommended slots, mark first 3 available as recommended
-    final hasRecommended = slots.any((s) => s.isRecommended && s.isAvailable);
-    if (!hasRecommended) {
-      int count = 0;
-      for (var i = 0; i < slots.length && count < 3; i++) {
-        if (slots[i].isAvailable) {
-          slots[i] = _TimeSlot(
-            start: slots[i].start,
-            end: slots[i].end,
-            isRecommended: true,
-            isAvailable: true,
-          );
-          count++;
-        }
-      }
-    }
-
-    setState(() => _slots = slots);
-  }
-
-  bool _hasOverlap(int start, int end, List<Map<String, int>> blocked) {
-    for (final b in blocked) {
-      if (start < b['end']! && end > b['start']!) return true;
-    }
-    return false;
-  }
-
-  int _timeToMinutes(String t) {
-    final p = t.split(':');
-    return int.parse(p[0]) * 60 + int.parse(p[1]);
-  }
-
-  String _minutesToTime(int m) {
-    final h = (m ~/ 60).toString().padLeft(2, '0');
-    final min = (m % 60).toString().padLeft(2, '0');
-    return '$h:$min';
-  }
-
-  // ── Selection Handlers ─────────────────────────────────────────
-
-  void _onServiceSelected(_Service s) {
-    setState(() {
-      _selectedService = s;
-      _selectedTherapist = null;
-      _selectedRoom = null;
-      _selectedSlot = null;
-      _slots = [];
-    });
-  }
-
-  void _onTherapistSelected(_Therapist t) {
-    setState(() {
-      _selectedTherapist = t;
-      _selectedSlot = null;
-      _slots = [];
-    });
-    if (_selectedRoom != null) _generateSlots();
-  }
-
-  void _onRoomSelected(_RoomZone r) {
-    setState(() {
-      _selectedRoom = r;
-      _selectedSlot = null;
-      _slots = [];
-    });
-    if (_selectedTherapist != null) _generateSlots();
-  }
-
-  void _onDateChanged(int days) {
-    setState(() {
-      _selectedDate = _selectedDate.add(Duration(days: days));
-      _selectedSlot = null;
-      _slots = [];
-    });
-    _loadRooms();
-    if (_selectedTherapist != null && _selectedRoom != null) {
-      _generateSlots();
-    }
-  }
-
-  // ── Confirm Appointment ────────────────────────────────────────
-
-  bool get _canConfirm =>
-      _selectedCustomer != null &&
-      _selectedService != null &&
-      _selectedTherapist != null &&
-      _selectedRoom != null &&
-      _selectedSlot != null;
-
-  Future<void> _confirmAppointment() async {
-    if (!_canConfirm) return;
-    setState(() => _isConfirming = true);
-
-    try {
-      final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-      final endTime = _minutesToTime(
-        _timeToMinutes(_selectedSlot!.start) + _selectedService!.duration,
-      );
-
-      // CSP final validation before saving
-      final therapistSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('therapistId', isEqualTo: _selectedTherapist!.id)
-          .where('date', isEqualTo: dateStr)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
-
-      final blocked = therapistSnap.docs.map((doc) {
-        final d = doc.data();
-        return {
-          'start': _timeToMinutes(d['startTime'] ?? '09:00'),
-          'end': _timeToMinutes(d['endTime'] ?? '10:00'),
-        };
-      }).toList();
-
-      final slotStart = _timeToMinutes(_selectedSlot!.start);
-      final slotEnd = _timeToMinutes(endTime);
-
-      if (_hasOverlap(slotStart, slotEnd, blocked)) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Conflict detected — slot no longer available'),
-              backgroundColor: Color(0xFFE53935),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
-        await _generateSlots();
-        return;
-      }
-
-      // Save to Firestore
-      await FirebaseFirestore.instance.collection('appointments').add({
-        'customerId': _selectedCustomer!.id,
-        'therapistId': _selectedTherapist!.id,
-        'roomId': _selectedRoom!.id,
-        'serviceId': _selectedService!.id,
-        'date': dateStr,
-        'startTime': _selectedSlot!.start,
-        'endTime': endTime,
-        'status': 'confirmed',
-        'totalPrice': _selectedService!.price,
-        'type': 'appointment',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Appointment confirmed successfully'),
-            backgroundColor: Color(0xFF1B6B72),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-        Navigator.pop(context);
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: $e'),
-            backgroundColor: const Color(0xFFE53935),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _isConfirming = false);
-    }
-  }
-
-  // ── Build ──────────────────────────────────────────────────────
-
-  bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
-      body: _loadingData
-          ? const Center(
-              child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
-            )
-          : _isTablet(context)
-          ? _buildTablet()
-          : _buildPhone(),
+  void _showMobileCluster(List<_ScheduleAppointment> appointments) {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: ListView.separated(
+          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+          itemCount: appointments.length,
+          separatorBuilder: (context, index) => const SizedBox(height: 10),
+          itemBuilder: (context, index) {
+            final appointment = appointments[index];
+            return _MobileAppointmentCard(
+              appointment: appointment,
+              onTap: () {
+                Navigator.pop(context);
+                setState(() => _selectedAppointment = appointment);
+                _showMobileSummary(appointment);
+              },
+            );
+          },
+        ),
+      ),
     );
   }
 
-  // ── TABLET BUILD ───────────────────────────────────────────────
+  @override
+  Widget build(BuildContext context) {
+    final isTablet = MediaQuery.of(context).size.width >= 760;
+    return Scaffold(
+      backgroundColor: const Color(0xFFF4F8F2),
+      body: SafeArea(
+        child: isTablet ? _buildTablet() : _buildMobile(),
+      ),
+    );
+  }
+
+  Widget _buildMobile() {
+    return Column(
+      children: [
+        _MobileScheduleHeader(
+          monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
+          onBack: () => Navigator.pop(context),
+          onOpenCalendar: _openCalendarPicker,
+          onAdd: _openBooking,
+        ),
+        _ScheduleCalendarStrip(
+          days: _visibleDays,
+          selectedDate: _selectedDate,
+          appointmentsForDay: _appointmentsForDay,
+          onSelect: _selectDate,
+          onPrevious: () => _moveDays(-1),
+          onNext: () => _moveDays(1),
+          compact: true,
+        ),
+        Expanded(child: _buildMobileBody()),
+      ],
+    );
+  }
+
+  Widget _buildMobileBody() {
+    if (_loading) return const _ScheduleLoading();
+    if (_error != null) return _ScheduleError(onRetry: _loadAppointments);
+
+    final appointments = _selectedDayAppointments;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
+      children: [
+        _MobileDaySummary(
+          date: _selectedDate,
+          count: appointments.length,
+          pending: _pendingCount,
+          sales: _selectedDaySales,
+        ),
+        const SizedBox(height: 14),
+        if (appointments.isEmpty)
+          const _ScheduleEmptyState()
+        else
+          _MobileTimeline(
+            appointments: appointments,
+            openHour: _openHour,
+            closeHour: _closeHour,
+            selectedDate: _selectedDate,
+            onTapAppointment: (appointment) {
+              setState(() => _selectedAppointment = appointment);
+              _showMobileSummary(appointment);
+            },
+            onTapCluster: _showMobileCluster,
+          ),
+      ],
+    );
+  }
 
   Widget _buildTablet() {
-    return SafeArea(
-      child: Column(
-        children: [
-          _TabletHeader(onBack: () => Navigator.pop(context)),
-          Expanded(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Left — steps
-                Expanded(
-                  flex: 65,
-                  child: SingleChildScrollView(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      children: [
-                        _StepCard(
-                          number: 1,
-                          title: 'Date & Customer',
-                          child: _buildDateCustomerSection(),
-                        ),
-                        const SizedBox(height: 16),
-                        _StepCard(
-                          number: 2,
-                          title: 'Service Selection',
-                          child: _buildServiceSection(isTablet: true),
-                        ),
-                        const SizedBox(height: 16),
-                        _StepCard(
-                          number: 3,
-                          title: 'Therapist & Room',
-                          child: _buildTherapistRoomSection(isTablet: true),
-                        ),
-                        if (_slots.isNotEmpty) ...[
-                          const SizedBox(height: 16),
-                          _StepCard(
-                            number: 4,
-                            title: 'Recommended Time Slots',
-                            badge: _AiBadge(),
-                            child: _buildTimeSlotsSection(),
-                          ),
-                        ],
-                        const SizedBox(height: 32),
-                      ],
+    return Stack(
+      children: [
+        Positioned.fill(
+          child: Column(
+            children: [
+              _TabletScheduleHeader(
+                monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
+                searchController: _searchController,
+                onBack: () => Navigator.pop(context),
+                onOpenCalendar: _openCalendarPicker,
+                onAdd: _openBooking,
+              ),
+              _ScheduleCalendarStrip(
+                days: _visibleDays,
+                selectedDate: _selectedDate,
+                appointmentsForDay: _appointmentsForDay,
+                onSelect: _selectDate,
+                onPrevious: () => _moveDays(-1),
+                onNext: () => _moveDays(1),
+                compact: false,
+              ),
+              Expanded(child: _buildTabletBody()),
+            ],
+          ),
+        ),
+        AnimatedPositioned(
+          duration: const Duration(milliseconds: 180),
+          curve: Curves.easeOutCubic,
+          top: 198,
+          right: _selectedAppointment == null ? -390 : 18,
+          bottom: 18,
+          width: 360,
+          child: IgnorePointer(
+            ignoring: _selectedAppointment == null,
+            child: AnimatedOpacity(
+              duration: const Duration(milliseconds: 140),
+              opacity: _selectedAppointment == null ? 0 : 1,
+              child: _selectedAppointment == null
+                  ? const SizedBox.shrink()
+                  : _AppointmentSummaryPanel(
+                      appointment: _selectedAppointment!,
+                      onClose: () =>
+                          setState(() => _selectedAppointment = null),
+                      onConfirm: _selectedAppointment!.isPending
+                          ? () => _updateStatus(
+                                _selectedAppointment!,
+                                'confirmed',
+                              )
+                          : null,
+                      onEdit: () => _openEdit(_selectedAppointment!),
+                      onStart: _selectedAppointment!.isConfirmed
+                          ? () => _updateStatus(
+                                _selectedAppointment!,
+                                'in_progress',
+                              )
+                          : null,
+                      onComplete: _selectedAppointment!.isConfirmed ||
+                              _selectedAppointment!.isInProgress
+                          ? () => _updateStatus(
+                                _selectedAppointment!,
+                                'completed',
+                              )
+                          : null,
+                      onCancel: _selectedAppointment!.isCompleted
+                          ? null
+                          : () => _cancelAppointment(_selectedAppointment!),
                     ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTabletBody() {
+    if (_loading) return const _ScheduleLoading();
+    if (_error != null) return _ScheduleError(onRetry: _loadAppointments);
+
+    final appointments = _selectedDayAppointments;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(28, 18, 28, 32),
+      children: [
+        _TabletDaySummary(
+          date: _selectedDate,
+          count: appointments.length,
+          pending: _pendingCount,
+        ),
+        const SizedBox(height: 12),
+        if (appointments.isEmpty)
+          const _ScheduleEmptyState()
+        else
+          _TabletTimeline(
+            appointments: appointments,
+            openHour: _openHour,
+            closeHour: _closeHour,
+            selectedDate: _selectedDate,
+            selectedId: _selectedAppointment?.id,
+            onSelect: (appointment) =>
+                setState(() => _selectedAppointment = appointment),
+          ),
+      ],
+    );
+  }
+}
+
+class _MobileScheduleHeader extends StatelessWidget {
+  final String monthLabel;
+  final VoidCallback onBack;
+  final VoidCallback onOpenCalendar;
+  final VoidCallback onAdd;
+
+  const _MobileScheduleHeader({
+    required this.monthLabel,
+    required this.onBack,
+    required this.onOpenCalendar,
+    required this.onAdd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: onBack,
+            icon: const Icon(Icons.arrow_back),
+            color: const Color(0xFF111827),
+          ),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: InkWell(
+                onTap: onOpenCalendar,
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 8,
                   ),
-                ),
-                // Right — summary
-                Container(
-                  width: MediaQuery.of(context).size.width * 0.35,
-                  decoration: const BoxDecoration(
+                  decoration: BoxDecoration(
                     color: Colors.white,
-                    boxShadow: [
-                      BoxShadow(
-                        color: Color(0x0F000000),
-                        blurRadius: 8,
-                        offset: Offset(-2, 0),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(
+                        Icons.calendar_today_outlined,
+                        size: 16,
+                        color: Color(0xFF2F7D59),
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          monthLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF111827),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 18,
+                        color: Color(0xFF6B7280),
                       ),
                     ],
                   ),
-                  child: _buildSummaryPanel(isTablet: true),
                 ),
-              ],
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 42,
+            height: 42,
+            child: FilledButton(
+              onPressed: onAdd,
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF2F7D59),
+                padding: EdgeInsets.zero,
+                shape: const CircleBorder(),
+              ),
+              child: const Icon(Icons.add, size: 22),
             ),
           ),
         ],
       ),
     );
   }
+}
 
-  // ── PHONE BUILD ────────────────────────────────────────────────
+class _TabletScheduleHeader extends StatelessWidget {
+  final String monthLabel;
+  final TextEditingController searchController;
+  final VoidCallback onBack;
+  final VoidCallback onOpenCalendar;
+  final VoidCallback onAdd;
 
-  Widget _buildPhone() {
-    return SafeArea(
-      child: Column(
+  const _TabletScheduleHeader({
+    required this.monthLabel,
+    required this.searchController,
+    required this.onBack,
+    required this.onOpenCalendar,
+    required this.onAdd,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(22, 10, 22, 10),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+      ),
+      child: Row(
         children: [
-          _PhoneHeader(onBack: () => Navigator.pop(context)),
-          Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
-              child: Column(
+          IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back)),
+          const SizedBox(width: 4),
+          InkWell(
+            onTap: onOpenCalendar,
+            borderRadius: BorderRadius.circular(10),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFE5E7EB)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  _StepCard(
-                    number: 1,
-                    title: 'Date & Customer',
-                    child: _buildDateCustomerSection(),
+                  const Icon(
+                    Icons.calendar_today_outlined,
+                    size: 16,
+                    color: Color(0xFF2F7D59),
                   ),
-                  const SizedBox(height: 12),
-                  _StepCard(
-                    number: 2,
-                    title: 'Service Selection',
-                    child: _buildServiceSection(isTablet: false),
-                  ),
-                  const SizedBox(height: 12),
-                  _StepCard(
-                    number: 3,
-                    title: 'Therapist & Room',
-                    child: _buildTherapistRoomSection(isTablet: false),
-                  ),
-                  if (_slots.isNotEmpty) ...[
-                    const SizedBox(height: 12),
-                    _StepCard(
-                      number: 4,
-                      title: 'Recommended Time Slots',
-                      badge: _AiBadge(),
-                      child: _buildTimeSlotsSection(),
+                  const SizedBox(width: 8),
+                  Text(
+                    monthLabel,
+                    style: const TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF111827),
                     ),
-                  ],
-                  const SizedBox(height: 120),
+                  ),
+                  const SizedBox(width: 6),
+                  const Icon(
+                    Icons.keyboard_arrow_down,
+                    size: 18,
+                    color: Color(0xFF6B7280),
+                  ),
                 ],
               ),
             ),
           ),
-          // Sticky bottom bar
-          _PhoneBottomBar(
-            service: _selectedService,
-            isExpanded: _summaryExpanded,
-            onToggle: () =>
-                setState(() => _summaryExpanded = !_summaryExpanded),
-            canConfirm: _canConfirm,
-            isConfirming: _isConfirming,
-            onConfirm: _confirmAppointment,
-            selectedDate: _selectedDate,
-            selectedCustomer: _selectedCustomer,
-            selectedTherapist: _selectedTherapist,
-            selectedRoom: _selectedRoom,
-            selectedSlot: _selectedSlot,
-          ),
-        ],
-      ),
-    );
-  }
-
-  // ── STEP SECTIONS ──────────────────────────────────────────────
-
-  Widget _buildDateCustomerSection() {
-    final formatted = DateFormat('EEE, d MMMM yyyy').format(_selectedDate);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Appointment Date',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: Color(0xFF6B6B6B),
-          ),
-        ),
-        const SizedBox(height: 8),
-        // Date row
-        Row(
-          children: [
-            _DateArrowBtn(
-              icon: Icons.chevron_left,
-              onTap: () => _onDateChanged(-1),
-            ),
-            Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.calendar_today_outlined,
-                      size: 16,
-                      color: Color(0xFF1B6B72),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      formatted,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-            _DateArrowBtn(
-              icon: Icons.chevron_right,
-              onTap: () => _onDateChanged(1),
-            ),
-          ],
-        ),
-        const SizedBox(height: 14),
-        // Customer search
-        const Text(
-          'Customer',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: Color(0xFF6B6B6B),
-          ),
-        ),
-        const SizedBox(height: 8),
-        _CustomerSearchField(
-          controller: _customerSearchController,
-          customers: _filteredCustomers,
-          selected: _selectedCustomer,
-          onSelect: (c) => setState(() {
-            _selectedCustomer = c;
-            _customerSearchController.text = c.name;
-            _filteredCustomers = _customers;
-          }),
-        ),
-        const SizedBox(height: 8),
-        GestureDetector(
-          onTap: _openAddCustomerDialog,
-          child: const Text(
-            '+ Add New Customer',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF1B6B72),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildServiceSection({required bool isTablet}) {
-    final tabs = ['Services', 'Packages', 'Add-ons'];
-    final filtered = _services.where((s) => s.category == _serviceTab).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Tabs
-        Row(
-          children: tabs
-              .map(
-                (tab) => GestureDetector(
-                  onTap: () => setState(() => _serviceTab = tab),
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 20, bottom: 12),
-                    child: Column(
-                      children: [
-                        Text(
-                          tab,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: _serviceTab == tab
-                                ? const Color(0xFF1B6B72)
-                                : const Color(0xFF9E9E9E),
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        if (_serviceTab == tab)
-                          Container(
-                            height: 2,
-                            width: 40,
-                            color: const Color(0xFF1B6B72),
-                          ),
-                      ],
-                    ),
-                  ),
-                ),
-              )
-              .toList(),
-        ),
-        if (filtered.isEmpty || _serviceLoadError != null) ...[
-          _ServiceDebugPanel(
-            totalDocs: _serviceDocCount,
-            activeDocs: _serviceActiveCount,
-            visibleDocs: filtered.length,
-            selectedTab: _serviceTab,
-            error: _serviceLoadError,
-            lines: _serviceDebugLines,
-          ),
-          const SizedBox(height: 12),
-        ],
-        // Service grid
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: isTablet ? 3 : 2,
-            crossAxisSpacing: 10,
-            mainAxisSpacing: 10,
-            childAspectRatio: isTablet ? 1.6 : 1.3,
-          ),
-          itemCount: filtered.length,
-          itemBuilder: (_, i) => _ServiceCard(
-            service: filtered[i],
-            isSelected: _selectedService?.id == filtered[i].id,
-            showEmoji: isTablet,
-            onTap: () => _onServiceSelected(filtered[i]),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTherapistRoomSection({required bool isTablet}) {
-    final compatibleTherapists = _therapists
-        .where(
-          (t) =>
-              _selectedService == null ||
-              t.canDoService(_selectedService!.roomType),
-        )
-        .toList();
-
-    final incompatibleTherapists = _therapists
-        .where(
-          (t) =>
-              _selectedService != null &&
-              !t.canDoService(_selectedService!.roomType),
-        )
-        .toList();
-
-    final compatibleRooms = _rooms
-        .where(
-          (r) =>
-              _selectedService == null ||
-              _selectedService!.roomType.isEmpty ||
-              r.type == _selectedService!.roomType,
-        )
-        .toList();
-
-    if (isTablet) {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const _SubSectionLabel('Select Therapist'),
-          const SizedBox(height: 10),
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              crossAxisSpacing: 10,
-              mainAxisSpacing: 10,
-              childAspectRatio: 2.65,
-            ),
-            itemCount:
-                compatibleTherapists.length + incompatibleTherapists.length,
-            itemBuilder: (_, i) {
-              final isCompat = i < compatibleTherapists.length;
-              final t = isCompat
-                  ? compatibleTherapists[i]
-                  : incompatibleTherapists[i - compatibleTherapists.length];
-              return _TherapistCard(
-                therapist: t,
-                isSelected: _selectedTherapist?.id == t.id,
-                isDisabled: !isCompat,
-                onTap: isCompat ? () => _onTherapistSelected(t) : null,
-              );
-            },
-          ),
-          const SizedBox(height: 18),
-          const _SubSectionLabel('Select Room / Zone'),
-          const SizedBox(height: 10),
-          ...compatibleRooms.map(
-            (r) => Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: _RoomZoneCard(
-                zone: r,
-                isSelected: _selectedRoom?.id == r.id,
-                onTap: () => _onRoomSelected(r),
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    // Phone — stacked
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const _SubSectionLabel('Select Therapist'),
-        const SizedBox(height: 10),
-        ...compatibleTherapists.map(
-          (t) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _TherapistCard(
-              therapist: t,
-              isSelected: _selectedTherapist?.id == t.id,
-              isDisabled: false,
-              onTap: () => _onTherapistSelected(t),
-            ),
-          ),
-        ),
-        ...incompatibleTherapists.map(
-          (t) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _TherapistCard(
-              therapist: t,
-              isSelected: false,
-              isDisabled: true,
-              onTap: null,
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        const _SubSectionLabel('Select Room / Zone'),
-        const SizedBox(height: 10),
-        ...compatibleRooms.map(
-          (r) => Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: _RoomZoneCard(
-              zone: r,
-              isSelected: _selectedRoom?.id == r.id,
-              onTap: () => _onRoomSelected(r),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildTimeSlotsSection() {
-    final recommended = _slots
-        .where((s) => s.isRecommended && s.isAvailable)
-        .toList();
-    final standard = _slots
-        .where((s) => !s.isRecommended && s.isAvailable)
-        .toList();
-    final unavailable = _slots.where((s) => !s.isAvailable).toList();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Text(
-          'Slots filtered based on therapist and room availability',
-          style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-        ),
-        const SizedBox(height: 14),
-
-        // Recommended
-        if (recommended.isNotEmpty) ...[
-          Row(
-            children: const [
-              Text('⭐ ', style: TextStyle(fontSize: 14)),
-              Text(
-                'Recommended',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
-                ),
-              ),
-              Text(
-                ' — Minimizes Schedule Gaps',
-                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          _SlotGrid(
-            slots: recommended,
-            selectedSlot: _selectedSlot,
-            recommended: true,
-            onSelect: (s) => setState(() => _selectedSlot = s),
-          ),
-          const SizedBox(height: 14),
-        ],
-
-        // Standard
-        if (standard.isNotEmpty) ...[
-          const Text(
-            'Standard Availability',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w500,
-              color: Color(0xFF6B6B6B),
-            ),
-          ),
-          const SizedBox(height: 10),
-          _SlotGrid(
-            slots: standard,
-            selectedSlot: _selectedSlot,
-            recommended: false,
-            onSelect: (s) => setState(() => _selectedSlot = s),
-          ),
-          const SizedBox(height: 14),
-        ],
-
-        // Unavailable
-        if (unavailable.isNotEmpty) ...[
-          const Text(
-            'Unavailable',
-            style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: unavailable
-                .map((s) => _UnavailableChip(label: s.label))
-                .toList(),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Therapist or room already booked at these times',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
-          ),
-        ],
-      ],
-    );
-  }
-
-  Widget _buildSummaryPanel({required bool isTablet}) {
-    final dateStr = DateFormat('EEE, d MMMM yyyy').format(_selectedDate);
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Booking Summary',
-            style: TextStyle(
-              fontSize: 22,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1A1A2E),
-            ),
-          ),
-          const SizedBox(height: 4),
-          const Text(
-            'Review before confirming',
-            style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
-          ),
-          const SizedBox(height: 24),
-
-          _SummaryRow(label: 'Date', value: dateStr),
-          _SummaryRow(label: 'Customer', value: _selectedCustomer?.name ?? '—'),
-          _SummaryRow(
-            label: 'Service',
-            value: _selectedService != null
-                ? '${_selectedService!.name}\n${_selectedService!.duration} min · RM ${_selectedService!.price.toStringAsFixed(0)}'
-                : '—',
-          ),
-          _SummaryRow(
-            label: 'Therapist',
-            value: _selectedTherapist?.name ?? '—',
-          ),
-          _SummaryRow(label: 'Room / Zone', value: _selectedRoom?.name ?? '—'),
-          _SummaryRow(label: 'Time Slot', value: _selectedSlot?.label ?? '—'),
-
-          if (_selectedService != null) ...[
-            const Divider(height: 28, color: Color(0xFFEEEEEE)),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Estimated Total',
-                  style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
-                ),
-                Text(
-                  'RM ${_selectedService!.price.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '${_selectedService!.name} · ${_selectedService!.duration} min',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-            ),
-          ],
-
-          const SizedBox(height: 28),
-
+          const Spacer(),
           SizedBox(
-            width: double.infinity,
-            height: 52,
-            child: ElevatedButton.icon(
-              onPressed: _canConfirm && !_isConfirming
-                  ? _confirmAppointment
-                  : null,
-              icon: _isConfirming
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2,
-                      ),
-                    )
-                  : const Icon(Icons.check, size: 18),
-              label: const Text(
-                'Confirm Appointment',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFF1B6B72),
-                foregroundColor: Colors.white,
-                disabledBackgroundColor: const Color(0xFFBDBDBD),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+            width: 330,
+            child: TextField(
+              controller: searchController,
+              style: const TextStyle(fontSize: 14),
+              decoration: InputDecoration(
+                hintText: 'Search customers, services...',
+                hintStyle: const TextStyle(fontSize: 14),
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: const Padding(
+                  padding: EdgeInsets.all(10),
+                  child: Text(
+                    'Ctrl K',
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: Color(0xFF6B7280),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
                 ),
-                elevation: 0,
-              ),
-            ),
-          ),
-
-          if (!_canConfirm) ...[
-            const SizedBox(height: 8),
-            const Center(
-              child: Text(
-                'Complete all selections to confirm',
-                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────
-// COMPONENT WIDGETS
-// ─────────────────────────────────────────────────────────────────
-
-class _TabletHeader extends StatelessWidget {
-  final VoidCallback onBack;
-  const _TabletHeader({required this.onBack});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: onBack,
-            child: const Icon(
-              Icons.arrow_back_ios,
-              size: 18,
-              color: Color(0xFF1B6B72),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text(
-                'New Appointment',
-                style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF1A1A2E),
+                filled: true,
+                fillColor: Colors.white,
+                contentPadding: const EdgeInsets.symmetric(vertical: 11),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
                 ),
               ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PhoneHeader extends StatelessWidget {
-  final VoidCallback onBack;
-  const _PhoneHeader({required this.onBack});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          GestureDetector(
-            onTap: onBack,
-            child: const Icon(
-              Icons.arrow_back_ios,
-              size: 18,
-              color: Color(0xFF1B6B72),
             ),
           ),
-          const SizedBox(width: 12),
-          const Text(
-            'New Appointment',
-            style: TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1A1A2E),
+          const SizedBox(width: 14),
+          FilledButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add, size: 17),
+            label: const Text(
+              'New Appointment',
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
+            ),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF2F7D59),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
             ),
           ),
         ],
@@ -1398,478 +870,879 @@ class _PhoneHeader extends StatelessWidget {
   }
 }
 
-class _QuickCustomerDialog<T> extends StatefulWidget {
-  final String defaultJoinDate;
-  final T Function(String id, Map<String, String> data) customerBuilder;
+class _MonthCalendarDialog extends StatefulWidget {
+  final DateTime initialDate;
 
-  const _QuickCustomerDialog({
-    required this.defaultJoinDate,
-    required this.customerBuilder,
-  });
+  const _MonthCalendarDialog({required this.initialDate});
 
   @override
-  State<_QuickCustomerDialog<T>> createState() =>
-      _QuickCustomerDialogState<T>();
+  State<_MonthCalendarDialog> createState() => _MonthCalendarDialogState();
 }
 
-class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
-  final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _phoneController = TextEditingController();
-  final _genderController = TextEditingController();
-  final _dobController = TextEditingController();
-  final _notesController = TextEditingController();
-  late final TextEditingController _joinDateController;
-  bool _saving = false;
+class _MonthCalendarDialogState extends State<_MonthCalendarDialog> {
+  late DateTime _visibleMonth;
 
   @override
   void initState() {
     super.initState();
-    _joinDateController = TextEditingController(text: widget.defaultJoinDate);
+    _visibleMonth = DateTime(
+      widget.initialDate.year,
+      widget.initialDate.month,
+    );
   }
 
-  @override
-  void dispose() {
-    _nameController.dispose();
-    _phoneController.dispose();
-    _genderController.dispose();
-    _dobController.dispose();
-    _joinDateController.dispose();
-    _notesController.dispose();
-    super.dispose();
-  }
-
-  Future<void> _save() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    setState(() => _saving = true);
-    final data = {
-      'name': _nameController.text.trim(),
-      'phone': _phoneController.text.trim(),
-      'gender': _genderController.text.trim(),
-      'dateOfBirth': _dobController.text.trim(),
-      'joinDate': _joinDateController.text.trim(),
-      'notes': _notesController.text.trim(),
-    };
-
-    try {
-      final docRef = await FirebaseFirestore.instance
-          .collection('customers')
-          .add(data);
-      if (!mounted) return;
-      Navigator.of(context).pop(widget.customerBuilder(docRef.id, data));
-    } catch (_) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to save customer'),
-          backgroundColor: Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+  void _moveMonth(int offset) {
+    setState(() {
+      _visibleMonth = DateTime(_visibleMonth.year, _visibleMonth.month + offset);
+    });
   }
 
   @override
   Widget build(BuildContext context) {
+    final firstDay = DateTime(_visibleMonth.year, _visibleMonth.month, 1);
+    final gridStart = firstDay.subtract(Duration(days: firstDay.weekday % 7));
+    final days = List.generate(42, (index) => gridStart.add(Duration(days: index)));
+    final selected = _stripTime(widget.initialDate);
+    final today = _stripTime(DateTime.now());
+
     return Dialog(
-      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 520),
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Add Customer',
-                        style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1A1A2E),
-                        ),
-                      ),
-                    ),
-                    IconButton(
-                      onPressed: _saving
-                          ? null
-                          : () => Navigator.of(context).pop(),
-                      icon: const Icon(Icons.close),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                _QuickCustomerField(
-                  label: 'Name',
-                  controller: _nameController,
-                  requiredField: true,
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Phone',
-                  controller: _phoneController,
-                  keyboardType: TextInputType.phone,
-                  requiredField: true,
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Gender',
-                  controller: _genderController,
-                  hint: 'Female / Male',
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Date of Birth',
-                  controller: _dobController,
-                  hint: 'YYYY-MM-DD',
-                  keyboardType: TextInputType.datetime,
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Join Date',
-                  controller: _joinDateController,
-                  hint: 'YYYY-MM-DD',
-                  keyboardType: TextInputType.datetime,
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Notes',
-                  controller: _notesController,
-                  maxLines: 3,
-                ),
-                const SizedBox(height: 24),
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextButton(
-                        onPressed: _saving
-                            ? null
-                            : () => Navigator.of(context).pop(),
-                        style: TextButton.styleFrom(
-                          minimumSize: const Size.fromHeight(52),
-                          backgroundColor: const Color(0xFFF1F3F6),
-                          foregroundColor: const Color(0xFF1A1A2E),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: const Text('Cancel'),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: ElevatedButton(
-                        onPressed: _saving ? null : _save,
-                        style: ElevatedButton.styleFrom(
-                          minimumSize: const Size.fromHeight(52),
-                          backgroundColor: const Color(0xFF1B6B72),
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                        ),
-                        child: _saving
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : const Text('Add Customer'),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _QuickCustomerField extends StatelessWidget {
-  final String label;
-  final String? hint;
-  final TextEditingController controller;
-  final TextInputType? keyboardType;
-  final bool requiredField;
-  final int maxLines;
-
-  const _QuickCustomerField({
-    required this.label,
-    required this.controller,
-    this.hint,
-    this.keyboardType,
-    this.requiredField = false,
-    this.maxLines = 1,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return TextFormField(
-      controller: controller,
-      keyboardType: keyboardType,
-      maxLines: maxLines,
-      validator: requiredField
-          ? (value) => value == null || value.trim().isEmpty
-                ? '$label is required'
-                : null
-          : null,
-      decoration: InputDecoration(
-        labelText: label,
-        hintText: hint,
-        filled: true,
-        fillColor: const Color(0xFFF7F8FA),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
-        ),
-      ),
-    );
-  }
-}
-
-class _StepCard extends StatelessWidget {
-  final int number;
-  final String title;
-  final Widget child;
-  final Widget? badge;
-
-  const _StepCard({
-    required this.number,
-    required this.title,
-    required this.child,
-    this.badge,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
+        constraints: const BoxConstraints(maxWidth: 340),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
             children: [
-              Container(
-                width: 28,
-                height: 28,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color(0xFF1B6B72),
-                ),
-                child: Center(
-                  child: Text(
-                    '$number',
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.bold,
-                      fontSize: 13,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      DateFormat('MMMM yyyy').format(_visibleMonth),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF111827),
+                      ),
                     ),
                   ),
-                ),
+                  IconButton(
+                    onPressed: () => _moveMonth(-1),
+                    icon: const Icon(Icons.chevron_left),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  IconButton(
+                    onPressed: () => _moveMonth(1),
+                    icon: const Icon(Icons.chevron_right),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
               ),
-              const SizedBox(width: 10),
-              Text(
-                title,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
-                ),
+              const SizedBox(height: 10),
+              Row(
+                children: const [
+                  _WeekdayLabel('SUN'),
+                  _WeekdayLabel('MON'),
+                  _WeekdayLabel('TUE'),
+                  _WeekdayLabel('WED'),
+                  _WeekdayLabel('THU'),
+                  _WeekdayLabel('FRI'),
+                  _WeekdayLabel('SAT'),
+                ],
               ),
-              if (badge != null) ...[const SizedBox(width: 8), badge!],
+              const SizedBox(height: 8),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 7,
+                  mainAxisSpacing: 7,
+                  crossAxisSpacing: 7,
+                ),
+                itemCount: days.length,
+                itemBuilder: (context, index) {
+                  final day = days[index];
+                  final cleanDay = _stripTime(day);
+                  final isSelected = cleanDay == selected;
+                  final isToday = cleanDay == today;
+                  final inMonth = day.month == _visibleMonth.month;
+
+                  return InkWell(
+                    onTap: () => Navigator.pop(context, cleanDay),
+                    borderRadius: BorderRadius.circular(18),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 120),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isSelected
+                            ? const Color(0xFF2F7D59)
+                            : Colors.transparent,
+                        border: isToday && !isSelected
+                            ? Border.all(color: const Color(0xFF2F7D59))
+                            : null,
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '${day.day}',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: isSelected || isToday
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                          color: isSelected
+                              ? Colors.white
+                              : inMonth
+                              ? const Color(0xFF111827)
+                              : const Color(0xFFCBD5E1),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(context, today),
+                    icon: const Icon(Icons.today_outlined, size: 17),
+                    label: const Text('Today'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF2F7D59),
+                      textStyle: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
-          const SizedBox(height: 16),
-          child,
-        ],
+        ),
       ),
     );
   }
 }
 
-class _AiBadge extends StatelessWidget {
+class _WeekdayLabel extends StatelessWidget {
+  final String label;
+
+  const _WeekdayLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 10,
+          color: Color(0xFF6B7280),
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _ScheduleCalendarStrip extends StatelessWidget {
+  final List<DateTime> days;
+  final DateTime selectedDate;
+  final List<_ScheduleAppointment> Function(DateTime date) appointmentsForDay;
+  final ValueChanged<DateTime> onSelect;
+  final VoidCallback onPrevious;
+  final VoidCallback onNext;
+  final bool compact;
+
+  const _ScheduleCalendarStrip({
+    required this.days,
+    required this.selectedDate,
+    required this.appointmentsForDay,
+    required this.onSelect,
+    required this.onPrevious,
+    required this.onNext,
+    required this.compact,
+  });
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF59E0B),
-        borderRadius: BorderRadius.circular(12),
+      color: Colors.white,
+      padding: EdgeInsets.fromLTRB(
+        compact ? 12 : 24,
+        10,
+        compact ? 12 : 24,
+        12,
       ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
+      child: Row(
         children: [
-          Text('⚡ ', style: TextStyle(fontSize: 11)),
-          Text(
-            'AI',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
+          if (!compact) ...[
+            _CalendarNavButton(
+              icon: Icons.chevron_left,
+              compact: compact,
+              onPressed: onPrevious,
+            ),
+            const SizedBox(width: 10),
+          ],
+          Expanded(
+            child: Row(
+              children: days.map((day) {
+                final selected = _stripTime(day) == _stripTime(selectedDate);
+                final count = appointmentsForDay(day).length;
+                return Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 6),
+                    child: _DayTile(
+                      day: day,
+                      selected: selected,
+                      count: count,
+                      compact: compact,
+                      onTap: () => onSelect(day),
+                    ),
+                  ),
+                );
+              }).toList(),
             ),
           ),
+          if (!compact) ...[
+            const SizedBox(width: 10),
+            _CalendarNavButton(
+              icon: Icons.chevron_right,
+              compact: compact,
+              onPressed: onNext,
+            ),
+          ],
         ],
       ),
     );
   }
 }
 
-class _SubSectionLabel extends StatelessWidget {
-  final String text;
-  const _SubSectionLabel(this.text);
+class _CalendarNavButton extends StatelessWidget {
+  final IconData icon;
+  final bool compact;
+  final VoidCallback onPressed;
+
+  const _CalendarNavButton({
+    required this.icon,
+    required this.compact,
+    required this.onPressed,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: const TextStyle(
-        fontSize: 13,
-        fontWeight: FontWeight.w600,
-        color: Color(0xFF6B6B6B),
+    final size = compact ? 34.0 : 44.0;
+    return SizedBox(
+      width: size,
+      height: size,
+      child: OutlinedButton(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          padding: EdgeInsets.zero,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(compact ? 17 : 12),
+          ),
+          side: const BorderSide(color: Color(0xFFE5E7EB)),
+          backgroundColor: Colors.white,
+        ),
+        child: Icon(icon, size: compact ? 18 : 22, color: const Color(0xFF111827)),
       ),
     );
   }
 }
 
-class _DateArrowBtn extends StatelessWidget {
-  final IconData icon;
+class _DayTile extends StatelessWidget {
+  final DateTime day;
+  final bool selected;
+  final int count;
+  final bool compact;
   final VoidCallback onTap;
-  const _DateArrowBtn({required this.icon, required this.onTap});
+
+  const _DayTile({
+    required this.day,
+    required this.selected,
+    required this.count,
+    required this.compact,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
-      child: Container(
-        width: 38,
-        height: 38,
-        margin: const EdgeInsets.symmetric(horizontal: 6),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 150),
+        height: compact ? 68 : 92,
         decoration: BoxDecoration(
-          color: const Color(0xFFF5F5F5),
-          borderRadius: BorderRadius.circular(10),
+          color: selected ? const Color(0xFF2F7D59) : Colors.white,
+          borderRadius: BorderRadius.circular(compact ? 8 : 10),
+          border: Border.all(
+            color: selected ? const Color(0xFF2F7D59) : const Color(0xFFE5E7EB),
+          ),
+          boxShadow: selected
+              ? const [
+                  BoxShadow(
+                    color: Color(0x1F2F7D59),
+                    blurRadius: 10,
+                    offset: Offset(0, 4),
+                  ),
+                ]
+              : null,
         ),
-        child: Icon(icon, size: 18, color: const Color(0xFF1B6B72)),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              DateFormat('EEE').format(day).toUpperCase(),
+              style: TextStyle(
+                fontSize: compact ? 9 : 12,
+                fontWeight: FontWeight.w800,
+                color: selected ? Colors.white : const Color(0xFF111827),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              DateFormat('d').format(day),
+              style: TextStyle(
+                fontSize: compact ? 17 : 28,
+                fontWeight: FontWeight.w900,
+                color: selected ? Colors.white : const Color(0xFF111827),
+              ),
+            ),
+            const SizedBox(height: 3),
+            Text(
+              selected ? 'Today' : '$count booking${count == 1 ? '' : 's'}',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: compact ? 9 : 12,
+                fontWeight: FontWeight.w700,
+                color: selected
+                    ? Colors.white
+                    : const Color(0xFF6B7280),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _CustomerSearchField extends StatelessWidget {
-  final TextEditingController controller;
-  final List<_Customer> customers;
-  final _Customer? selected;
-  final Function(_Customer) onSelect;
+class _MobileDaySummary extends StatelessWidget {
+  final DateTime date;
+  final int count;
+  final int pending;
+  final double sales;
 
-  const _CustomerSearchField({
-    required this.controller,
-    required this.customers,
-    required this.selected,
+  const _MobileDaySummary({
+    required this.date,
+    required this.count,
+    required this.pending,
+    required this.sales,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${DateFormat('EEE, d MMM').format(date).toUpperCase()} - TODAY',
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: Color(0xFF6B7280),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '$count booking${count == 1 ? '' : 's'}',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF111827),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 3),
+                    child: Text(
+                      'RM ${sales.toStringAsFixed(0)}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF6B7280),
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+        _CountPill(color: const Color(0xFF16A34A), value: count - pending),
+        const SizedBox(width: 6),
+        _CountPill(color: const Color(0xFFF59E0B), value: pending),
+      ],
+    );
+  }
+}
+
+class _TabletDaySummary extends StatelessWidget {
+  final DateTime date;
+  final int count;
+  final int pending;
+
+  const _TabletDaySummary({
+    required this.date,
+    required this.count,
+    required this.pending,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            DateFormat('EEEE, d MMMM yyyy').format(date),
+            style: const TextStyle(
+              fontSize: 21,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF111827),
+            ),
+          ),
+        ),
+        _LegendPill(color: const Color(0xFF16A34A), label: '$count Bookings'),
+        const SizedBox(width: 10),
+        _LegendPill(color: const Color(0xFFF59E0B), label: '$pending Pending'),
+      ],
+    );
+  }
+}
+
+class _CountPill extends StatelessWidget {
+  final Color color;
+  final int value;
+
+  const _CountPill({required this.color, required this.value});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        children: [
+          Container(width: 6, height: 6, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          const SizedBox(width: 5),
+          Text('$value', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+}
+
+class _LegendPill extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendPill({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        children: [
+          Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+          const SizedBox(width: 8),
+          Text(label, style: const TextStyle(fontWeight: FontWeight.w800)),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimelinePlacement {
+  final _ScheduleAppointment appointment;
+  final int lane;
+  final int laneCount;
+
+  const _TimelinePlacement({
+    required this.appointment,
+    required this.lane,
+    required this.laneCount,
+  });
+}
+
+double _calculateTop(int startMinutes, int openHour, double hourHeight) {
+  final minutesFromStart = startMinutes - openHour * 60;
+  return minutesFromStart * (hourHeight / 60);
+}
+
+double _calculateHeight(int startMinutes, int endMinutes, double hourHeight) {
+  final duration = (endMinutes - startMinutes).clamp(0, 24 * 60);
+  return duration * (hourHeight / 60);
+}
+
+List<List<_ScheduleAppointment>> _buildOverlapGroups(
+  List<_ScheduleAppointment> appointments,
+) {
+  final sorted = [...appointments]
+    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  final groups = <List<_ScheduleAppointment>>[];
+  var current = <_ScheduleAppointment>[];
+  var currentEnd = -1;
+
+  for (final appointment in sorted) {
+    if (current.isEmpty || appointment.startMinutes < currentEnd) {
+      current.add(appointment);
+      if (appointment.endMinutes > currentEnd) currentEnd = appointment.endMinutes;
+    } else {
+      groups.add(current);
+      current = [appointment];
+      currentEnd = appointment.endMinutes;
+    }
+  }
+
+  if (current.isNotEmpty) groups.add(current);
+  return groups;
+}
+
+List<_TimelinePlacement> _assignOverlapLanes(
+  List<_ScheduleAppointment> appointments,
+) {
+  final placements = <_TimelinePlacement>[];
+  for (final group in _buildOverlapGroups(appointments)) {
+    final lanesEnd = <int>[];
+    final laneByAppointment = <String, int>{};
+
+    for (final appointment in group) {
+      var lane = lanesEnd.indexWhere((end) => appointment.startMinutes >= end);
+      if (lane == -1) {
+        lane = lanesEnd.length;
+        lanesEnd.add(appointment.endMinutes);
+      } else {
+        lanesEnd[lane] = appointment.endMinutes;
+      }
+      laneByAppointment[appointment.id] = lane;
+    }
+
+    final laneCount = lanesEnd.length.clamp(1, 6);
+    for (final appointment in group) {
+      placements.add(
+        _TimelinePlacement(
+          appointment: appointment,
+          lane: laneByAppointment[appointment.id] ?? 0,
+          laneCount: laneCount,
+        ),
+      );
+    }
+  }
+  return placements;
+}
+
+class _MobileTimeline extends StatelessWidget {
+  final List<_ScheduleAppointment> appointments;
+  final int openHour;
+  final int closeHour;
+  final DateTime selectedDate;
+  final ValueChanged<_ScheduleAppointment> onTapAppointment;
+  final ValueChanged<List<_ScheduleAppointment>> onTapCluster;
+
+  const _MobileTimeline({
+    required this.appointments,
+    required this.openHour,
+    required this.closeHour,
+    required this.selectedDate,
+    required this.onTapAppointment,
+    required this.onTapCluster,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const hourHeight = 86.0;
+    const labelWidth = 38.0;
+    const gutter = 10.0;
+    final totalHeight = (closeHour - openHour) * hourHeight;
+    final groups = _buildOverlapGroups(appointments);
+
+    return SizedBox(
+      height: totalHeight,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final canvasWidth = constraints.maxWidth - labelWidth - gutter;
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              _TimelineGrid(
+                openHour: openHour,
+                closeHour: closeHour,
+                hourHeight: hourHeight,
+                labelWidth: labelWidth,
+                gutter: gutter,
+                showNowLine:
+                    _stripTime(selectedDate) == _stripTime(DateTime.now()),
+              ),
+              for (final group in groups)
+                _buildMobilePositionedGroup(
+                  group: group,
+                  openHour: openHour,
+                  hourHeight: hourHeight,
+                  left: labelWidth + gutter,
+                  width: canvasWidth,
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMobilePositionedGroup({
+    required List<_ScheduleAppointment> group,
+    required int openHour,
+    required double hourHeight,
+    required double left,
+    required double width,
+  }) {
+    final start = group.map((a) => a.startMinutes).reduce((a, b) => a < b ? a : b);
+    final end = group.map((a) => a.endMinutes).reduce((a, b) => a > b ? a : b);
+    final top = _calculateTop(start, openHour, hourHeight);
+    final height =
+        _calculateHeight(start, end, hourHeight).clamp(42.0, 220.0).toDouble();
+
+    if (group.length == 1) {
+      final appointment = group.first;
+      return Positioned(
+        top: top,
+        left: left,
+        width: width,
+        height: height,
+        child: _MobileTimelineBlock(
+          appointment: appointment,
+          onTap: () => onTapAppointment(appointment),
+        ),
+      );
+    }
+
+    return Positioned(
+      top: top,
+      left: left,
+      width: width,
+      height: height,
+      child: _MobileCollapsedBlock(
+        appointments: group,
+        onTap: () => onTapCluster(group),
+      ),
+    );
+  }
+}
+
+class _TabletTimeline extends StatelessWidget {
+  final List<_ScheduleAppointment> appointments;
+  final int openHour;
+  final int closeHour;
+  final DateTime selectedDate;
+  final String? selectedId;
+  final ValueChanged<_ScheduleAppointment> onSelect;
+
+  const _TabletTimeline({
+    required this.appointments,
+    required this.openHour,
+    required this.closeHour,
+    required this.selectedDate,
+    required this.selectedId,
     required this.onSelect,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Column(
+    const hourHeight = 96.0;
+    const labelWidth = 58.0;
+    const gutter = 16.0;
+    final totalHeight = (closeHour - openHour) * hourHeight;
+    final placements = _assignOverlapLanes(appointments);
+
+    return SizedBox(
+      height: totalHeight,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final canvasLeft = labelWidth + gutter;
+          final canvasWidth = constraints.maxWidth - canvasLeft;
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              _TimelineGrid(
+                openHour: openHour,
+                closeHour: closeHour,
+                hourHeight: hourHeight,
+                labelWidth: labelWidth,
+                gutter: gutter,
+                showNowLine:
+                    _stripTime(selectedDate) == _stripTime(DateTime.now()),
+              ),
+              for (final placement in placements)
+                _buildTabletPositionedCard(
+                  placement: placement,
+                  openHour: openHour,
+                  hourHeight: hourHeight,
+                  canvasLeft: canvasLeft,
+                  canvasWidth: canvasWidth,
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildTabletPositionedCard({
+    required _TimelinePlacement placement,
+    required int openHour,
+    required double hourHeight,
+    required double canvasLeft,
+    required double canvasWidth,
+  }) {
+    const spacing = 10.0;
+    final appointment = placement.appointment;
+    final laneWidth =
+        (canvasWidth - spacing * (placement.laneCount - 1)) / placement.laneCount;
+    final left = canvasLeft + placement.lane * (laneWidth + spacing);
+    final top = _calculateTop(appointment.startMinutes, openHour, hourHeight);
+    final height = _calculateHeight(
+      appointment.startMinutes,
+      appointment.endMinutes,
+      hourHeight,
+    ).clamp(48.0, 260.0).toDouble();
+
+    return Positioned(
+      top: top,
+      left: left,
+      width: laneWidth,
+      height: height,
+      child: _TabletAppointmentCardTile(
+        appointment: appointment,
+        selected: selectedId == appointment.id,
+        onTap: () => onSelect(appointment),
+      ),
+    );
+  }
+}
+
+class _TimelineGrid extends StatelessWidget {
+  final int openHour;
+  final int closeHour;
+  final double hourHeight;
+  final double labelWidth;
+  final double gutter;
+  final bool showNowLine;
+
+  const _TimelineGrid({
+    required this.openHour,
+    required this.closeHour,
+    required this.hourHeight,
+    required this.labelWidth,
+    required this.gutter,
+    required this.showNowLine,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final totalHeight = (closeHour - openHour) * hourHeight;
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final nowTop = _calculateTop(nowMinutes, openHour, hourHeight);
+    final showNow =
+        showNowLine && nowMinutes >= openHour * 60 && nowMinutes <= closeHour * 60;
+
+    return Stack(
       children: [
-        TextField(
-          controller: controller,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
-          decoration: InputDecoration(
-            hintText: 'Search customer...',
-            hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-            prefixIcon: const Icon(
-              Icons.search,
-              color: Color(0xFF9E9E9E),
-              size: 18,
-            ),
-            filled: true,
-            fillColor: const Color(0xFFF5F5F5),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: BorderSide.none,
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(
-                color: Color(0xFF1B6B72),
-                width: 1.5,
+        for (var hour = openHour; hour <= closeHour; hour++) ...[
+          Positioned(
+            top: (hour - openHour) * hourHeight,
+            left: 0,
+            width: labelWidth,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: Text(
+                _hourLabel(hour),
+                textAlign: TextAlign.right,
+                style: const TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF4B5563),
+                  fontWeight: FontWeight.w800,
+                ),
               ),
             ),
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 14,
-              vertical: 12,
-            ),
           ),
-        ),
-        // Dropdown suggestions
-        if (controller.text.isNotEmpty &&
-            selected == null &&
-            customers.isNotEmpty)
-          Container(
-            margin: const EdgeInsets.only(top: 4),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(10),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.08),
-                  blurRadius: 8,
-                  offset: const Offset(0, 2),
+          Positioned(
+            top: (hour - openHour) * hourHeight,
+            left: labelWidth + gutter,
+            right: 0,
+            child: const Divider(height: 1, color: Color(0xFFE5E7EB)),
+          ),
+          if (hour < closeHour)
+            Positioned(
+              top: (hour - openHour) * hourHeight + hourHeight / 2,
+              left: labelWidth + gutter,
+              right: 0,
+              child: const Divider(height: 1, color: Color(0xFFF1F5F9)),
+            ),
+        ],
+        if (showNow)
+          Positioned(
+            top: nowTop.clamp(0.0, totalHeight),
+            left: 0,
+            right: 0,
+            child: Row(
+              children: [
+                const SizedBox(
+                  width: 38,
+                  child: Text(
+                    'NOW',
+                    textAlign: TextAlign.right,
+                    style: TextStyle(
+                      color: Color(0xFFE53935),
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Container(
+                  width: 9,
+                  height: 9,
+                  decoration: const BoxDecoration(
+                    color: Color(0xFFE53935),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                Expanded(
+                  child: Container(height: 2, color: const Color(0xFFE53935)),
                 ),
               ],
-            ),
-            child: Column(
-              children: customers
-                  .take(5)
-                  .map(
-                    (c) => ListTile(
-                      dense: true,
-                      title: Text(
-                        c.name,
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                      subtitle: Text(
-                        c.phone,
-                        style: const TextStyle(fontSize: 12),
-                      ),
-                      onTap: () => onSelect(c),
-                    ),
-                  )
-                  .toList(),
             ),
           ),
       ],
@@ -1877,539 +1750,252 @@ class _CustomerSearchField extends StatelessWidget {
   }
 }
 
-class _ServiceDebugPanel extends StatelessWidget {
-  final int totalDocs;
-  final int activeDocs;
-  final int visibleDocs;
-  final String selectedTab;
-  final String? error;
-  final List<String> lines;
-
-  const _ServiceDebugPanel({
-    required this.totalDocs,
-    required this.activeDocs,
-    required this.visibleDocs,
-    required this.selectedTab,
-    required this.error,
-    required this.lines,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final preview = lines.take(5).toList();
-
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFFFFF8E1),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFFFD54F)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Service Debug',
-            style: TextStyle(
-              fontSize: 13,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF1A1A2E),
-            ),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Firestore docs: $totalDocs | isActive true: $activeDocs | '
-            'visible in "$selectedTab": $visibleDocs',
-            style: const TextStyle(fontSize: 12, color: Color(0xFF5F6B7A)),
-          ),
-          if (error != null) ...[
-            const SizedBox(height: 6),
-            Text(
-              'Load error: $error',
-              style: const TextStyle(fontSize: 12, color: Color(0xFFE53935)),
-            ),
-          ],
-          if (preview.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            for (final line in preview)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  line,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF5F6B7A),
-                  ),
-                ),
-              ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
-class _ServiceCard extends StatelessWidget {
-  final _Service service;
-  final bool isSelected;
-  final bool showEmoji;
+class _MobileTimelineBlock extends StatelessWidget {
+  final _ScheduleAppointment appointment;
   final VoidCallback onTap;
 
-  const _ServiceCard({
-    required this.service,
-    required this.isSelected,
-    required this.showEmoji,
+  const _MobileTimelineBlock({
+    required this.appointment,
     required this.onTap,
   });
 
-  Color get _chipColor => service.roomType == 'body_room'
-      ? const Color(0xFFEDE7F6)
-      : service.roomType.isEmpty
-      ? const Color(0xFFE8F5F5)
-      : const Color(0xFFFFF9E6);
-
-  Color get _chipTextColor => service.roomType == 'body_room'
-      ? const Color(0xFF7C3AED)
-      : service.roomType.isEmpty
-      ? const Color(0xFF1B6B72)
-      : const Color(0xFFC8963E);
-
-  String get _chipLabel => service.roomType == 'body_room'
-      ? 'Body Room'
-      : service.roomType.isEmpty
-      ? 'Any Room'
-      : 'Foot Chair';
-
   @override
   Widget build(BuildContext context) {
+    final colors = _statusColors(appointment);
     return GestureDetector(
       onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected
-                ? const Color(0xFF1B6B72)
-                : const Color(0xFFEEEEEE),
-            width: isSelected ? 2 : 1,
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 4,
-              offset: const Offset(0, 1),
-            ),
-          ],
-        ),
-        child: Stack(
-          children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                if (showEmoji) ...[
-                  _ServiceImage(imageUrl: service.imageUrl),
-                  const SizedBox(height: 6),
-                ],
-                Text(
-                  service.name,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    _SmallBadge(
-                      label: '${service.duration}m',
-                      bg: const Color(0xFFE8F5F5),
-                      color: const Color(0xFF1B6B72),
-                    ),
-                    const SizedBox(width: 6),
-                    _SmallBadge(
-                      label: 'RM ${service.price.toStringAsFixed(0)}',
-                      bg: const Color(0xFFF5F5F5),
-                      color: const Color(0xFF6B6B6B),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                _SmallBadge(
-                  label: _chipLabel,
-                  bg: _chipColor,
-                  color: _chipTextColor,
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ServiceImage extends StatelessWidget {
-  final String imageUrl;
-
-  const _ServiceImage({required this.imageUrl});
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
       child: Container(
-        width: 38,
-        height: 38,
-        color: const Color(0xFFE8F5F5),
-        child: imageUrl.isEmpty
-            ? const Icon(
-                Icons.spa_outlined,
-                color: Color(0xFF1B6B72),
-                size: 22,
-              )
-            : Image.network(
-                imageUrl,
-                fit: BoxFit.cover,
-                errorBuilder: (_, error, stackTrace) => const Icon(
-                  Icons.spa_outlined,
-                  color: Color(0xFF1B6B72),
-                  size: 22,
-                ),
-              ),
-      ),
-    );
-  }
-}
-
-class _TherapistCard extends StatelessWidget {
-  final _Therapist therapist;
-  final bool isSelected;
-  final bool isDisabled;
-  final VoidCallback? onTap;
-
-  const _TherapistCard({
-    required this.therapist,
-    required this.isSelected,
-    required this.isDisabled,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
-
-    return GestureDetector(
-      onTap: isDisabled ? null : onTap,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 150),
-        opacity: isDisabled ? 0.4 : 1.0,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isSelected
-                  ? const Color(0xFF1B6B72)
-                  : const Color(0xFFEEEEEE),
-              width: isSelected ? 2 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: isTablet ? 20 : 22,
-                backgroundColor: isDisabled
-                    ? const Color(0xFFBDBDBD)
-                    : therapist.avatarColor,
-                child: Text(
-                  therapist.initials,
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: isTablet ? 12 : 13,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      therapist.name,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: therapist.isFree
-                                ? const Color(0xFF4CAF50)
-                                : const Color(0xFFF59E0B),
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          therapist.isFree
-                              ? 'Free'
-                              : therapist.busyUntil.isNotEmpty
-                              ? 'Busy until ${therapist.busyUntil}'
-                              : 'Busy',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: therapist.isFree
-                                ? const Color(0xFF4CAF50)
-                                : const Color(0xFFF59E0B),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    _SmallBadge(
-                      label: therapist.specializations.contains('body_massage')
-                          ? 'Body Massage'
-                          : 'Foot Therapy',
-                      bg: const Color(0xFFEDE7F6),
-                      color: const Color(0xFF7C3AED),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _RoomZoneCard extends StatelessWidget {
-  final _RoomZone zone;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _RoomZoneCard({
-    required this.zone,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: double.infinity,
-        padding: const EdgeInsets.all(14),
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
+          color: colors.bg,
           borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected
-                ? const Color(0xFF1B6B72)
-                : const Color(0xFFEEEEEE),
-            width: isSelected ? 2 : 1,
-          ),
+          border: Border.all(color: colors.border),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              blurRadius: 10,
+              offset: Offset(0, 3),
+            ),
+          ],
         ),
         child: Row(
           children: [
-            _RoomImage(imageUrl: zone.imageUrl, roomType: zone.type),
+            Container(
+              width: 4,
+              height: double.infinity,
+              decoration: BoxDecoration(
+                color: colors.accent,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            ),
+            const SizedBox(width: 9),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final compact = constraints.maxHeight < 62;
+                  return Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        appointment.customerName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                      if (!compact) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${appointment.serviceName} - RM ${appointment.price.toStringAsFixed(0)}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF4B5563),
+                          ),
+                        ),
+                      ],
+                    ],
+                  );
+                },
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              appointment.timeRange,
+              style: const TextStyle(
+                fontSize: 10,
+                color: Color(0xFF111827),
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileCollapsedBlock extends StatelessWidget {
+  final List<_ScheduleAppointment> appointments;
+  final VoidCallback onTap;
+
+  const _MobileCollapsedBlock({
+    required this.appointments,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final first = appointments.first;
+    final colors = _statusColors(first);
+    final start = appointments.map((a) => a.startTime).reduce((a, b) => a.compareTo(b) < 0 ? a : b);
+    final end = appointments.map((a) => a.endTime).reduce((a, b) => a.compareTo(b) > 0 ? a : b);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF3F8F2),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colors.border),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x12000000),
+              blurRadius: 10,
+              offset: Offset(0, 3),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            CircleAvatar(
+              radius: 18,
+              backgroundColor: colors.accent,
+              child: Text(
+                '${appointments.length}',
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
             const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${appointments.length} overlapping bookings',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF111827),
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '$start - $end',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF4B5563),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Icon(Icons.keyboard_arrow_up, color: Color(0xFF2F7D59)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileAppointmentCard extends StatelessWidget {
+  final _ScheduleAppointment appointment;
+  final VoidCallback onTap;
+
+  const _MobileAppointmentCard({
+    required this.appointment,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = _statusColors(appointment);
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: colors.bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: const Color(0xFFE5E7EB)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x0D000000),
+              blurRadius: 8,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(width: 3, height: 48, decoration: BoxDecoration(color: colors.accent, borderRadius: BorderRadius.circular(99))),
+            const SizedBox(width: 9),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    zone.name,
+                    appointment.customerName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A2E),
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF111827),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Container(
-                        width: 6,
-                        height: 6,
-                        decoration: const BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color(0xFF4CAF50),
-                        ),
-                      ),
-                      const SizedBox(width: 5),
-                      Text(
-                        '${zone.freeSlots} of ${zone.totalSlots} free',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF4CAF50),
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
+                  const SizedBox(height: 5),
+                  Text(
+                    '${appointment.serviceName} - RM ${appointment.price.toStringAsFixed(0)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11, color: Color(0xFF4B5563)),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _RoomImage extends StatelessWidget {
-  final String imageUrl;
-  final String roomType;
-
-  const _RoomImage({required this.imageUrl, required this.roomType});
-
-  IconData get _fallbackIcon =>
-      roomType == 'foot_chair' ? Icons.chair_outlined : Icons.meeting_room_outlined;
-
-  @override
-  Widget build(BuildContext context) {
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        width: 38,
-        height: 38,
-        color: const Color(0xFFEDE7F6),
-        child: imageUrl.isEmpty
-            ? Icon(_fallbackIcon, color: const Color(0xFF7C3AED), size: 22)
-            : Image.network(
-                imageUrl,
-                fit: BoxFit.cover,
-                errorBuilder: (_, error, stackTrace) => Icon(
-                  _fallbackIcon,
-                  color: const Color(0xFF7C3AED),
-                  size: 22,
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  appointment.timeRange,
+                  style: const TextStyle(
+                    fontSize: 10,
+                    color: Color(0xFF111827),
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
-              ),
-      ),
-    );
-  }
-}
-
-class _SlotGrid extends StatelessWidget {
-  final List<_TimeSlot> slots;
-  final _TimeSlot? selectedSlot;
-  final bool recommended;
-  final ValueChanged<_TimeSlot> onSelect;
-
-  const _SlotGrid({
-    required this.slots,
-    required this.selectedSlot,
-    required this.recommended,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final columns = constraints.maxWidth >= 900
-            ? 3
-            : constraints.maxWidth >= 520
-            ? 2
-            : 1;
-        const spacing = 14.0;
-        final itemWidth =
-            (constraints.maxWidth - spacing * (columns - 1)) / columns;
-
-        return Wrap(
-          spacing: spacing,
-          runSpacing: 10,
-          children: slots.map((slot) {
-            final isSelected = selectedSlot?.start == slot.start;
-            return SizedBox(
-              width: itemWidth,
-              child: recommended
-                  ? _SlotTile(
-                      slot: slot,
-                      isSelected: isSelected,
-                      onTap: () => onSelect(slot),
-                    )
-                  : _SlotChip(
-                      slot: slot,
-                      isSelected: isSelected,
-                      onTap: () => onSelect(slot),
-                    ),
-            );
-          }).toList(),
-        );
-      },
-    );
-  }
-}
-
-class _SlotTile extends StatelessWidget {
-  final _TimeSlot slot;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _SlotTile({
-    required this.slot,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-        decoration: BoxDecoration(
-          color: isSelected
-              ? const Color(0xFF1B6B72)
-              : const Color(0xFF1B6B72).withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: const Color(0xFF1B6B72),
-            width: isSelected ? 2 : 1,
-          ),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: [
-            Text(
-              slot.label,
-              style: TextStyle(
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF1B6B72),
-              ),
-            ),
-            Text(
-              'Best Fit',
-              style: TextStyle(
-                fontSize: 12,
-                color: isSelected
-                    ? Colors.white.withValues(alpha: 0.85)
-                    : const Color(0xFF1B6B72),
-              ),
+                const SizedBox(height: 8),
+                Text(
+                  appointment.statusLabel,
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: colors.accent,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
             ),
           ],
         ),
@@ -2418,349 +2004,442 @@ class _SlotTile extends StatelessWidget {
   }
 }
 
-class _SlotChip extends StatelessWidget {
-  final _TimeSlot slot;
-  final bool isSelected;
+class _TabletAppointmentCardTile extends StatelessWidget {
+  final _ScheduleAppointment appointment;
+  final bool selected;
   final VoidCallback onTap;
 
-  const _SlotChip({
-    required this.slot,
-    required this.isSelected,
+  const _TabletAppointmentCardTile({
+    required this.appointment,
+    required this.selected,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
+    final colors = _statusColors(appointment);
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF1B6B72) : Colors.white,
+          color: colors.bg,
           borderRadius: BorderRadius.circular(10),
           border: Border.all(
-            color: isSelected
-                ? const Color(0xFF1B6B72)
-                : const Color(0xFFDDDDDD),
+            color: selected ? colors.accent : colors.border,
+            width: selected ? 2 : 1,
           ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x0D000000),
+              blurRadius: 10,
+              offset: Offset(0, 3),
+            ),
+          ],
         ),
-        child: Text(
-          slot.label,
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w500,
-            color: isSelected ? Colors.white : const Color(0xFF1A1A2E),
-          ),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final compact = constraints.maxHeight < 92;
+            return Column(
+              mainAxisAlignment:
+                  compact ? MainAxisAlignment.center : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  appointment.customerName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    color: Color(0xFF111827),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                SizedBox(height: compact ? 5 : 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        appointment.timeRange,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF374151),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      appointment.statusLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colors.accent,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: colors.accent,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ],
+                ),
+                if (!compact) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    appointment.serviceName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF4B5563),
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'RM ${appointment.price.toStringAsFixed(0)}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF111827),
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
         ),
       ),
     );
   }
 }
 
-class _UnavailableChip extends StatelessWidget {
+class _AppointmentStatusStyle {
+  final Color accent;
+  final Color bg;
+  final Color border;
+
+  const _AppointmentStatusStyle({
+    required this.accent,
+    required this.bg,
+    required this.border,
+  });
+}
+
+_AppointmentStatusStyle _statusColors(_ScheduleAppointment appointment) {
+  if (appointment.isPending) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFF59E0B),
+      bg: Color(0xFFFFF7E6),
+      border: Color(0xFFFBBF24),
+    );
+  }
+  if (appointment.isInProgress) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF2563EB),
+      bg: Color(0xFFEFF6FF),
+      border: Color(0xFF93C5FD),
+    );
+  }
+  if (appointment.isCompleted) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF15803D),
+      bg: Color(0xFFF0FDF4),
+      border: Color(0xFF86EFAC),
+    );
+  }
+  return const _AppointmentStatusStyle(
+      accent: Color(0xFF2F7D59),
+      bg: Color(0xFFF0F7F0),
+      border: Color(0xFFB7DCB9),
+  );
+}
+
+class _AppointmentSummaryPanel extends StatelessWidget {
+  final _ScheduleAppointment appointment;
+  final bool compact;
+  final VoidCallback onClose;
+  final VoidCallback? onConfirm;
+  final VoidCallback onEdit;
+  final VoidCallback? onStart;
+  final VoidCallback? onComplete;
+  final VoidCallback? onCancel;
+
+  const _AppointmentSummaryPanel({
+    required this.appointment,
+    required this.onClose,
+    required this.onConfirm,
+    required this.onEdit,
+    required this.onStart,
+    required this.onComplete,
+    required this.onCancel,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = _statusColors(appointment);
+    return Container(
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(compact ? 18 : 16),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26000000),
+            blurRadius: 24,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                _StatusBadge(label: appointment.statusLabel, colors: colors),
+                const Spacer(),
+                IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 28,
+                  backgroundColor: colors.accent.withValues(alpha: 0.78),
+                  child: Text(
+                    appointment.initials,
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        appointment.customerName,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        appointment.customerPhone,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF6B7280),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 22),
+            _SummaryItem(
+              icon: Icons.spa_outlined,
+              label: 'Service',
+              title: appointment.serviceName,
+              subtitle: appointment.serviceDescription,
+            ),
+            _SummaryItem(
+              icon: Icons.person_outline,
+              label: 'Therapist',
+              title: appointment.therapistName,
+            ),
+            _SummaryItem(
+              icon: Icons.meeting_room_outlined,
+              label: 'Room / Zone',
+              title: appointment.roomName,
+            ),
+            _SummaryItem(
+              icon: Icons.calendar_today_outlined,
+              label: 'Date',
+              title: DateFormat('EEEE, d MMMM yyyy').format(appointment.date),
+            ),
+            _SummaryItem(
+              icon: Icons.schedule_outlined,
+              label: 'Time',
+              title:
+                  '${appointment.timeRange} (${appointment.durationMinutes} min)',
+            ),
+            _SummaryItem(
+              icon: Icons.payments_outlined,
+              label: 'Price',
+              title: 'RM ${appointment.price.toStringAsFixed(0)}',
+            ),
+            if (appointment.notes.trim().isNotEmpty) ...[
+              const SizedBox(height: 4),
+              const Text(
+                'Notes',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Color(0xFF6B7280),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  appointment.notes,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF374151),
+                    height: 1.4,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ],
+            const SizedBox(height: 18),
+            if (onConfirm != null)
+              _PanelActionButton(
+                icon: Icons.check,
+                label: 'Confirm Booking',
+                color: const Color(0xFFF59E0B),
+                filled: true,
+                onPressed: onConfirm!,
+              ),
+            _PanelActionButton(
+              icon: Icons.edit_outlined,
+              label: 'Edit Appointment',
+              color: const Color(0xFFF59E0B),
+              onPressed: onEdit,
+            ),
+            if (onStart != null)
+              _PanelActionButton(
+                icon: Icons.play_arrow_outlined,
+                label: 'Mark as In Progress',
+                color: const Color(0xFF2563EB),
+                onPressed: onStart!,
+              ),
+            if (onComplete != null)
+              _PanelActionButton(
+                icon: Icons.check,
+                label: 'Mark as Completed',
+                color: const Color(0xFF15803D),
+                onPressed: onComplete!,
+              ),
+            if (onCancel != null)
+              _PanelActionButton(
+                icon: Icons.delete_outline,
+                label: 'Cancel Appointment',
+                color: const Color(0xFFE53935),
+                onPressed: onCancel!,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusBadge extends StatelessWidget {
   final String label;
-  const _UnavailableChip({required this.label});
+  final _AppointmentStatusStyle colors;
+
+  const _StatusBadge({required this.label, required this.colors});
 
   @override
   Widget build(BuildContext context) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: const Color(0xFFF5F5F5),
+        color: colors.accent.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFFBDBDBD),
-              decoration: TextDecoration.lineThrough,
-            ),
-          ),
-          const SizedBox(width: 4),
-          const Text(
-            '✕',
-            style: TextStyle(fontSize: 10, color: Color(0xFFBDBDBD)),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _SummaryRow extends StatelessWidget {
-  final String label, value;
-  const _SummaryRow({required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF9E9E9E),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 14,
-              fontWeight: FontWeight.w500,
-              color: Color(0xFF1A1A2E),
-            ),
-          ),
-          const Divider(height: 16, color: Color(0xFFF0F0F0)),
-        ],
-      ),
-    );
-  }
-}
-
-class _SmallBadge extends StatelessWidget {
-  final String label;
-  final Color bg, color;
-  const _SmallBadge({
-    required this.label,
-    required this.bg,
-    required this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
         label,
         style: TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w500,
-          color: color,
+          color: colors.accent,
+          fontSize: 13,
+          fontWeight: FontWeight.w900,
         ),
       ),
     );
   }
 }
 
-// ── Phone Bottom Bar ──────────────────────────────────────────────
+class _SummaryItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String title;
+  final String? subtitle;
 
-class _PhoneBottomBar extends StatelessWidget {
-  final _Service? service;
-  final bool isExpanded;
-  final VoidCallback onToggle;
-  final bool canConfirm;
-  final bool isConfirming;
-  final VoidCallback onConfirm;
-  final DateTime selectedDate;
-  final _Customer? selectedCustomer;
-  final _Therapist? selectedTherapist;
-  final _RoomZone? selectedRoom;
-  final _TimeSlot? selectedSlot;
-
-  const _PhoneBottomBar({
-    required this.service,
-    required this.isExpanded,
-    required this.onToggle,
-    required this.canConfirm,
-    required this.isConfirming,
-    required this.onConfirm,
-    required this.selectedDate,
-    required this.selectedCustomer,
-    required this.selectedTherapist,
-    required this.selectedRoom,
-    required this.selectedSlot,
+  const _SummaryItem({
+    required this.icon,
+    required this.label,
+    required this.title,
+    this.subtitle,
   });
 
   @override
   Widget build(BuildContext context) {
-    final dateStr = DateFormat('EEE, d MMM yyyy').format(selectedDate);
-
-    return Container(
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 12,
-            offset: const Offset(0, -2),
-          ),
-        ],
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 16),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Expanded summary
-          if (isExpanded)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(16),
-              color: const Color(0xFFF8F8F8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Booking Summary',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF1A1A2E),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  _MiniRow('Date', dateStr),
-                  _MiniRow('Customer', selectedCustomer?.name ?? '—'),
-                  _MiniRow(
-                    'Service',
-                    service != null
-                        ? '${service!.name} · ${service!.duration} min'
-                        : '—',
-                  ),
-                  _MiniRow('Therapist', selectedTherapist?.name ?? '—'),
-                  _MiniRow('Zone', selectedRoom?.name ?? '—'),
-                  _MiniRow('Time', selectedSlot?.label ?? '—'),
-                  if (service != null) ...[
-                    const Divider(height: 14),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'SST (6%)',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF9E9E9E),
-                          ),
-                        ),
-                        Text(
-                          'RM ${(service!.price * 0.06).toStringAsFixed(2)}',
-                          style: const TextStyle(
-                            fontSize: 12,
-                            color: Color(0xFF9E9E9E),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text(
-                          'Total',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1A1A2E),
-                          ),
-                        ),
-                        Text(
-                          'RM ${(service!.price * 1.06).toStringAsFixed(2)}',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.bold,
-                            color: Color(0xFF1B6B72),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ],
-              ),
-            ),
-          // Bottom action row
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
+          Icon(icon, size: 20, color: const Color(0xFF4B5563)),
+          const SizedBox(width: 14),
+          Expanded(
             child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // Summary toggle row
-                GestureDetector(
-                  onTap: onToggle,
-                  child: Row(
-                    children: [
-                      Icon(
-                        isExpanded
-                            ? Icons.keyboard_arrow_down
-                            : Icons.keyboard_arrow_up,
-                        size: 18,
-                        color: const Color(0xFF1B6B72),
-                      ),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          service != null
-                              ? '${service!.name} · ${service!.duration} min'
-                              : 'Select a service',
-                          style: const TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w500,
-                            color: Color(0xFF1A1A2E),
-                          ),
-                        ),
-                      ),
-                      Text(
-                        service != null
-                            ? 'RM ${service!.price.toStringAsFixed(2)}'
-                            : '',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1B6B72),
-                        ),
-                      ),
-                    ],
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF6B7280),
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton.icon(
-                    onPressed: canConfirm && !isConfirming ? onConfirm : null,
-                    icon: isConfirming
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Icon(Icons.check, size: 16),
-                    label: const Text(
-                      'Confirm Appointment',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF1B6B72),
-                      foregroundColor: Colors.white,
-                      disabledBackgroundColor: const Color(0xFFBDBDBD),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      elevation: 0,
-                    ),
+                const SizedBox(height: 3),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    color: Color(0xFF111827),
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
-                if (!canConfirm) ...[
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Complete all selections to confirm',
-                    style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle!,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: Color(0xFF6B7280),
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ],
               ],
@@ -2772,28 +2451,264 @@ class _PhoneBottomBar extends StatelessWidget {
   }
 }
 
-class _MiniRow extends StatelessWidget {
-  final String label, value;
-  const _MiniRow(this.label, this.value);
+class _PanelActionButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool filled;
+  final VoidCallback onPressed;
+
+  const _PanelActionButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onPressed,
+    this.filled = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-          ),
-          Text(
-            value,
-            style: const TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w500,
-              color: Color(0xFF1A1A2E),
+      padding: const EdgeInsets.only(bottom: 10),
+      child: SizedBox(
+        width: double.infinity,
+        height: 44,
+        child: OutlinedButton.icon(
+          onPressed: onPressed,
+          icon: Icon(icon, size: 18),
+          label: Text(label),
+          style: OutlinedButton.styleFrom(
+            backgroundColor: filled ? color : Colors.white,
+            foregroundColor: filled ? Colors.white : color,
+            side: BorderSide(color: color.withValues(alpha: 0.72)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(8),
             ),
+            textStyle: const TextStyle(fontWeight: FontWeight.w900),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AppointmentEditSheet extends StatefulWidget {
+  final _ScheduleAppointment appointment;
+
+  const _AppointmentEditSheet({required this.appointment});
+
+  @override
+  State<_AppointmentEditSheet> createState() => _AppointmentEditSheetState();
+}
+
+class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
+  late final TextEditingController _start;
+  late final TextEditingController _end;
+  late final TextEditingController _notes;
+  late final TextEditingController _price;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _start = TextEditingController(text: widget.appointment.startTime);
+    _end = TextEditingController(text: widget.appointment.endTime);
+    _notes = TextEditingController(text: widget.appointment.notes);
+    _price = TextEditingController(
+      text: widget.appointment.price.toStringAsFixed(0),
+    );
+  }
+
+  @override
+  void dispose() {
+    _start.dispose();
+    _end.dispose();
+    _notes.dispose();
+    _price.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await FirebaseFirestore.instance
+          .collection('appointments')
+          .doc(widget.appointment.id)
+          .update({
+        'startTime': _start.text.trim(),
+        'endTime': _end.text.trim(),
+        'notes': _notes.text.trim(),
+        'totalPrice': double.tryParse(_price.text.trim()) ?? widget.appointment.price,
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (mounted) Navigator.pop(context, true);
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        18,
+        20,
+        MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Edit Appointment',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF111827),
+              ),
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                Expanded(child: _EditField(label: 'Start', controller: _start)),
+                const SizedBox(width: 12),
+                Expanded(child: _EditField(label: 'End', controller: _end)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            _EditField(
+              label: 'Price',
+              controller: _price,
+              keyboardType: TextInputType.number,
+            ),
+            const SizedBox(height: 12),
+            _EditField(label: 'Notes', controller: _notes, maxLines: 3),
+            const SizedBox(height: 18),
+            SizedBox(
+              width: double.infinity,
+              height: 48,
+              child: FilledButton(
+                onPressed: _saving ? null : _save,
+                style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF2F7D59),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                ),
+                child: Text(_saving ? 'Saving...' : 'Save Changes'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _EditField extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+  final int maxLines;
+  final TextInputType? keyboardType;
+
+  const _EditField({
+    required this.label,
+    required this.controller,
+    this.maxLines = 1,
+    this.keyboardType,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      maxLines: maxLines,
+      keyboardType: keyboardType,
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: const Color(0xFFF6FAF5),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
+        ),
+      ),
+    );
+  }
+}
+
+class _ScheduleLoading extends StatelessWidget {
+  const _ScheduleLoading();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: CircularProgressIndicator(color: Color(0xFF2F7D59)),
+    );
+  }
+}
+
+class _ScheduleError extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _ScheduleError({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.error_outline, color: Color(0xFFE53935), size: 30),
+          const SizedBox(height: 10),
+          const Text(
+            'Unable to load appointments.',
+            style: TextStyle(fontWeight: FontWeight.w800),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleEmptyState extends StatelessWidget {
+  const _ScheduleEmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(28),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: const Column(
+        children: [
+          Icon(Icons.event_available_outlined, color: Color(0xFF2F7D59), size: 34),
+          SizedBox(height: 10),
+          Text(
+            'No appointments for this day',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF111827),
+            ),
+          ),
+          SizedBox(height: 4),
+          Text(
+            'New bookings will appear here automatically.',
+            style: TextStyle(color: Color(0xFF6B7280)),
           ),
         ],
       ),
