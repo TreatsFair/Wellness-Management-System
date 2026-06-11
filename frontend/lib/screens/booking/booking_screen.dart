@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
+DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
+
 String _normalizeRoomType(Object? value) {
   final raw = value?.toString().trim().toLowerCase() ?? '';
   if (raw.isEmpty || raw == '-') return '';
@@ -112,7 +114,6 @@ class _Therapist {
       : isMale
       ? Icons.male
       : Icons.person_outline;
-
 }
 
 class _RoomZone {
@@ -156,6 +157,11 @@ class _Customer {
       phone: d['phone'] ?? '',
     );
   }
+
+  static _Customer get guest =>
+      const _Customer(id: 'walk_in_guest', name: 'Guest Account', phone: '');
+
+  bool get isGuest => id == 'walk_in_guest';
 }
 
 // ── Main Screen ───────────────────────────────────────────────────
@@ -265,9 +271,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   Future<void> _loadRooms() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('rooms')
-        .get();
+    final snap = await FirebaseFirestore.instance.collection('rooms').get();
 
     final zones = <_RoomZone>[];
     for (final doc in snap.docs) {
@@ -363,6 +367,30 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _filteredCustomers = _customers;
       _selectedCustomer = savedCustomer;
       _customerSearchController.text = savedCustomer.name;
+    });
+  }
+
+  void _selectCustomer(_Customer customer) {
+    setState(() {
+      _selectedCustomer = customer;
+      _customerSearchController.text = customer.name;
+      _filteredCustomers = _customers;
+    });
+  }
+
+  void _selectGuestCustomer() {
+    setState(() {
+      _selectedCustomer = _Customer.guest;
+      _customerSearchController.clear();
+      _filteredCustomers = _customers;
+    });
+  }
+
+  void _clearCustomerSelection() {
+    setState(() {
+      _selectedCustomer = null;
+      _customerSearchController.clear();
+      _filteredCustomers = _customers;
     });
   }
 
@@ -520,9 +548,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     }
   }
 
-  void _onDateChanged(int days) {
+  void _setSelectedDate(DateTime date) {
     setState(() {
-      _selectedDate = _selectedDate.add(Duration(days: days));
+      _selectedDate = _stripDate(date);
       _selectedSlot = null;
       _slots = [];
       _loadingSlots = false;
@@ -533,6 +561,19 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         _selectedRoom != null) {
       _generateSlots();
     }
+  }
+
+  void _onDateChanged(int days) {
+    _setSelectedDate(_selectedDate.add(Duration(days: days)));
+  }
+
+  Future<void> _openDatePicker() async {
+    final picked = await showDialog<DateTime>(
+      context: context,
+      builder: (context) =>
+          _BookingMonthCalendarDialog(initialDate: _selectedDate),
+    );
+    if (picked != null) _setSelectedDate(picked);
   }
 
   // ── Confirm Appointment ────────────────────────────────────────
@@ -598,6 +639,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       // Save to Firestore
       await FirebaseFirestore.instance.collection('appointments').add({
         'customerId': _selectedCustomer!.id,
+        'customerName': _selectedCustomer!.name,
+        'customerPhone': _selectedCustomer!.phone,
         'therapistId': _selectedTherapist!.id,
         'roomId': _selectedRoom!.id,
         'serviceId': _selectedService!.id,
@@ -809,32 +852,47 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               onTap: () => _onDateChanged(-1),
             ),
             Expanded(
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF5F5F5),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.calendar_today_outlined,
-                      size: 16,
-                      color: Color(0xFF1B6B72),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      formatted,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: Color(0xFF1A1A2E),
+              child: InkWell(
+                onTap: _openDatePicker,
+                borderRadius: BorderRadius.circular(10),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 14,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F5F5),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: const Color(0xFFE5E7EB)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.calendar_today_outlined,
+                        size: 16,
+                        color: Color(0xFF1B6B72),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          formatted,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1A1A2E),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 18,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -859,11 +917,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           controller: _customerSearchController,
           customers: _filteredCustomers,
           selected: _selectedCustomer,
-          onSelect: (c) => setState(() {
-            _selectedCustomer = c;
-            _customerSearchController.text = c.name;
-            _filteredCustomers = _customers;
-          }),
+          onSelect: _selectCustomer,
+          onClear: _clearCustomerSelection,
+        ),
+        const SizedBox(height: 12),
+        const _CustomerOptionDivider(),
+        const SizedBox(height: 12),
+        _GuestCustomerOption(
+          isSelected: _selectedCustomer?.isGuest ?? false,
+          onTap: _selectGuestCustomer,
         ),
         const SizedBox(height: 8),
         GestureDetector(
@@ -1378,6 +1440,18 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     super.dispose();
   }
 
+  Future<void> _openFieldDatePicker(TextEditingController controller) async {
+    final initialDate =
+        DateTime.tryParse(controller.text.trim()) ?? DateTime.now();
+    final picked = await showDialog<DateTime>(
+      context: context,
+      builder: (context) =>
+          _BookingMonthCalendarDialog(initialDate: initialDate),
+    );
+    if (picked == null) return;
+    controller.text = DateFormat('yyyy-MM-dd').format(_stripDate(picked));
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -1470,6 +1544,7 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   controller: _dobController,
                   hint: 'YYYY-MM-DD',
                   keyboardType: TextInputType.datetime,
+                  onCalendarTap: () => _openFieldDatePicker(_dobController),
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -1477,6 +1552,8 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   controller: _joinDateController,
                   hint: 'YYYY-MM-DD',
                   keyboardType: TextInputType.datetime,
+                  onCalendarTap: () =>
+                      _openFieldDatePicker(_joinDateController),
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -1546,6 +1623,7 @@ class _QuickCustomerField extends StatelessWidget {
   final TextInputType? keyboardType;
   final bool requiredField;
   final int maxLines;
+  final VoidCallback? onCalendarTap;
 
   const _QuickCustomerField({
     required this.label,
@@ -1554,6 +1632,7 @@ class _QuickCustomerField extends StatelessWidget {
     this.keyboardType,
     this.requiredField = false,
     this.maxLines = 1,
+    this.onCalendarTap,
   });
 
   @override
@@ -1570,6 +1649,17 @@ class _QuickCustomerField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        suffixIcon: onCalendarTap == null
+            ? null
+            : IconButton(
+                onPressed: onCalendarTap,
+                tooltip: 'Pick date',
+                icon: const Icon(
+                  Icons.calendar_today_outlined,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -1701,6 +1791,190 @@ class _SubSectionLabel extends StatelessWidget {
   }
 }
 
+class _BookingMonthCalendarDialog extends StatefulWidget {
+  final DateTime initialDate;
+
+  const _BookingMonthCalendarDialog({required this.initialDate});
+
+  @override
+  State<_BookingMonthCalendarDialog> createState() =>
+      _BookingMonthCalendarDialogState();
+}
+
+class _BookingMonthCalendarDialogState
+    extends State<_BookingMonthCalendarDialog> {
+  late DateTime _visibleMonth;
+
+  @override
+  void initState() {
+    super.initState();
+    _visibleMonth = DateTime(widget.initialDate.year, widget.initialDate.month);
+  }
+
+  void _moveMonth(int offset) {
+    setState(() {
+      _visibleMonth = DateTime(
+        _visibleMonth.year,
+        _visibleMonth.month + offset,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final firstDay = DateTime(_visibleMonth.year, _visibleMonth.month, 1);
+    final gridStart = firstDay.subtract(Duration(days: firstDay.weekday % 7));
+    final days = List.generate(
+      42,
+      (index) => gridStart.add(Duration(days: index)),
+    );
+    final selected = _stripDate(widget.initialDate);
+    final today = _stripDate(DateTime.now());
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 340),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      DateFormat('MMMM yyyy').format(_visibleMonth),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _moveMonth(-1),
+                    icon: const Icon(Icons.chevron_left),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  IconButton(
+                    onPressed: () => _moveMonth(1),
+                    icon: const Icon(Icons.chevron_right),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: const [
+                  _BookingWeekdayLabel('SUN'),
+                  _BookingWeekdayLabel('MON'),
+                  _BookingWeekdayLabel('TUE'),
+                  _BookingWeekdayLabel('WED'),
+                  _BookingWeekdayLabel('THU'),
+                  _BookingWeekdayLabel('FRI'),
+                  _BookingWeekdayLabel('SAT'),
+                ],
+              ),
+              const SizedBox(height: 8),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 7,
+                  mainAxisSpacing: 7,
+                  crossAxisSpacing: 7,
+                ),
+                itemCount: days.length,
+                itemBuilder: (context, index) {
+                  final day = days[index];
+                  final cleanDay = _stripDate(day);
+                  final isSelected = cleanDay == selected;
+                  final isToday = cleanDay == today;
+                  final inMonth = day.month == _visibleMonth.month;
+
+                  return InkWell(
+                    onTap: () => Navigator.pop(context, cleanDay),
+                    borderRadius: BorderRadius.circular(18),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 120),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isSelected
+                            ? const Color(0xFF1B6B72)
+                            : Colors.transparent,
+                        border: isToday && !isSelected
+                            ? Border.all(color: const Color(0xFF1B6B72))
+                            : null,
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '${day.day}',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: isSelected || isToday
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                          color: isSelected
+                              ? Colors.white
+                              : inMonth
+                              ? const Color(0xFF111827)
+                              : const Color(0xFFCBD5E1),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(context, today),
+                    icon: const Icon(Icons.today_outlined, size: 17),
+                    label: const Text('Today'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF1B6B72),
+                      textStyle: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BookingWeekdayLabel extends StatelessWidget {
+  final String label;
+
+  const _BookingWeekdayLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 10,
+          color: Color(0xFF6B7280),
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
 class _DateArrowBtn extends StatelessWidget {
   final IconData icon;
   final VoidCallback onTap;
@@ -1724,17 +1998,117 @@ class _DateArrowBtn extends StatelessWidget {
   }
 }
 
+class _CustomerOptionDivider extends StatelessWidget {
+  const _CustomerOptionDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Row(
+      children: [
+        Expanded(child: Divider(color: Color(0xFFEEEEEE))),
+        Padding(
+          padding: EdgeInsets.symmetric(horizontal: 12),
+          child: Text(
+            'or',
+            style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+          ),
+        ),
+        Expanded(child: Divider(color: Color(0xFFEEEEEE))),
+      ],
+    );
+  }
+}
+
+class _GuestCustomerOption extends StatelessWidget {
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _GuestCustomerOption({required this.isSelected, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? const Color(0xFF1B6B72).withValues(alpha: 0.06)
+                : const Color(0xFFF8F8F8),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isSelected
+                  ? const Color(0xFF1B6B72)
+                  : const Color(0xFFEEEEEE),
+            ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF0F0F0),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.person_outline,
+                  size: 18,
+                  color: Color(0xFF9E9E9E),
+                ),
+              ),
+              const SizedBox(width: 12),
+              const Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Guest Account',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'No customer profile needed',
+                      style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+                    ),
+                  ],
+                ),
+              ),
+              if (isSelected)
+                const Icon(
+                  Icons.check_circle,
+                  color: Color(0xFF1B6B72),
+                  size: 20,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CustomerSearchField extends StatelessWidget {
   final TextEditingController controller;
   final List<_Customer> customers;
   final _Customer? selected;
   final Function(_Customer) onSelect;
+  final VoidCallback onClear;
 
   const _CustomerSearchField({
     required this.controller,
     required this.customers,
     required this.selected,
     required this.onSelect,
+    required this.onClear,
   });
 
   @override
@@ -1752,6 +2126,16 @@ class _CustomerSearchField extends StatelessWidget {
               color: Color(0xFF9E9E9E),
               size: 18,
             ),
+            suffixIcon: controller.text.isNotEmpty || selected != null
+                ? GestureDetector(
+                    onTap: onClear,
+                    child: const Icon(
+                      Icons.close,
+                      color: Color(0xFF9E9E9E),
+                      size: 16,
+                    ),
+                  )
+                : null,
             filled: true,
             fillColor: const Color(0xFFF5F5F5),
             border: OutlineInputBorder(
@@ -1999,11 +2383,7 @@ class _ServiceImage extends StatelessWidget {
         height: size,
         color: const Color(0xFFE8F5F5),
         child: imageUrl.isEmpty
-            ? const Icon(
-                Icons.spa_outlined,
-                color: Color(0xFF1B6B72),
-                size: 26,
-              )
+            ? const Icon(Icons.spa_outlined, color: Color(0xFF1B6B72), size: 26)
             : Image.network(
                 imageUrl,
                 fit: BoxFit.cover,
@@ -2256,8 +2636,9 @@ class _RoomImage extends StatelessWidget {
 
   const _RoomImage({required this.imageUrl, required this.roomType});
 
-  IconData get _fallbackIcon =>
-      roomType == 'foot_chair' ? Icons.chair_outlined : Icons.meeting_room_outlined;
+  IconData get _fallbackIcon => roomType == 'foot_chair'
+      ? Icons.chair_outlined
+      : Icons.meeting_room_outlined;
 
   @override
   Widget build(BuildContext context) {
@@ -2351,10 +2732,7 @@ class _LockedTimeSlotsPanel extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: [
-              _RequirementChip(
-                label: 'Date selected',
-                complete: true,
-              ),
+              _RequirementChip(label: 'Date selected', complete: true),
               _RequirementChip(
                 label: 'Service',
                 complete: !_isMissing('service'),
@@ -2363,10 +2741,7 @@ class _LockedTimeSlotsPanel extends StatelessWidget {
                 label: 'Therapist',
                 complete: !_isMissing('therapist'),
               ),
-              _RequirementChip(
-                label: 'Room',
-                complete: !_isMissing('room'),
-              ),
+              _RequirementChip(label: 'Room', complete: !_isMissing('room')),
             ],
           ),
           const SizedBox(height: 14),

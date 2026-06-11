@@ -1215,90 +1215,150 @@ class _TherapistAvailabilityCard extends StatelessWidget {
         : therapist.busyUntil.isNotEmpty
             ? 'Free at ${therapist.busyUntil}'
             : 'Unavailable';
+    final isCompact = MediaQuery.of(context).size.width < 600;
+    final avatarRadius = isCompact ? 22.0 : 24.0;
     return Container(
-      margin: const EdgeInsets.only(bottom: 14),
-      padding: const EdgeInsets.all(18),
+      margin: const EdgeInsets.only(bottom: 10),
+      padding: EdgeInsets.all(isCompact ? 12 : 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
+            blurRadius: 6,
+            offset: const Offset(0, 1),
           ),
         ],
       ),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               CircleAvatar(
-                radius: 30,
+                radius: avatarRadius,
                 backgroundColor: _avatarColor(therapist.name),
                 child: Text(
                   _initials(therapist.name),
-                  style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: isCompact ? 15 : 16,
+                    fontWeight: FontWeight.w800,
+                  ),
                 ),
               ),
-              const SizedBox(width: 16),
+              SizedBox(width: isCompact ? 12 : 14),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
                       therapist.name,
-                      style: const TextStyle(fontSize: 17, color: _ink, fontWeight: FontWeight.w800),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: isCompact ? 15 : 16, color: _ink, fontWeight: FontWeight.w800),
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 4),
                     if (therapist.phone.isNotEmpty)
-                      Text(therapist.phone, style: const TextStyle(color: _muted, fontSize: 13)),
-                    const SizedBox(height: 10),
+                      Text(
+                        therapist.phone,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: _muted, fontSize: 12),
+                      ),
+                    const SizedBox(height: 8),
                     Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
+                      spacing: 6,
+                      runSpacing: 6,
                       children: [
-                        _Pill('${therapist.doneToday} appts today'),
-                        _Pill(freeText),
+                        _TherapistMiniPill('${therapist.doneToday} appts today'),
+                        _TherapistMiniPill(freeText),
                       ],
                     ),
                   ],
                 ),
               ),
-              _CircleIconButton(
-                onPressed: onEdit,
-                icon: Icons.edit_outlined,
-                tooltip: 'Edit therapist',
+              SizedBox(
+                width: 34,
+                height: 34,
+                child: IconButton(
+                  onPressed: onEdit,
+                  tooltip: 'Edit therapist',
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.edit_outlined, size: 18),
+                  color: _teal,
+                  style: IconButton.styleFrom(
+                    backgroundColor: const Color(0xFFE8F5F5),
+                    shape: const CircleBorder(),
+                  ),
+                ),
               ),
             ],
           ),
-          const Divider(height: 32),
+          const SizedBox(height: 12),
           Row(
             children: [
               Container(
-                width: 9,
-                height: 9,
+                width: 8,
+                height: 8,
                 decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
               ),
-              const SizedBox(width: 10),
-              const Expanded(
+              const SizedBox(width: 8),
+              Expanded(
                 child: Text(
-                  'Availability Status',
-                  style: TextStyle(color: _muted, fontSize: 15),
+                  therapist.available ? 'Available' : 'Unavailable',
+                  style: TextStyle(
+                    color: statusColor,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
-              Switch(
-                value: therapist.available,
-                onChanged: onChanged,
-                activeThumbColor: Colors.white,
-                activeTrackColor: const Color(0xFF10B981),
-                inactiveThumbColor: Colors.white,
-                inactiveTrackColor: const Color(0xFFD1D5DB),
+              SizedBox(
+                width: 52,
+                height: 32,
+                child: Transform.scale(
+                  scale: 0.82,
+                  child: Switch(
+                    value: therapist.available,
+                    onChanged: onChanged,
+                    activeThumbColor: Colors.white,
+                    activeTrackColor: const Color(0xFF10B981),
+                    inactiveThumbColor: Colors.white,
+                    inactiveTrackColor: const Color(0xFFD1D5DB),
+                  ),
+                ),
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _TherapistMiniPill extends StatelessWidget {
+  final String label;
+
+  const _TherapistMiniPill(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: _muted,
+          fontSize: 11,
+          fontWeight: FontWeight.w700,
+        ),
       ),
     );
   }
@@ -1603,24 +1663,6 @@ class _StatusDot extends StatelessWidget {
         const SizedBox(width: 6),
         Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w700)),
       ],
-    );
-  }
-}
-
-class _Pill extends StatelessWidget {
-  final String label;
-
-  const _Pill(this.label);
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F4F6),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(label, style: const TextStyle(color: _muted, fontSize: 12, fontWeight: FontWeight.w700)),
     );
   }
 }

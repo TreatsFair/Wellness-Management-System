@@ -1,10 +1,12 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../appointments/appointment_screen.dart';
 import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
+import '../history/sales_history_screen.dart';
 import '../orders/order_screen.dart';
 import '../management/management_screen.dart';
 
@@ -35,18 +37,18 @@ class _DashboardStats {
     required this.averageTransactionValue,
   });
 
-  static const placeholder = _DashboardStats(
-    todayAppointments: 67,
-    tomorrowAppointments: 8,
-    doneAppointments: 4,
-    pendingAppointments: 8,
-    todaySales: 1240,
-    totalTransactions: 12,
-    totalCustomers: 124,
-    newCustomersThisWeek: 8,
-    weekRevenue: 4820,
-    weekAppointments: 47,
-    averageTransactionValue: 103,
+  static const empty = _DashboardStats(
+    todayAppointments: 0,
+    tomorrowAppointments: 0,
+    doneAppointments: 0,
+    pendingAppointments: 0,
+    todaySales: 0,
+    totalTransactions: 0,
+    totalCustomers: 0,
+    newCustomersThisWeek: 0,
+    weekRevenue: 0,
+    weekAppointments: 0,
+    averageTransactionValue: 0,
   );
 }
 
@@ -61,20 +63,6 @@ class _TherapistStatus {
     required this.status,
     required this.isFree,
     required this.doneCount,
-  });
-}
-
-class _PendingOrder {
-  final String customerName;
-  final String phone;
-  final double amount;
-  final int pendingCount;
-
-  const _PendingOrder({
-    required this.customerName,
-    required this.phone,
-    required this.amount,
-    required this.pendingCount,
   });
 }
 
@@ -122,6 +110,24 @@ class _TransactionSummary {
   });
 }
 
+class _DashboardData {
+  final _DashboardStats stats;
+  final List<_TherapistStatus> therapists;
+  final List<_TransactionSummary> recentTransactions;
+
+  const _DashboardData({
+    required this.stats,
+    required this.therapists,
+    required this.recentTransactions,
+  });
+
+  static const empty = _DashboardData(
+    stats: _DashboardStats.empty,
+    therapists: [],
+    recentTransactions: [],
+  );
+}
+
 const _placeholderBusinessProfile = _BusinessProfile(
   name: 'The Best Family Wellness',
   location: 'Kuala Lumpur',
@@ -130,84 +136,56 @@ const _placeholderBusinessProfile = _BusinessProfile(
 
 const _businessSettingsDocumentId = 'mAERFw4PbxfgzILaNV1X';
 
-const _placeholderTherapists = [
-  _TherapistStatus(
-    name: 'Aisha Rahman',
-    status: 'Free now',
-    isFree: true,
-    doneCount: 3,
-  ),
-  _TherapistStatus(
-    name: 'Wei Chen',
-    status: 'Busy until 2:30 PM',
-    isFree: false,
-    doneCount: 5,
-  ),
-  _TherapistStatus(
-    name: 'Priya Kumar',
-    status: 'Free now',
-    isFree: true,
-    doneCount: 2,
-  ),
-  _TherapistStatus(
-    name: 'Ahmad Ismail',
-    status: 'Busy until 3:15 PM',
-    isFree: false,
-    doneCount: 4,
-  ),
-];
+DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
-const _placeholderPendingOrder = _PendingOrder(
-  customerName: 'Lim Wei Xin',
-  phone: '(6010) 234-5678',
-  amount: 120,
-  pendingCount: 2,
-);
+DateTime _startOfWeek(DateTime date) {
+  final clean = _stripDate(date);
+  return clean.subtract(Duration(days: clean.weekday % 7));
+}
 
-const _placeholderTransactions = [
-  _TransactionSummary(
-    customerName: 'Lim Wei Xin',
-    serviceName: 'Traditional Massage',
-    date: '28 May 2026',
-    time: '2:15 PM',
-    amount: 180,
-  ),
-  _TransactionSummary(
-    customerName: 'Siti Nurhaliza',
-    serviceName: 'Hot Stone Therapy',
-    date: '28 May 2026',
-    time: '1:30 PM',
-    amount: 220,
-  ),
-  _TransactionSummary(
-    customerName: 'Ahmad Razif',
-    serviceName: 'Aromatherapy',
-    date: '28 May 2026',
-    time: '11:45 AM',
-    amount: 150,
-  ),
-  _TransactionSummary(
-    customerName: 'Priya Kumar',
-    serviceName: 'Deep Tissue + Scrub',
-    date: '28 May 2026',
-    time: '10:20 AM',
-    amount: 280,
-  ),
-  _TransactionSummary(
-    customerName: 'Wong Mei Ling',
-    serviceName: 'Reflexology',
-    date: '28 May 2026',
-    time: '9:40 AM',
-    amount: 160,
-  ),
-  _TransactionSummary(
-    customerName: 'Nur Aina',
-    serviceName: 'Facial Treatment',
-    date: '28 May 2026',
-    time: '9:10 AM',
-    amount: 190,
-  ),
-];
+String _dateKey(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
+
+String _asString(Object? value, [String fallback = '']) {
+  if (value == null) return fallback;
+  return value.toString();
+}
+
+double _asDouble(Object? value, [double fallback = 0]) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+DateTime? _asDateTime(Object? value) {
+  if (value is Timestamp) return value.toDate();
+  if (value is DateTime) return value;
+  if (value is String) return DateTime.tryParse(value);
+  return null;
+}
+
+int _timeToMinutes(String value) {
+  final parts = value.split(':');
+  if (parts.length < 2) return 0;
+  return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+}
+
+String _timeLabel(String value) {
+  final parts = value.split(':');
+  if (parts.length < 2) return value;
+  final hour = int.tryParse(parts[0]) ?? 0;
+  final minute = int.tryParse(parts[1]) ?? 0;
+  return DateFormat('h:mm a').format(DateTime(2026, 1, 1, hour, minute));
+}
+
+bool _isCancelled(Map<String, dynamic> data) {
+  final status = _asString(data['status']).toLowerCase().trim();
+  return status == 'cancelled' || status == 'canceled';
+}
+
+bool _isPaid(Map<String, dynamic> data) {
+  final status = _asString(data['paymentStatus']).toLowerCase().trim();
+  return status.isEmpty || status == 'paid';
+}
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
@@ -218,18 +196,267 @@ class DashboardScreen extends StatefulWidget {
 
 class _DashboardScreenState extends State<DashboardScreen> {
   _BusinessProfile _businessProfile = _placeholderBusinessProfile;
+  _DashboardData _dashboardData = _DashboardData.empty;
   bool _isCurrentUserAdmin = false;
   String _currentUserRole = 'staff';
   bool _isLoadingBusinessSettings = true;
+  bool _isLoadingDashboardData = true;
+  String? _dashboardError;
 
   @override
   void initState() {
     super.initState();
     _loadBusinessSettings();
+    _loadDashboardData();
   }
 
   bool _isTablet(BuildContext context) =>
       MediaQuery.of(context).size.width >= 600;
+
+  Future<Map<String, Map<String, dynamic>>> _loadDocMap(
+    String collection,
+    Iterable<String> ids,
+  ) async {
+    final uniqueIds = ids.where((id) => id.trim().isNotEmpty).toSet();
+    final entries = await Future.wait(
+      uniqueIds.map((id) async {
+        final doc = await FirebaseFirestore.instance
+            .collection(collection)
+            .doc(id)
+            .get();
+        return MapEntry(id, doc.data() ?? <String, dynamic>{});
+      }),
+    );
+    return {for (final entry in entries) entry.key: entry.value};
+  }
+
+  Future<void> _loadDashboardData() async {
+    if (mounted) {
+      setState(() {
+        _isLoadingDashboardData = true;
+        _dashboardError = null;
+      });
+    }
+
+    try {
+      final now = DateTime.now();
+      final today = _stripDate(now);
+      final tomorrow = today.add(const Duration(days: 1));
+      final dayEnd = today.add(const Duration(days: 1));
+      final weekStart = _startOfWeek(today);
+      final weekEnd = weekStart.add(const Duration(days: 7));
+      final todayKey = _dateKey(today);
+      final tomorrowKey = _dateKey(tomorrow);
+      final weekStartKey = _dateKey(weekStart);
+      final weekEndKey = _dateKey(weekEnd.subtract(const Duration(days: 1)));
+
+      final appointmentSnap = await FirebaseFirestore.instance
+          .collection('appointments')
+          .where('date', isGreaterThanOrEqualTo: weekStartKey)
+          .where('date', isLessThanOrEqualTo: weekEndKey)
+          .get();
+      final customerSnap = await FirebaseFirestore.instance
+          .collection('customers')
+          .get();
+      final therapistSnap = await FirebaseFirestore.instance
+          .collection('therapists')
+          .orderBy('name')
+          .get();
+      final todayTransactionSnap = await FirebaseFirestore.instance
+          .collection('transactions')
+          .where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(today))
+          .where('createdAt', isLessThan: Timestamp.fromDate(dayEnd))
+          .get();
+      final weekTransactionSnap = await FirebaseFirestore.instance
+          .collection('transactions')
+          .where(
+            'createdAt',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(weekStart),
+          )
+          .where('createdAt', isLessThan: Timestamp.fromDate(weekEnd))
+          .get();
+      final recentTransactionSnap = await FirebaseFirestore.instance
+          .collection('transactions')
+          .orderBy('createdAt', descending: true)
+          .limit(8)
+          .get();
+
+      final appointments = appointmentSnap.docs
+          .map((doc) => doc.data())
+          .toList();
+      final activeAppointments = appointments.where(
+        (data) => !_isCancelled(data),
+      );
+      final todayAppointments = activeAppointments
+          .where((data) => _asString(data['date']) == todayKey)
+          .toList();
+      final tomorrowAppointments = activeAppointments
+          .where((data) => _asString(data['date']) == tomorrowKey)
+          .toList();
+      final weekAppointments = activeAppointments.length;
+      final doneAppointments = todayAppointments
+          .where(
+            (data) => _asString(data['status']).toLowerCase() == 'completed',
+          )
+          .length;
+      final pendingAppointments = todayAppointments
+          .where((data) => _asString(data['status']).toLowerCase() == 'pending')
+          .length;
+
+      final todayPaidTransactions = todayTransactionSnap.docs
+          .where((doc) => _isPaid(doc.data()))
+          .toList();
+      final weekPaidTransactions = weekTransactionSnap.docs
+          .where((doc) => _isPaid(doc.data()))
+          .toList();
+      final todaySales = todayPaidTransactions.fold<double>(
+        0,
+        (total, doc) => total + _asDouble(doc.data()['totalAmount']),
+      );
+      final weekRevenue = weekPaidTransactions.fold<double>(
+        0,
+        (total, doc) => total + _asDouble(doc.data()['totalAmount']),
+      );
+
+      final customers = {
+        for (final doc in customerSnap.docs) doc.id: doc.data(),
+      };
+      final newCustomersThisWeek = customerSnap.docs.where((doc) {
+        final data = doc.data();
+        final joinDate = DateTime.tryParse(_asString(data['joinDate']));
+        final createdAt = _asDateTime(data['createdAt']);
+        final customerDate = joinDate ?? createdAt;
+        if (customerDate == null) return false;
+        return !customerDate.isBefore(weekStart) &&
+            customerDate.isBefore(weekEnd);
+      }).length;
+
+      final nowMinutes = now.hour * 60 + now.minute;
+      final therapistStatuses = therapistSnap.docs.map((doc) {
+        final data = doc.data();
+        final therapistAppointments = todayAppointments
+            .where(
+              (appointment) => _asString(appointment['therapistId']) == doc.id,
+            )
+            .toList();
+        final doneCount = therapistAppointments
+            .where(
+              (appointment) =>
+                  _asString(appointment['status']).toLowerCase() == 'completed',
+            )
+            .length;
+        Map<String, dynamic>? currentAppointment;
+        for (final appointment in therapistAppointments) {
+          final status = _asString(appointment['status']).toLowerCase();
+          if (status != 'confirmed' && status != 'in_progress') continue;
+          final start = _timeToMinutes(_asString(appointment['startTime']));
+          final end = _timeToMinutes(_asString(appointment['endTime']));
+          if (status == 'in_progress' ||
+              (start <= nowMinutes && end > nowMinutes)) {
+            currentAppointment = appointment;
+            break;
+          }
+        }
+
+        final name = _asString(data['name'], 'Therapist');
+        final availability = data['availabilityStatus'];
+        final busyUntil = _asString(data['busyUntil']);
+        final isFirestoreFree = availability is bool ? availability : true;
+        final isFree = currentAppointment == null && isFirestoreFree;
+        final endTime = currentAppointment == null
+            ? busyUntil
+            : _asString(currentAppointment['endTime']);
+        final status = isFree
+            ? 'Free now'
+            : endTime.isEmpty
+            ? 'Busy now'
+            : 'Busy until ${_timeLabel(endTime)}';
+
+        return _TherapistStatus(
+          name: name,
+          status: status,
+          isFree: isFree,
+          doneCount: doneCount,
+        );
+      }).toList();
+
+      final recentTransactionDocs = recentTransactionSnap.docs
+          .where((doc) => _isPaid(doc.data()))
+          .take(6)
+          .toList();
+      final transactionData = [
+        for (final doc in recentTransactionDocs) doc.data(),
+      ];
+      final appointmentIds = transactionData
+          .map((data) => _asString(data['appointmentId']))
+          .where((id) => id.isNotEmpty);
+      final linkedAppointments = await _loadDocMap(
+        'appointments',
+        appointmentIds,
+      );
+      final serviceIds = linkedAppointments.values
+          .map((data) => _asString(data['serviceId']))
+          .where((id) => id.isNotEmpty);
+      final linkedServices = await _loadDocMap('services', serviceIds);
+
+      final recentTransactions = transactionData.map((data) {
+        final appointment =
+            linkedAppointments[_asString(data['appointmentId'])];
+        final service = appointment == null
+            ? null
+            : linkedServices[_asString(appointment['serviceId'])];
+        final customerId = _asString(data['customerId']);
+        final customer = customers[customerId];
+        final createdAt = _asDateTime(data['createdAt']) ?? now;
+        return _TransactionSummary(
+          customerName: _asString(
+            data['customerName'],
+            _asString(customer?['name'], 'Guest Account'),
+          ),
+          serviceName: _asString(
+            data['serviceName'],
+            _asString(service?['name'], 'Service'),
+          ),
+          date: DateFormat('d MMM yyyy').format(createdAt),
+          time: DateFormat('h:mm a').format(createdAt),
+          amount: _asDouble(data['totalAmount']),
+        );
+      }).toList();
+
+      final weekTransactionCount = weekPaidTransactions.length;
+      final stats = _DashboardStats(
+        todayAppointments: todayAppointments.length,
+        tomorrowAppointments: tomorrowAppointments.length,
+        doneAppointments: doneAppointments,
+        pendingAppointments: pendingAppointments,
+        todaySales: todaySales,
+        totalTransactions: todayPaidTransactions.length,
+        totalCustomers: customerSnap.docs.length,
+        newCustomersThisWeek: newCustomersThisWeek,
+        weekRevenue: weekRevenue,
+        weekAppointments: weekAppointments,
+        averageTransactionValue: weekTransactionCount == 0
+            ? 0
+            : weekRevenue / weekTransactionCount,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _dashboardData = _DashboardData(
+          stats: stats,
+          therapists: therapistStatuses,
+          recentTransactions: recentTransactions,
+        );
+        _isLoadingDashboardData = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _dashboardError = e.toString();
+        _isLoadingDashboardData = false;
+      });
+    }
+  }
 
   Future<void> _loadBusinessSettings() async {
     final currentUser = FirebaseAuth.instance.currentUser;
@@ -407,12 +634,20 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 profile: _businessProfile,
                 role: _currentUserRole,
                 isLoadingSettings: _isLoadingBusinessSettings,
+                dashboardData: _dashboardData,
+                isLoadingDashboard: _isLoadingDashboardData,
+                dashboardError: _dashboardError,
+                onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
               )
             : _PhoneLayout(
                 profile: _businessProfile,
                 role: _currentUserRole,
                 isLoadingSettings: _isLoadingBusinessSettings,
+                dashboardData: _dashboardData,
+                isLoadingDashboard: _isLoadingDashboardData,
+                dashboardError: _dashboardError,
+                onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
               ),
       ),
@@ -427,12 +662,20 @@ class _TabletLayout extends StatelessWidget {
   final _BusinessProfile profile;
   final String role;
   final bool isLoadingSettings;
+  final _DashboardData dashboardData;
+  final bool isLoadingDashboard;
+  final String? dashboardError;
+  final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
 
   const _TabletLayout({
     required this.profile,
     required this.role,
     required this.isLoadingSettings,
+    required this.dashboardData,
+    required this.isLoadingDashboard,
+    required this.dashboardError,
+    required this.onRefreshDashboard,
     required this.onOpenSettings,
   });
 
@@ -445,8 +688,14 @@ class _TabletLayout extends StatelessWidget {
           profile: profile,
           role: role,
           isLoadingSettings: isLoadingSettings,
+          transactions: dashboardData.recentTransactions,
           onOpenSettings: onOpenSettings,
         ),
+        if (dashboardError != null)
+          _DashboardErrorBanner(
+            message: dashboardError!,
+            onRetry: onRefreshDashboard,
+          ),
 
         Expanded(
           child: SingleChildScrollView(
@@ -464,16 +713,40 @@ class _TabletLayout extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       // Quick Book card
-                      Expanded(child: _TabletQuickBookCard(role: role)),
+                      Expanded(
+                        child: _TabletQuickBookCard(
+                          role: role,
+                          onRefreshDashboard: onRefreshDashboard,
+                        ),
+                      ),
                       const SizedBox(width: 16),
                       // Orders card
-                      Expanded(child: _TabletOrdersCard()),
+                      Expanded(
+                        child: _TabletOrdersCard(
+                          stats: dashboardData.stats,
+                          isLoading: isLoadingDashboard,
+                          onRefreshDashboard: onRefreshDashboard,
+                        ),
+                      ),
                       const SizedBox(width: 16),
                       // Appointment card
-                      Expanded(child: _TabletAppointmentCard(role: role)),
+                      Expanded(
+                        child: _TabletAppointmentCard(
+                          role: role,
+                          stats: dashboardData.stats,
+                          isLoading: isLoadingDashboard,
+                          onRefreshDashboard: onRefreshDashboard,
+                        ),
+                      ),
                       const SizedBox(width: 16),
                       // Therapists card
-                      Expanded(child: _TabletTherapistsCard(role: role)),
+                      Expanded(
+                        child: _TabletTherapistsCard(
+                          role: role,
+                          therapists: dashboardData.therapists,
+                          isLoading: isLoadingDashboard,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -493,6 +766,12 @@ class _TabletLayout extends StatelessWidget {
                         label: 'History',
                         iconBg: const Color(0xFFE8F4F8),
                         iconColor: const Color(0xFF5BA4B5),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => SalesHistoryScreen(userRole: role),
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(width: 16),
@@ -549,12 +828,14 @@ class _TabletTopBar extends StatelessWidget {
   final _BusinessProfile profile;
   final String role;
   final bool isLoadingSettings;
+  final List<_TransactionSummary> transactions;
   final VoidCallback onOpenSettings;
 
   const _TabletTopBar({
     required this.profile,
     required this.role,
     required this.isLoadingSettings,
+    required this.transactions,
     required this.onOpenSettings,
   });
 
@@ -625,7 +906,7 @@ class _TabletTopBar extends StatelessWidget {
           const Spacer(),
           _RolePill(role: role, isLoading: isLoadingSettings),
           const SizedBox(width: 12),
-          const _NotificationButton(),
+          _NotificationButton(transactions: transactions),
           const SizedBox(width: 12),
           _SettingsButton(onPressed: onOpenSettings),
         ],
@@ -636,16 +917,25 @@ class _TabletTopBar extends StatelessWidget {
 
 class _TabletQuickBookCard extends StatelessWidget {
   final String role;
+  final Future<void> Function() onRefreshDashboard;
 
-  const _TabletQuickBookCard({required this.role});
+  const _TabletQuickBookCard({
+    required this.role,
+    required this.onRefreshDashboard,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => NewAppointmentScreen(userRole: role)),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => NewAppointmentScreen(userRole: role),
+          ),
+        );
+        await onRefreshDashboard();
+      },
       child: Container(
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
@@ -714,56 +1004,40 @@ class _TabletQuickBookCard extends StatelessWidget {
 }
 
 class _TabletOrdersCard extends StatelessWidget {
+  final _DashboardStats stats;
+  final bool isLoading;
+  final Future<void> Function() onRefreshDashboard;
+
+  const _TabletOrdersCard({
+    required this.stats,
+    required this.isLoading,
+    required this.onRefreshDashboard,
+  });
+
   @override
   Widget build(BuildContext context) {
-    const order = _placeholderPendingOrder;
-
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
+        );
+        await onRefreshDashboard();
+      },
       child: _TabletCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Row(
               children: [
-                Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    _IconBox(
-                      icon: Icons.shopping_cart_outlined,
-                      bg: const Color(0xFFFFF3E0),
-                      color: const Color(0xFFF59E0B),
-                    ),
-                    Positioned(
-                      top: -4,
-                      right: -4,
-                      child: Container(
-                        width: 18,
-                        height: 18,
-                        decoration: const BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: Color(0xFFE53935),
-                        ),
-                        child: Center(
-                          child: Text(
-                            '${order.pendingCount}',
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 10,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
+                _IconBox(
+                  icon: Icons.point_of_sale_outlined,
+                  bg: const Color(0xFFFFF3E0),
+                  color: const Color(0xFFF59E0B),
                 ),
                 const SizedBox(width: 12),
                 const Text(
-                  'Orders',
+                  'Order',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
@@ -774,43 +1048,24 @@ class _TabletOrdersCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             const Text(
-              'Pending order',
+              'Today Sales',
               style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      order.customerName,
-                      style: const TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w500,
-                        color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      order.phone,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF9E9E9E),
-                      ),
-                    ),
-                  ],
-                ),
-                Text(
-                  'RM ${order.amount.toStringAsFixed(0)}',
-                  style: const TextStyle(
-                    fontSize: 15,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF1B6B72),
-                  ),
-                ),
-              ],
+            const SizedBox(height: 6),
+            Text(
+              isLoading ? '-' : 'RM ${stats.todaySales.toStringAsFixed(0)}',
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              isLoading
+                  ? 'Loading transactions'
+                  : '${stats.totalTransactions} paid transactions',
+              style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
           ],
         ),
@@ -821,18 +1076,27 @@ class _TabletOrdersCard extends StatelessWidget {
 
 class _TabletAppointmentCard extends StatelessWidget {
   final String role;
+  final _DashboardStats stats;
+  final bool isLoading;
+  final Future<void> Function() onRefreshDashboard;
 
-  const _TabletAppointmentCard({required this.role});
+  const _TabletAppointmentCard({
+    required this.role,
+    required this.stats,
+    required this.isLoading,
+    required this.onRefreshDashboard,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final stats = _DashboardStats.placeholder;
-
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
+        );
+        await onRefreshDashboard();
+      },
       child: _TabletCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -861,11 +1125,14 @@ class _TabletAppointmentCard extends StatelessWidget {
               style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
             const SizedBox(height: 10),
-            _AppointmentRow(label: 'Today', count: '${stats.todayAppointments}'),
+            _AppointmentRow(
+              label: 'Today',
+              count: isLoading ? '-' : '${stats.todayAppointments}',
+            ),
             const SizedBox(height: 10),
             _AppointmentRow(
               label: 'Tomorrow',
-              count: '${stats.tomorrowAppointments}',
+              count: isLoading ? '-' : '${stats.tomorrowAppointments}',
             ),
           ],
         ),
@@ -876,12 +1143,18 @@ class _TabletAppointmentCard extends StatelessWidget {
 
 class _TabletTherapistsCard extends StatelessWidget {
   final String role;
+  final List<_TherapistStatus> therapists;
+  final bool isLoading;
 
-  const _TabletTherapistsCard({required this.role});
+  const _TabletTherapistsCard({
+    required this.role,
+    required this.therapists,
+    required this.isLoading,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final therapists = _placeholderTherapists.take(2).toList();
+    final visibleTherapists = therapists.take(2).toList();
 
     return GestureDetector(
       onTap: () => Navigator.push(
@@ -916,18 +1189,29 @@ class _TabletTherapistsCard extends StatelessWidget {
               style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
             const SizedBox(height: 10),
-            for (final therapist in therapists) ...[
-              _TherapistRow(
-                name: therapist.name,
-                status: therapist.status,
-                statusColor: therapist.isFree
-                    ? const Color(0xFF4CAF50)
-                    : const Color(0xFFF59E0B),
-                done: '${therapist.doneCount} done',
-              ),
-              if (therapist != therapists.last)
-                const Divider(height: 16, color: Color(0xFFF0F0F0)),
-            ],
+            if (isLoading)
+              const Text(
+                'Loading staff status',
+                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              )
+            else if (visibleTherapists.isEmpty)
+              const Text(
+                'No therapists yet',
+                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              )
+            else
+              for (final therapist in visibleTherapists) ...[
+                _TherapistRow(
+                  name: therapist.name,
+                  status: therapist.status,
+                  statusColor: therapist.isFree
+                      ? const Color(0xFF4CAF50)
+                      : const Color(0xFFF59E0B),
+                  done: '${therapist.doneCount} done',
+                ),
+                if (therapist != visibleTherapists.last)
+                  const Divider(height: 16, color: Color(0xFFF0F0F0)),
+              ],
           ],
         ),
       ),
@@ -985,12 +1269,20 @@ class _PhoneLayout extends StatelessWidget {
   final _BusinessProfile profile;
   final String role;
   final bool isLoadingSettings;
+  final _DashboardData dashboardData;
+  final bool isLoadingDashboard;
+  final String? dashboardError;
+  final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
 
   const _PhoneLayout({
     required this.profile,
     required this.role,
     required this.isLoadingSettings,
+    required this.dashboardData,
+    required this.isLoadingDashboard,
+    required this.dashboardError,
+    required this.onRefreshDashboard,
     required this.onOpenSettings,
   });
 
@@ -1005,8 +1297,14 @@ class _PhoneLayout extends StatelessWidget {
             profile: profile,
             role: role,
             isLoadingSettings: isLoadingSettings,
+            transactions: dashboardData.recentTransactions,
             onOpenSettings: onOpenSettings,
           ),
+          if (dashboardError != null)
+            _DashboardErrorBanner(
+              message: dashboardError!,
+              onRetry: onRefreshDashboard,
+            ),
 
           Padding(
             padding: const EdgeInsets.all(16),
@@ -1020,19 +1318,43 @@ class _PhoneLayout extends StatelessWidget {
                 // Row 1: Appointments + Quick Book
                 Row(
                   children: [
-                    Expanded(child: _PhoneAppointmentCard(role: role)),
+                    Expanded(
+                      child: _PhoneAppointmentCard(
+                        role: role,
+                        stats: dashboardData.stats,
+                        isLoading: isLoadingDashboard,
+                        onRefreshDashboard: onRefreshDashboard,
+                      ),
+                    ),
                     const SizedBox(width: 12),
-                    Expanded(child: _PhoneQuickBookCard(role: role)),
+                    Expanded(
+                      child: _PhoneQuickBookCard(
+                        role: role,
+                        onRefreshDashboard: onRefreshDashboard,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
 
-                // Row 2: POS + Members
+                // Row 2: Order + Members
                 Row(
                   children: [
-                    Expanded(child: _PhonePosCard()),
+                    Expanded(
+                      child: _PhonePosCard(
+                        stats: dashboardData.stats,
+                        isLoading: isLoadingDashboard,
+                        onRefreshDashboard: onRefreshDashboard,
+                      ),
+                    ),
                     const SizedBox(width: 12),
-                    Expanded(child: _PhoneCustomersCard()),
+                    Expanded(
+                      child: _PhoneCustomersCard(
+                        stats: dashboardData.stats,
+                        isLoading: isLoadingDashboard,
+                        onRefreshDashboard: onRefreshDashboard,
+                      ),
+                    ),
                   ],
                 ),
 
@@ -1041,14 +1363,21 @@ class _PhoneLayout extends StatelessWidget {
                 // ── Analytics section (FIRST on phone) ───────
                 const _SectionLabel('Analytics'),
                 const SizedBox(height: 12),
-                _PhoneAnalyticsCard(),
+                _PhoneAnalyticsCard(
+                  stats: dashboardData.stats,
+                  isLoading: isLoadingDashboard,
+                ),
 
                 const SizedBox(height: 24),
 
                 // ── Staff Status section ──────────────────────
                 const _SectionLabel('Staff Status'),
                 const SizedBox(height: 12),
-                _PhoneStaffStatusCard(role: role),
+                _PhoneStaffStatusCard(
+                  role: role,
+                  therapists: dashboardData.therapists,
+                  isLoading: isLoadingDashboard,
+                ),
 
                 const SizedBox(height: 24),
 
@@ -1068,6 +1397,12 @@ class _PhoneLayout extends StatelessWidget {
                       label: 'History',
                       iconBg: const Color(0xFFE8F4F8),
                       iconColor: const Color(0xFF5BA4B5),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => SalesHistoryScreen(userRole: role),
+                        ),
+                      ),
                     ),
                     _PhoneOtherCard(
                       icon: Icons.people_outline,
@@ -1086,13 +1421,13 @@ class _PhoneLayout extends StatelessWidget {
                       label: 'Management',
                       iconBg: const Color(0xFFE8F5E9),
                       iconColor: const Color(0xFF4CAF50),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ManagementScreen(userRole: role),
-                          ),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ManagementScreen(userRole: role),
                         ),
                       ),
+                    ),
                     _PhoneOtherCard(
                       icon: Icons.bar_chart_outlined,
                       label: 'Reports',
@@ -1116,12 +1451,14 @@ class _PhoneTopBar extends StatelessWidget {
   final _BusinessProfile profile;
   final String role;
   final bool isLoadingSettings;
+  final List<_TransactionSummary> transactions;
   final VoidCallback onOpenSettings;
 
   const _PhoneTopBar({
     required this.profile,
     required this.role,
     required this.isLoadingSettings,
+    required this.transactions,
     required this.onOpenSettings,
   });
 
@@ -1200,7 +1537,7 @@ class _PhoneTopBar extends StatelessWidget {
           const SizedBox(width: 8),
           _RolePill(role: role, isLoading: isLoadingSettings, compact: true),
           const SizedBox(width: 8),
-          const _NotificationButton(compact: true),
+          _NotificationButton(transactions: transactions, compact: true),
           const SizedBox(width: 8),
           _SettingsButton(onPressed: onOpenSettings, compact: true),
         ],
@@ -1211,18 +1548,27 @@ class _PhoneTopBar extends StatelessWidget {
 
 class _PhoneAppointmentCard extends StatelessWidget {
   final String role;
+  final _DashboardStats stats;
+  final bool isLoading;
+  final Future<void> Function() onRefreshDashboard;
 
-  const _PhoneAppointmentCard({required this.role});
+  const _PhoneAppointmentCard({
+    required this.role,
+    required this.stats,
+    required this.isLoading,
+    required this.onRefreshDashboard,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final stats = _DashboardStats.placeholder;
-
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => AppointmentsScreen(userRole: role)),
+        );
+        await onRefreshDashboard();
+      },
       child: _PhoneCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1253,7 +1599,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '${stats.todayAppointments}',
+              isLoading ? '-' : '${stats.todayAppointments}',
               style: const TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,
@@ -1264,7 +1610,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
             Row(
               children: [
                 Text(
-                  '${stats.doneAppointments} Done  ',
+                  isLoading ? '- Done  ' : '${stats.doneAppointments} Done  ',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4CAF50),
@@ -1272,7 +1618,9 @@ class _PhoneAppointmentCard extends StatelessWidget {
                   ),
                 ),
                 Text(
-                  '${stats.pendingAppointments} Pending',
+                  isLoading
+                      ? '- Pending'
+                      : '${stats.pendingAppointments} Pending',
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFFF59E0B),
@@ -1290,16 +1638,25 @@ class _PhoneAppointmentCard extends StatelessWidget {
 
 class _PhoneQuickBookCard extends StatelessWidget {
   final String role;
+  final Future<void> Function() onRefreshDashboard;
 
-  const _PhoneQuickBookCard({required this.role});
+  const _PhoneQuickBookCard({
+    required this.role,
+    required this.onRefreshDashboard,
+  });
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => NewAppointmentScreen(userRole: role)),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => NewAppointmentScreen(userRole: role),
+          ),
+        );
+        await onRefreshDashboard();
+      },
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
@@ -1343,68 +1700,96 @@ class _PhoneQuickBookCard extends StatelessWidget {
 }
 
 class _PhonePosCard extends StatelessWidget {
+  final _DashboardStats stats;
+  final bool isLoading;
+  final Future<void> Function() onRefreshDashboard;
+
+  const _PhonePosCard({
+    required this.stats,
+    required this.isLoading,
+    required this.onRefreshDashboard,
+  });
+
   @override
   Widget build(BuildContext context) {
-    final stats = _DashboardStats.placeholder;
-
-    return _PhoneCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              _IconBox(
-                icon: Icons.shopping_cart_outlined,
-                bg: const Color(0xFFFFF3E0),
-                color: const Color(0xFFF59E0B),
-                size: 32,
-              ),
-              const SizedBox(width: 8),
-              const Text(
-                'POS',
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
+    return GestureDetector(
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
+        );
+        await onRefreshDashboard();
+      },
+      child: _PhoneCard(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                _IconBox(
+                  icon: Icons.point_of_sale_outlined,
+                  bg: const Color(0xFFFFF3E0),
+                  color: const Color(0xFFF59E0B),
+                  size: 32,
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 10),
-          const Text(
-            'Today Sales',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            'RM ${stats.todaySales.toStringAsFixed(0)}',
-            style: const TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.bold,
-              color: Color(0xFF1A1A2E),
+                const SizedBox(width: 8),
+                const Text(
+                  'Order',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ],
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '${stats.totalTransactions} transactions',
-            style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
-          ),
-        ],
+            const SizedBox(height: 10),
+            const Text(
+              'Today Sales',
+              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              isLoading ? '-' : 'RM ${stats.todaySales.toStringAsFixed(0)}',
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              isLoading ? 'Loading' : '${stats.totalTransactions} transactions',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
 class _PhoneCustomersCard extends StatelessWidget {
+  final _DashboardStats stats;
+  final bool isLoading;
+  final Future<void> Function() onRefreshDashboard;
+
+  const _PhoneCustomersCard({
+    required this.stats,
+    required this.isLoading,
+    required this.onRefreshDashboard,
+  });
+
   @override
   Widget build(BuildContext context) {
-    final stats = _DashboardStats.placeholder;
-
     return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const CustomerScreen()),
-      ),
+      onTap: () async {
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CustomerScreen()),
+        );
+        await onRefreshDashboard();
+      },
       child: _PhoneCard(
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -1435,7 +1820,7 @@ class _PhoneCustomersCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '${stats.totalCustomers}',
+              isLoading ? '-' : '${stats.totalCustomers}',
               style: const TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,
@@ -1444,7 +1829,9 @@ class _PhoneCustomersCard extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              '+${stats.newCustomersThisWeek} this week',
+              isLoading
+                  ? 'Loading'
+                  : '+${stats.newCustomersThisWeek} this week',
               style: const TextStyle(
                 fontSize: 11,
                 color: Color(0xFF1B6B72),
@@ -1459,10 +1846,13 @@ class _PhoneCustomersCard extends StatelessWidget {
 }
 
 class _PhoneAnalyticsCard extends StatelessWidget {
+  final _DashboardStats stats;
+  final bool isLoading;
+
+  const _PhoneAnalyticsCard({required this.stats, required this.isLoading});
+
   @override
   Widget build(BuildContext context) {
-    final stats = _DashboardStats.placeholder;
-
     return _PhoneCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1492,15 +1882,19 @@ class _PhoneAnalyticsCard extends StatelessWidget {
             children: [
               _AnalyticsStat(
                 label: 'This Week',
-                value: 'RM ${stats.weekRevenue.toStringAsFixed(0)}',
+                value: isLoading
+                    ? '-'
+                    : 'RM ${stats.weekRevenue.toStringAsFixed(0)}',
               ),
               _AnalyticsStat(
                 label: 'Appointments',
-                value: '${stats.weekAppointments}',
+                value: isLoading ? '-' : '${stats.weekAppointments}',
               ),
               _AnalyticsStat(
                 label: 'Avg. Value',
-                value: 'RM ${stats.averageTransactionValue.toStringAsFixed(0)}',
+                value: isLoading
+                    ? '-'
+                    : 'RM ${stats.averageTransactionValue.toStringAsFixed(0)}',
               ),
             ],
           ),
@@ -1512,13 +1906,17 @@ class _PhoneAnalyticsCard extends StatelessWidget {
 
 class _PhoneStaffStatusCard extends StatelessWidget {
   final String role;
+  final List<_TherapistStatus> therapists;
+  final bool isLoading;
 
-  const _PhoneStaffStatusCard({required this.role});
+  const _PhoneStaffStatusCard({
+    required this.role,
+    required this.therapists,
+    required this.isLoading,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final therapists = _placeholderTherapists;
-
     return _PhoneCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1553,18 +1951,29 @@ class _PhoneStaffStatusCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          for (final therapist in therapists) ...[
-            _TherapistRow(
-              name: therapist.name,
-              status: therapist.status,
-              statusColor: therapist.isFree
-                  ? const Color(0xFF4CAF50)
-                  : const Color(0xFFF59E0B),
-              done: '${therapist.doneCount} done',
-            ),
-            if (therapist != therapists.last)
-              const Divider(height: 16, color: Color(0xFFF0F0F0)),
-          ],
+          if (isLoading)
+            const Text(
+              'Loading staff status',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            )
+          else if (therapists.isEmpty)
+            const Text(
+              'No therapists yet',
+              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            )
+          else
+            for (final therapist in therapists) ...[
+              _TherapistRow(
+                name: therapist.name,
+                status: therapist.status,
+                statusColor: therapist.isFree
+                    ? const Color(0xFF4CAF50)
+                    : const Color(0xFFF59E0B),
+                done: '${therapist.doneCount} done',
+              ),
+              if (therapist != therapists.last)
+                const Divider(height: 16, color: Color(0xFFF0F0F0)),
+            ],
         ],
       ),
     );
@@ -1617,6 +2026,46 @@ class _PhoneOtherCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 // SHARED SMALL WIDGETS
 // ─────────────────────────────────────────────────────────────────────────────
+
+class _DashboardErrorBanner extends StatelessWidget {
+  final String message;
+  final Future<void> Function() onRetry;
+
+  const _DashboardErrorBanner({required this.message, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF1F2),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFFECACA)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, size: 18, color: Color(0xFFE53935)),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Dashboard data unavailable: $message',
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF991B1B),
+              ),
+            ),
+          ),
+          TextButton(onPressed: onRetry, child: const Text('Retry')),
+        ],
+      ),
+    );
+  }
+}
 
 class _BusinessProfileDialog extends StatelessWidget {
   final _BusinessProfile profile;
@@ -1875,9 +2324,10 @@ class _RolePill extends StatelessWidget {
 }
 
 class _NotificationButton extends StatelessWidget {
+  final List<_TransactionSummary> transactions;
   final bool compact;
 
-  const _NotificationButton({this.compact = false});
+  const _NotificationButton({required this.transactions, this.compact = false});
 
   @override
   Widget build(BuildContext context) {
@@ -1888,7 +2338,7 @@ class _NotificationButton extends StatelessWidget {
       onTap: () {
         showDialog<void>(
           context: context,
-          builder: (context) => const _NotificationDialog(),
+          builder: (context) => _NotificationDialog(transactions: transactions),
         );
       },
       borderRadius: BorderRadius.circular(compact ? 19 : 14),
@@ -1911,27 +2361,28 @@ class _NotificationButton extends StatelessWidget {
               size: iconSize,
             ),
           ),
-          Positioned(
-            top: compact ? -4 : -6,
-            right: compact ? -2 : -4,
-            child: Container(
-              width: 22,
-              height: 22,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                shape: BoxShape.circle,
-                color: Color(0xFFE53935),
-              ),
-              child: Text(
-                '${_placeholderTransactions.length}',
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 11,
-                  fontWeight: FontWeight.bold,
+          if (transactions.isNotEmpty)
+            Positioned(
+              top: compact ? -4 : -6,
+              right: compact ? -2 : -4,
+              child: Container(
+                width: 22,
+                height: 22,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFFE53935),
+                ),
+                child: Text(
+                  '${transactions.length}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 11,
+                    fontWeight: FontWeight.bold,
+                  ),
                 ),
               ),
             ),
-          ),
         ],
       ),
     );
@@ -1939,7 +2390,9 @@ class _NotificationButton extends StatelessWidget {
 }
 
 class _NotificationDialog extends StatelessWidget {
-  const _NotificationDialog();
+  final List<_TransactionSummary> transactions;
+
+  const _NotificationDialog({required this.transactions});
 
   @override
   Widget build(BuildContext context) {
@@ -1996,7 +2449,9 @@ class _NotificationDialog extends StatelessWidget {
               const SizedBox(height: 6),
               Center(
                 child: Text(
-                  '${_placeholderTransactions.length} new transactions',
+                  transactions.isEmpty
+                      ? 'No paid transactions yet'
+                      : '${transactions.length} recent transactions',
                   style: const TextStyle(
                     fontSize: 14,
                     color: Color(0xFF9E9E9E),
@@ -2010,16 +2465,45 @@ class _NotificationDialog extends StatelessWidget {
                   child: ListView.separated(
                     shrinkWrap: true,
                     padding: EdgeInsets.zero,
-                    itemCount: _placeholderTransactions.length,
+                    itemCount: transactions.isEmpty ? 1 : transactions.length,
                     separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) => _TransactionTile(
-                      transaction: _placeholderTransactions[index],
-                    ),
+                    itemBuilder: (context, index) {
+                      if (transactions.isEmpty) {
+                        return const _NotificationEmptyState();
+                      }
+                      return _TransactionTile(transaction: transactions[index]);
+                    },
                   ),
                 ),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationEmptyState extends StatelessWidget {
+  const _NotificationEmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFAFBFC),
+        border: Border.all(color: const Color(0xFFE6E8EB)),
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: const Text(
+        'Completed payments will appear here.',
+        textAlign: TextAlign.center,
+        style: TextStyle(
+          fontSize: 13,
+          color: Color(0xFF5F6B7A),
+          fontWeight: FontWeight.w600,
         ),
       ),
     );

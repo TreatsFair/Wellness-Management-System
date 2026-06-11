@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 
+DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
+
 String _normalizeRoomType(Object? value) {
   final raw = value?.toString().trim().toLowerCase() ?? '';
   if (raw.isEmpty || raw == '-') return '';
@@ -112,7 +114,6 @@ class _WalkInTherapist {
     ];
     return colors[name.length % colors.length];
   }
-
 }
 
 class _WalkInZone {
@@ -351,9 +352,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _loadZonesLive() async {
     final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
-    final roomSnap = await FirebaseFirestore.instance
-        .collection('rooms')
-        .get();
+    final roomSnap = await FirebaseFirestore.instance.collection('rooms').get();
 
     final zones = <_WalkInZone>[];
 
@@ -623,6 +622,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   // ── ORDER SCREEN ───────────────────────────────────────────────
 
   Widget _buildOrderScreen() {
+    if (MediaQuery.of(context).size.width < 720) {
+      return _buildPhoneOrderScreen();
+    }
+
     return Column(
       children: [
         _buildOrderHeader(),
@@ -690,6 +693,102 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildPhoneOrderScreen() {
+    return Column(
+      children: [
+        _buildPhoneOrderHeader(),
+        Expanded(
+          child: Stack(
+            children: [
+              Positioned.fill(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 118),
+                  child: Column(
+                    children: [
+                      _WalkInStepCard(
+                        number: 1,
+                        title: 'Walk-in Customer',
+                        child: _buildCustomerSection(),
+                      ),
+                      const SizedBox(height: 16),
+                      _WalkInStepCard(
+                        number: 2,
+                        title: 'Service Selection',
+                        child: _buildServiceSection(),
+                      ),
+                      const SizedBox(height: 16),
+                      _WalkInStepCard(
+                        number: 3,
+                        title: 'Current Availability',
+                        badge: _LiveBadge(),
+                        child: _buildAvailabilitySection(),
+                      ),
+                      if (_startOptions.isNotEmpty) ...[
+                        const SizedBox(height: 16),
+                        _WalkInStepCard(
+                          number: 4,
+                          title: 'Start Time',
+                          child: _buildStartTimeSection(),
+                        ),
+                      ],
+                      const SizedBox(height: 32),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: _PhoneCheckoutBar(
+                  customerName: _selectedCustomer?.name,
+                  serviceName: _selectedService?.name,
+                  totalAmount: _totalAmount,
+                  canCheckout: _canCheckout,
+                  onCheckout: () => setState(() => _showPayment = true),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPhoneOrderHeader() {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      child: Row(
+        children: [
+          GestureDetector(
+            onTap: () => Navigator.pop(context),
+            child: const Icon(
+              Icons.arrow_back_ios,
+              size: 18,
+              color: Color(0xFF1B6B72),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Walk-in Order',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          _StepPill(number: 1, label: 'Order', isActive: true),
+        ],
+      ),
     );
   }
 
@@ -884,21 +983,30 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           _ServiceEmptyState(tab: _serviceTab, error: _serviceLoadError),
           const SizedBox(height: 12),
         ],
-        GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 1.8,
-          ),
-          itemCount: filtered.length,
-          itemBuilder: (_, i) => _WalkInServiceCard(
-            service: filtered[i],
-            isSelected: _selectedService?.id == filtered[i].id,
-            onTap: () => _onServiceSelected(filtered[i]),
-          ),
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final columns = constraints.maxWidth >= 820
+                ? 3
+                : constraints.maxWidth >= 520
+                ? 2
+                : 1;
+            return GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: columns,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 10,
+                childAspectRatio: columns == 1 ? 3.4 : 2.2,
+              ),
+              itemCount: filtered.length,
+              itemBuilder: (_, i) => _WalkInServiceCard(
+                service: filtered[i],
+                isSelected: _selectedService?.id == filtered[i].id,
+                onTap: () => _onServiceSelected(filtered[i]),
+              ),
+            );
+          },
         ),
       ],
     );
@@ -954,71 +1062,71 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Widget _buildStartTimeSection() {
-    return Row(
-      children: _startOptions.map((option) {
-        final isSelected = _selectedStartTime?.timeLabel == option.timeLabel;
-        return Expanded(
-          child: Padding(
-            padding: EdgeInsets.only(
-              right: option == _startOptions.last ? 0 : 12,
-            ),
-            child: GestureDetector(
-              onTap: () => setState(() => _selectedStartTime = option),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 150),
-                padding: const EdgeInsets.all(18),
-                decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
-                  borderRadius: BorderRadius.circular(14),
-                  border: Border.all(
-                    color: isSelected
-                        ? const Color(0xFF1B6B72)
-                        : const Color(0xFFEEEEEE),
-                    width: isSelected ? 2 : 1,
-                  ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final stackCards = constraints.maxWidth < 520;
+        final cards = _startOptions.map((option) {
+          final isSelected = _selectedStartTime?.timeLabel == option.timeLabel;
+          return GestureDetector(
+            onTap: () => setState(() => _selectedStartTime = option),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding: const EdgeInsets.all(18),
+              decoration: BoxDecoration(
+                color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isSelected
+                      ? const Color(0xFF1B6B72)
+                      : const Color(0xFFEEEEEE),
+                  width: isSelected ? 2 : 1,
                 ),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: isSelected
-                            ? const Color(0xFFD4EEEE)
-                            : option.isNow
-                            ? const Color(0xFFE8F5E9)
-                            : const Color(0xFFFFF3E0),
-                      ),
-                      child: Icon(
-                        option.isNow
-                            ? Icons.play_circle_outline
-                            : Icons.schedule_outlined,
-                        color: isSelected
-                            ? const Color(0xFF1B6B72)
-                            : option.isNow
-                            ? const Color(0xFF4CAF50)
-                            : const Color(0xFFF59E0B),
-                        size: 22,
-                      ),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: isSelected
+                          ? const Color(0xFFD4EEEE)
+                          : option.isNow
+                          ? const Color(0xFFE8F5E9)
+                          : const Color(0xFFFFF3E0),
                     ),
-                    const SizedBox(width: 14),
-                    Column(
+                    child: Icon(
+                      option.isNow
+                          ? Icons.play_circle_outline
+                          : Icons.schedule_outlined,
+                      color: isSelected
+                          ? const Color(0xFF1B6B72)
+                          : option.isNow
+                          ? const Color(0xFF4CAF50)
+                          : const Color(0xFFF59E0B),
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
                           option.isNow ? 'Start Now' : 'Next Available',
-                          style: TextStyle(
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
                             fontSize: 15,
                             fontWeight: FontWeight.bold,
-                            color: isSelected
-                                ? const Color(0xFF1A1A2E)
-                                : const Color(0xFF1A1A2E),
+                            color: Color(0xFF1A1A2E),
                           ),
                         ),
                         const SizedBox(height: 3),
                         Text(
                           option.timeLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 14,
                             fontWeight: FontWeight.w600,
@@ -1031,6 +1139,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                         ),
                         Text(
                           option.subtitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                             fontSize: 11,
                             color: isSelected
@@ -1040,13 +1150,33 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                         ),
                       ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             ),
-          ),
+          );
+        }).toList();
+
+        if (stackCards) {
+          return Column(
+            children: [
+              for (var i = 0; i < cards.length; i++) ...[
+                cards[i],
+                if (i != cards.length - 1) const SizedBox(height: 10),
+              ],
+            ],
+          );
+        }
+
+        return Row(
+          children: [
+            for (var i = 0; i < cards.length; i++) ...[
+              Expanded(child: cards[i]),
+              if (i != cards.length - 1) const SizedBox(width: 12),
+            ],
+          ],
         );
-      }).toList(),
+      },
     );
   }
 
@@ -1204,13 +1334,15 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   // ── PAYMENT SCREEN ─────────────────────────────────────────────
 
   Widget _buildPaymentScreen() {
+    final isPhone = MediaQuery.of(context).size.width < 720;
+
     return Center(
       child: Container(
-        width: 620,
-        margin: const EdgeInsets.all(32),
+        width: isPhone ? double.infinity : 620,
+        margin: EdgeInsets.all(isPhone ? 12 : 32),
         decoration: BoxDecoration(
           color: Colors.white,
-          borderRadius: BorderRadius.circular(20),
+          borderRadius: BorderRadius.circular(isPhone ? 16 : 20),
           boxShadow: [
             BoxShadow(
               color: Colors.black.withValues(alpha: 0.08),
@@ -1220,57 +1352,73 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           ],
         ),
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(28),
+          padding: EdgeInsets.all(isPhone ? 18 : 28),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               // Payment header
-              Row(
-                children: [
-                  GestureDetector(
-                    onTap: () => setState(() => _showPayment = false),
-                    child: Row(
-                      children: const [
-                        Icon(
-                          Icons.chevron_left,
-                          size: 18,
-                          color: Color(0xFF1B6B72),
+              if (isPhone)
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        _PaymentBackButton(
+                          onTap: () => setState(() => _showPayment = false),
+                        ),
+                        const Spacer(),
+                        _StepPill(number: 2, label: 'Payment', isActive: true),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+                    const Text(
+                      'Payment',
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '#$_receiptNumber',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF9E9E9E),
+                      ),
+                    ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    _PaymentBackButton(
+                      onTap: () => setState(() => _showPayment = false),
+                    ),
+                    const Spacer(),
+                    Column(
+                      children: [
+                        const Text(
+                          'Payment',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Color(0xFF1A1A2E),
+                          ),
                         ),
                         Text(
-                          'Back to Order',
-                          style: TextStyle(
-                            fontSize: 13,
-                            color: Color(0xFF1B6B72),
-                            fontWeight: FontWeight.w500,
+                          '#$_receiptNumber',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: Color(0xFF9E9E9E),
                           ),
                         ),
                       ],
                     ),
-                  ),
-                  const Spacer(),
-                  Column(
-                    children: [
-                      const Text(
-                        'Payment',
-                        style: TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1A1A2E),
-                        ),
-                      ),
-                      Text(
-                        '#$_receiptNumber',
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF9E9E9E),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  _StepPill(number: 2, label: 'Payment', isActive: true),
-                ],
-              ),
+                    const Spacer(),
+                    _StepPill(number: 2, label: 'Payment', isActive: true),
+                  ],
+                ),
               const SizedBox(height: 24),
 
               // Order recap
@@ -1287,14 +1435,19 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          '${_selectedCustomer?.name ?? 'Guest'} · ${_selectedService?.name ?? ''}',
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1A1A2E),
+                        Expanded(
+                          child: Text(
+                            '${_selectedCustomer?.name ?? 'Guest'} - ${_selectedService?.name ?? ''}',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: Color(0xFF1A1A2E),
+                            ),
                           ),
                         ),
+                        const SizedBox(width: 10),
                         Container(
                           padding: const EdgeInsets.symmetric(
                             horizontal: 10,
@@ -1317,14 +1470,18 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      '${_selectedTherapist?.name ?? ''} · ${_selectedZone?.name ?? ''}',
+                      '${_selectedTherapist?.name ?? ''} - ${_selectedZone?.name ?? ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 13,
                         color: Color(0xFF6B6B6B),
                       ),
                     ),
                     Text(
-                      'Start: ${_selectedStartTime?.isNow == true ? 'Now' : 'Next'} — ${_selectedStartTime?.timeLabel ?? ''}',
+                      'Start: ${_selectedStartTime?.isNow == true ? 'Now' : 'Next'} - ${_selectedStartTime?.timeLabel ?? ''}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         fontSize: 13,
                         color: Color(0xFF6B6B6B),
@@ -1397,35 +1554,47 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: _PaymentMethodCard(
-                      icon: Icons.attach_money_outlined,
-                      label: 'Cash',
-                      isSelected: _paymentMethod == 'cash',
-                      onTap: () => setState(() => _paymentMethod = 'cash'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _PaymentMethodCard(
-                      icon: Icons.qr_code_2_outlined,
-                      label: 'QR Code',
-                      isSelected: _paymentMethod == 'qr_code',
-                      onTap: () => setState(() => _paymentMethod = 'qr_code'),
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: _PaymentMethodCard(
-                      icon: Icons.credit_card_outlined,
-                      label: 'Card',
-                      isSelected: _paymentMethod == 'card',
-                      onTap: () => setState(() => _paymentMethod = 'card'),
-                    ),
-                  ),
-                ],
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final compactMethods = isPhone && constraints.maxWidth < 430;
+                  final itemWidth = compactMethods
+                      ? constraints.maxWidth
+                      : (constraints.maxWidth - 24) / 3;
+                  return Wrap(
+                    spacing: 12,
+                    runSpacing: 12,
+                    children: [
+                      SizedBox(
+                        width: itemWidth,
+                        child: _PaymentMethodCard(
+                          icon: Icons.attach_money_outlined,
+                          label: 'Cash',
+                          isSelected: _paymentMethod == 'cash',
+                          onTap: () => setState(() => _paymentMethod = 'cash'),
+                        ),
+                      ),
+                      SizedBox(
+                        width: itemWidth,
+                        child: _PaymentMethodCard(
+                          icon: Icons.qr_code_2_outlined,
+                          label: 'QR Code',
+                          isSelected: _paymentMethod == 'qr_code',
+                          onTap: () =>
+                              setState(() => _paymentMethod = 'qr_code'),
+                        ),
+                      ),
+                      SizedBox(
+                        width: itemWidth,
+                        child: _PaymentMethodCard(
+                          icon: Icons.credit_card_outlined,
+                          label: 'Card',
+                          isSelected: _paymentMethod == 'card',
+                          onTap: () => setState(() => _paymentMethod = 'card'),
+                        ),
+                      ),
+                    ],
+                  );
+                },
               ),
 
               const SizedBox(height: 24),
@@ -1526,6 +1695,18 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     super.dispose();
   }
 
+  Future<void> _openFieldDatePicker(TextEditingController controller) async {
+    final initialDate =
+        DateTime.tryParse(controller.text.trim()) ?? DateTime.now();
+    final picked = await showDialog<DateTime>(
+      context: context,
+      builder: (context) =>
+          _WalkInMonthCalendarDialog(initialDate: initialDate),
+    );
+    if (picked == null) return;
+    controller.text = DateFormat('yyyy-MM-dd').format(_stripDate(picked));
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -1618,6 +1799,7 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   controller: _dobController,
                   hint: 'YYYY-MM-DD',
                   keyboardType: TextInputType.datetime,
+                  onCalendarTap: () => _openFieldDatePicker(_dobController),
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -1625,6 +1807,8 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   controller: _joinDateController,
                   hint: 'YYYY-MM-DD',
                   keyboardType: TextInputType.datetime,
+                  onCalendarTap: () =>
+                      _openFieldDatePicker(_joinDateController),
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -1687,6 +1871,190 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
   }
 }
 
+class _WalkInMonthCalendarDialog extends StatefulWidget {
+  final DateTime initialDate;
+
+  const _WalkInMonthCalendarDialog({required this.initialDate});
+
+  @override
+  State<_WalkInMonthCalendarDialog> createState() =>
+      _WalkInMonthCalendarDialogState();
+}
+
+class _WalkInMonthCalendarDialogState
+    extends State<_WalkInMonthCalendarDialog> {
+  late DateTime _visibleMonth;
+
+  @override
+  void initState() {
+    super.initState();
+    _visibleMonth = DateTime(widget.initialDate.year, widget.initialDate.month);
+  }
+
+  void _moveMonth(int offset) {
+    setState(() {
+      _visibleMonth = DateTime(
+        _visibleMonth.year,
+        _visibleMonth.month + offset,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final firstDay = DateTime(_visibleMonth.year, _visibleMonth.month, 1);
+    final gridStart = firstDay.subtract(Duration(days: firstDay.weekday % 7));
+    final days = List.generate(
+      42,
+      (index) => gridStart.add(Duration(days: index)),
+    );
+    final selected = _stripDate(widget.initialDate);
+    final today = _stripDate(DateTime.now());
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 340),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      DateFormat('MMMM yyyy').format(_visibleMonth),
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _moveMonth(-1),
+                    icon: const Icon(Icons.chevron_left),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  IconButton(
+                    onPressed: () => _moveMonth(1),
+                    icon: const Icon(Icons.chevron_right),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Row(
+                children: const [
+                  _WalkInWeekdayLabel('SUN'),
+                  _WalkInWeekdayLabel('MON'),
+                  _WalkInWeekdayLabel('TUE'),
+                  _WalkInWeekdayLabel('WED'),
+                  _WalkInWeekdayLabel('THU'),
+                  _WalkInWeekdayLabel('FRI'),
+                  _WalkInWeekdayLabel('SAT'),
+                ],
+              ),
+              const SizedBox(height: 8),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 7,
+                  mainAxisSpacing: 7,
+                  crossAxisSpacing: 7,
+                ),
+                itemCount: days.length,
+                itemBuilder: (context, index) {
+                  final day = days[index];
+                  final cleanDay = _stripDate(day);
+                  final isSelected = cleanDay == selected;
+                  final isToday = cleanDay == today;
+                  final inMonth = day.month == _visibleMonth.month;
+
+                  return InkWell(
+                    onTap: () => Navigator.pop(context, cleanDay),
+                    borderRadius: BorderRadius.circular(18),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 120),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: isSelected
+                            ? const Color(0xFF1B6B72)
+                            : Colors.transparent,
+                        border: isToday && !isSelected
+                            ? Border.all(color: const Color(0xFF1B6B72))
+                            : null,
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '${day.day}',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: isSelected || isToday
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                          color: isSelected
+                              ? Colors.white
+                              : inMonth
+                              ? const Color(0xFF111827)
+                              : const Color(0xFFCBD5E1),
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () => Navigator.pop(context, today),
+                    icon: const Icon(Icons.today_outlined, size: 17),
+                    label: const Text('Today'),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF1B6B72),
+                      textStyle: const TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _WalkInWeekdayLabel extends StatelessWidget {
+  final String label;
+
+  const _WalkInWeekdayLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: Text(
+        label,
+        textAlign: TextAlign.center,
+        style: const TextStyle(
+          fontSize: 10,
+          color: Color(0xFF6B7280),
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
 class _QuickCustomerField extends StatelessWidget {
   final String label;
   final String? hint;
@@ -1694,6 +2062,7 @@ class _QuickCustomerField extends StatelessWidget {
   final TextInputType? keyboardType;
   final bool requiredField;
   final int maxLines;
+  final VoidCallback? onCalendarTap;
 
   const _QuickCustomerField({
     required this.label,
@@ -1702,6 +2071,7 @@ class _QuickCustomerField extends StatelessWidget {
     this.keyboardType,
     this.requiredField = false,
     this.maxLines = 1,
+    this.onCalendarTap,
   });
 
   @override
@@ -1718,6 +2088,17 @@ class _QuickCustomerField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        suffixIcon: onCalendarTap == null
+            ? null
+            : IconButton(
+                onPressed: onCalendarTap,
+                tooltip: 'Pick date',
+                icon: const Icon(
+                  Icons.calendar_today_outlined,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -1833,6 +2214,33 @@ class _LiveBadge extends StatelessWidget {
   }
 }
 
+class _PaymentBackButton extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _PaymentBackButton({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: const Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.chevron_left, size: 18, color: Color(0xFF1B6B72)),
+          Text(
+            'Back to Order',
+            style: TextStyle(
+              fontSize: 13,
+              color: Color(0xFF1B6B72),
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _StepPill extends StatelessWidget {
   final int number;
   final String label;
@@ -1885,6 +2293,122 @@ class _StepPill extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _PhoneCheckoutBar extends StatelessWidget {
+  final String? customerName;
+  final String? serviceName;
+  final double totalAmount;
+  final bool canCheckout;
+  final VoidCallback onCheckout;
+
+  const _PhoneCheckoutBar({
+    required this.customerName,
+    required this.serviceName,
+    required this.totalAmount,
+    required this.canCheckout,
+    required this.onCheckout,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final title = serviceName?.trim().isNotEmpty == true
+        ? serviceName!.trim()
+        : 'Select service';
+    final subtitle = customerName?.trim().isNotEmpty == true
+        ? customerName!.trim()
+        : 'Choose customer';
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.10),
+            blurRadius: 14,
+            offset: const Offset(0, -3),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    subtitle,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF9E9E9E),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 5),
+                  Text(
+                    'RM ${totalAmount.toStringAsFixed(2)}',
+                    style: const TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            SizedBox(
+              height: 46,
+              child: ElevatedButton(
+                onPressed: canCheckout ? onCheckout : null,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF1B6B72),
+                  foregroundColor: Colors.white,
+                  disabledBackgroundColor: const Color(0xFFBDBDBD),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 18),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      'Checkout',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    SizedBox(width: 6),
+                    Icon(Icons.arrow_forward, size: 16),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -2129,7 +2653,7 @@ class _WalkInServiceCard extends StatelessWidget {
         duration: const Duration(milliseconds: 150),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
           borderRadius: BorderRadius.circular(12),
           border: Border.all(
             color: isSelected
@@ -2137,44 +2661,73 @@ class _WalkInServiceCard extends StatelessWidget {
                 : const Color(0xFFEEEEEE),
             width: isSelected ? 2 : 1,
           ),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.03),
+              blurRadius: 4,
+              offset: const Offset(0, 1),
+            ),
+          ],
         ),
         child: Stack(
           children: [
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                _WalkInServiceImage(imageUrl: service.imageUrl),
-                const SizedBox(height: 4),
-                Text(
-                  service.name,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                _WalkInServiceImage(imageUrl: service.imageUrl, size: 58),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        service.name,
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF1A1A2E),
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          _SmallBadge2(
+                            label: '${service.duration}m',
+                            bg: const Color(0xFFE8F5F5),
+                            color: const Color(0xFF1B6B72),
+                          ),
+                          _SmallBadge2(
+                            label: 'RM ${service.price.toStringAsFixed(0)}',
+                            bg: const Color(0xFFF5F5F5),
+                            color: const Color(0xFF6B6B6B),
+                          ),
+                          _SmallBadge2(
+                            label: _chipLabel,
+                            bg: _chipBg,
+                            color: _chipColor,
+                          ),
+                        ],
+                      ),
+                    ],
                   ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    _SmallBadge2(
-                      label: '${service.duration}m',
-                      bg: const Color(0xFFE8F5F5),
-                      color: const Color(0xFF1B6B72),
-                    ),
-                    const SizedBox(width: 4),
-                    _SmallBadge2(
-                      label: 'RM ${service.price.toStringAsFixed(0)}',
-                      bg: const Color(0xFFF5F5F5),
-                      color: const Color(0xFF6B6B6B),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 4),
-                _SmallBadge2(label: _chipLabel, bg: _chipBg, color: _chipColor),
               ],
             ),
+            if (isSelected)
+              const Positioned(
+                top: 0,
+                right: 0,
+                child: Icon(
+                  Icons.check_circle,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
           ],
         ),
       ),
@@ -2184,23 +2737,20 @@ class _WalkInServiceCard extends StatelessWidget {
 
 class _WalkInServiceImage extends StatelessWidget {
   final String imageUrl;
+  final double size;
 
-  const _WalkInServiceImage({required this.imageUrl});
+  const _WalkInServiceImage({required this.imageUrl, this.size = 38});
 
   @override
   Widget build(BuildContext context) {
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Container(
-        width: 36,
-        height: 36,
+        width: size,
+        height: size,
         color: const Color(0xFFE8F5F5),
         child: imageUrl.isEmpty
-            ? const Icon(
-                Icons.spa_outlined,
-                color: Color(0xFF1B6B72),
-                size: 21,
-              )
+            ? const Icon(Icons.spa_outlined, color: Color(0xFF1B6B72), size: 21)
             : Image.network(
                 imageUrl,
                 fit: BoxFit.cover,
@@ -2427,8 +2977,9 @@ class _WalkInRoomImage extends StatelessWidget {
 
   const _WalkInRoomImage({required this.imageUrl, required this.roomType});
 
-  IconData get _fallbackIcon =>
-      roomType == 'foot_chair' ? Icons.chair_outlined : Icons.meeting_room_outlined;
+  IconData get _fallbackIcon => roomType == 'foot_chair'
+      ? Icons.chair_outlined
+      : Icons.meeting_room_outlined;
 
   @override
   Widget build(BuildContext context) {
