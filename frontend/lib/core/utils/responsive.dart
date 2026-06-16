@@ -1,11 +1,17 @@
 import 'package:flutter/material.dart';
 
 class Responsive {
+  static const double tabletBreakpoint = 900;
+  static const double desktopBreakpoint = 1200;
+
   static bool isPhone(BuildContext context) =>
-      MediaQuery.of(context).size.width < 600;
+      MediaQuery.of(context).size.width < tabletBreakpoint;
 
   static bool isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
+      MediaQuery.of(context).size.width >= tabletBreakpoint;
+
+  static bool isDesktop(BuildContext context) =>
+      MediaQuery.of(context).size.width >= desktopBreakpoint;
 
   static double screenWidth(BuildContext context) =>
       MediaQuery.of(context).size.width;
@@ -13,11 +19,17 @@ class Responsive {
   static double screenHeight(BuildContext context) =>
       MediaQuery.of(context).size.height;
 
-  // Use this for horizontal padding — tighter on phone, wider on tablet
-  static double horizontalPadding(BuildContext context) =>
-      isTablet(context) ? 48.0 : 24.0;
+  static double uiScale(Size size) {
+    final width = size.width;
+    if (width < 600) return 1;
+    if (width < tabletBreakpoint) return 0.9;
+    if (width < desktopBreakpoint) return 0.94;
+    return 1;
+  }
 
-  // Use this for card width — full on phone, capped on tablet
+  static double horizontalPadding(BuildContext context) =>
+      isTablet(context) ? 28.0 : 18.0;
+
   static double cardMaxWidth(BuildContext context) =>
-      isTablet(context) ? 600.0 : double.infinity;
+      isTablet(context) ? 500.0 : double.infinity;
 }

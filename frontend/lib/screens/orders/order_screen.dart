@@ -1,6 +1,12 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+
+import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/customer_repository.dart';
+import '../../data/repositories/room_repository.dart';
+import '../../data/repositories/service_repository.dart';
+import '../../data/repositories/therapist_repository.dart';
+import '../../data/repositories/transaction_repository.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -30,10 +36,9 @@ class _WalkInService {
     required this.price,
   });
 
-  factory _WalkInService.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _WalkInService.fromMap(Map<String, dynamic> d) {
     return _WalkInService(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name']?.toString() ?? '',
       imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
       roomType: _normalizeRoomType(d['roomType']),
@@ -78,15 +83,14 @@ class _WalkInTherapist {
     required this.freeInMinutes,
   });
 
-  factory _WalkInTherapist.fromDoc(
-    DocumentSnapshot doc, {
+  factory _WalkInTherapist.fromMap(
+    Map<String, dynamic> d, {
     bool isFree = true,
     String busyUntil = '',
     int freeInMinutes = 0,
   }) {
-    final d = doc.data() as Map<String, dynamic>;
     return _WalkInTherapist(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name'] ?? '',
       isFree: isFree,
       busyUntil: busyUntil,
@@ -141,10 +145,9 @@ class _WalkInCustomer {
     required this.phone,
   });
 
-  factory _WalkInCustomer.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _WalkInCustomer.fromMap(Map<String, dynamic> d) {
     return _WalkInCustomer(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name'] ?? '',
       phone: d['phone'] ?? '',
     );
@@ -152,7 +155,7 @@ class _WalkInCustomer {
 
   static _WalkInCustomer get anonymous => const _WalkInCustomer(
     id: 'walk_in_guest',
-    name: 'Walk-in Guest',
+    name: 'Guest',
     phone: '',
   );
 }
@@ -180,6 +183,13 @@ class WalkInPosScreen extends StatefulWidget {
 }
 
 class _WalkInPosScreenState extends State<WalkInPosScreen> {
+  final _appointmentRepository = AppointmentRepository();
+  final _customerRepository = CustomerRepository();
+  final _roomRepository = RoomRepository();
+  final _serviceRepository = ServiceRepository();
+  final _therapistRepository = TherapistRepository();
+  final _transactionRepository = TransactionRepository();
+
   // Step tracking
   bool _showPayment = false;
 
@@ -204,6 +214,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   String? _serviceLoadError;
 
   final _searchController = TextEditingController();
+  final _transactionNotesController = TextEditingController();
 
   // Receipt number
   late final String _receiptNumber;
@@ -219,6 +230,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   @override
   void dispose() {
     _searchController.dispose();
+    _transactionNotesController.dispose();
     super.dispose();
   }
 
@@ -246,17 +258,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   Future<void> _loadServices() async {
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection('services')
-          .get();
+      final rows = await _serviceRepository.getActiveServices();
       final services = <_WalkInService>[];
 
-      for (final doc in snap.docs) {
-        final d = doc.data();
+      for (final d in rows) {
         final active = _isActiveDoc(d);
 
         if (active) {
-          services.add(_WalkInService.fromDoc(doc));
+          services.add(_WalkInService.fromMap(d));
         }
       }
 
@@ -279,27 +288,23 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         '${now.hour.toString().padLeft(2, '0')}:'
         '${now.minute.toString().padLeft(2, '0')}';
 
-    final therapistSnap = await FirebaseFirestore.instance
-        .collection('therapists')
-        .get();
+    final therapistRows = await _therapistRepository.getActiveTherapists();
 
     final therapists = <_WalkInTherapist>[];
 
-    for (final doc in therapistSnap.docs) {
+    for (final row in therapistRows) {
       // Check for current active appointment
-      final activeSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('therapistId', isEqualTo: doc.id)
-          .where('date', isEqualTo: today)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
+      final activeAppointments = await _appointmentRepository
+          .getActiveAppointmentsForTherapist(
+            row['id']?.toString() ?? '',
+            today,
+          );
 
       bool isFree = true;
       String busyUntil = '';
       int freeInMinutes = 0;
 
-      for (final appt in activeSnap.docs) {
-        final d = appt.data();
+      for (final d in activeAppointments) {
         final startTime = d['startTime'] as String? ?? '00:00';
         final endTime = d['endTime'] as String? ?? '00:00';
 
@@ -323,8 +328,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       }
 
       therapists.add(
-        _WalkInTherapist.fromDoc(
-          doc,
+        _WalkInTherapist.fromMap(
+          row,
           isFree: isFree,
           busyUntil: busyUntil,
           freeInMinutes: freeInMinutes,
@@ -352,30 +357,25 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _loadZonesLive() async {
     final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
-    final roomSnap = await FirebaseFirestore.instance.collection('rooms').get();
+    final roomRows = await _roomRepository.getActiveRooms();
 
     final zones = <_WalkInZone>[];
 
-    for (final doc in roomSnap.docs) {
-      final d = doc.data();
+    for (final d in roomRows) {
       if (!_isActiveDoc(d)) continue;
       final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
 
-      final activeSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('roomId', isEqualTo: doc.id)
-          .where('date', isEqualTo: today)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
+      final activeAppointments = await _appointmentRepository
+          .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', today);
 
-      final freeSlots = (totalSlots - activeSnap.docs.length).clamp(
+      final freeSlots = (totalSlots - activeAppointments.length).clamp(
         0,
         totalSlots,
       );
 
       zones.add(
         _WalkInZone(
-          id: doc.id,
+          id: d['id']?.toString() ?? '',
           name: d['name'] ?? '',
           type: _normalizeRoomType(d['type'] ?? d['roomType']),
           floor: d['floor'] ?? '',
@@ -390,19 +390,20 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Future<void> _loadCustomers() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('customers')
-        .orderBy('name')
-        .get();
+    final rows = await _customerRepository.getCustomers();
     setState(() {
-      _customers = snap.docs.map((d) => _WalkInCustomer.fromDoc(d)).toList();
+      _customers = rows.map((d) => _WalkInCustomer.fromMap(d)).toList();
       _filteredCustomers = _customers;
     });
   }
 
   void _filterCustomers() {
-    final q = _searchController.text.toLowerCase();
+    final q = _searchController.text.trim().toLowerCase();
     setState(() {
+      if (_selectedCustomer != null &&
+          q != _selectedCustomer!.name.toLowerCase()) {
+        _selectedCustomer = null;
+      }
       _filteredCustomers = _customers
           .where(
             (c) =>
@@ -539,41 +540,23 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     setState(() => _isConfirming = true);
 
     try {
-      final now = DateTime.now();
-      final today = DateFormat('yyyy-MM-dd').format(now);
-      final startNow = DateFormat('HH:mm').format(now);
-      final endTime = DateFormat(
-        'HH:mm',
-      ).format(now.add(Duration(minutes: _selectedService!.duration)));
-
-      // Write appointment record
-      final apptRef = await FirebaseFirestore.instance
-          .collection('appointments')
-          .add({
-            'customerId': _selectedCustomer!.id,
-            'therapistId': _selectedTherapist!.id,
-            'roomId': _selectedZone!.id,
-            'serviceId': _selectedService!.id,
-            'date': today,
-            'startTime': startNow,
-            'endTime': endTime,
-            'status': 'in_progress',
-            'totalPrice': _servicePrice,
-            'type': 'walkin',
-            'createdAt': FieldValue.serverTimestamp(),
-          });
-
-      // Write transaction record
-      await FirebaseFirestore.instance.collection('transactions').add({
-        'appointmentId': apptRef.id,
+      await _transactionRepository.createTransaction({
         'customerId': _selectedCustomer!.id,
+        'customerName': _selectedCustomer!.name,
+        'customerPhone': _selectedCustomer!.phone,
+        'serviceId': _selectedService!.id,
+        'serviceName': _selectedService!.name,
+        'therapistId': _selectedTherapist!.id,
+        'therapistName': _selectedTherapist!.name,
+        'roomId': _selectedZone!.id,
+        'roomName': _selectedZone!.name,
         'servicePrice': _servicePrice,
         'sstAmount': _sstAmount,
         'totalAmount': _totalAmount,
         'paymentMethod': _paymentMethod,
         'paymentStatus': 'paid',
         'receiptNumber': _receiptNumber,
-        'createdAt': FieldValue.serverTimestamp(),
+        'notes': _transactionNotesController.text.trim(),
       });
 
       if (mounted) {
@@ -622,9 +605,13 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   // ── ORDER SCREEN ───────────────────────────────────────────────
 
   Widget _buildOrderScreen() {
-    if (MediaQuery.of(context).size.width < 720) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    if (screenWidth < 900) {
       return _buildPhoneOrderScreen();
     }
+    final isCompactTablet = screenWidth < 1100;
+    final contentPadding = isCompactTablet ? 14.0 : 20.0;
+    final gap = isCompactTablet ? 12.0 : 16.0;
 
     return Column(
       children: [
@@ -637,7 +624,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               Expanded(
                 flex: 65,
                 child: SingleChildScrollView(
-                  padding: const EdgeInsets.all(20),
+                  padding: EdgeInsets.all(contentPadding),
                   child: Column(
                     children: [
                       // Step 1
@@ -646,14 +633,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                         title: 'Walk-in Customer',
                         child: _buildCustomerSection(),
                       ),
-                      const SizedBox(height: 16),
+                      SizedBox(height: gap),
                       // Step 2
                       _WalkInStepCard(
                         number: 2,
                         title: 'Service Selection',
                         child: _buildServiceSection(),
                       ),
-                      const SizedBox(height: 16),
+                      SizedBox(height: gap),
                       // Step 3
                       _WalkInStepCard(
                         number: 3,
@@ -662,7 +649,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                         child: _buildAvailabilitySection(),
                       ),
                       if (_startOptions.isNotEmpty) ...[
-                        const SizedBox(height: 16),
+                        SizedBox(height: gap),
                         _WalkInStepCard(
                           number: 4,
                           title: 'Start Time',
@@ -1334,7 +1321,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   // ── PAYMENT SCREEN ─────────────────────────────────────────────
 
   Widget _buildPaymentScreen() {
-    final isPhone = MediaQuery.of(context).size.width < 720;
+    final isPhone = MediaQuery.of(context).size.width < 900;
 
     return Center(
       child: Container(
@@ -1544,6 +1531,32 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
               const SizedBox(height: 20),
 
+              TextField(
+                controller: _transactionNotesController,
+                minLines: 2,
+                maxLines: 4,
+                decoration: InputDecoration(
+                  labelText: 'Notes',
+                  alignLabelWithHint: true,
+                  filled: true,
+                  fillColor: const Color(0xFFFAFAFA),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(color: Color(0xFF1B6B72)),
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 20),
+
               // Payment method
               const Text(
                 'Select Payment Method',
@@ -1669,6 +1682,7 @@ class _QuickCustomerDialog<T> extends StatefulWidget {
 }
 
 class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
+  final _customerRepository = CustomerRepository();
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
@@ -1721,11 +1735,10 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     };
 
     try {
-      final docRef = await FirebaseFirestore.instance
-          .collection('customers')
-          .add(data);
+      final savedRow = await _customerRepository.addCustomer(data);
+      final customerId = savedRow['id']?.toString() ?? '';
       if (!mounted) return;
-      Navigator.of(context).pop(widget.customerBuilder(docRef.id, data));
+      Navigator.of(context).pop(widget.customerBuilder(customerId, data));
     } catch (_) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -1788,10 +1801,9 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   requiredField: true,
                 ),
                 const SizedBox(height: 14),
-                _QuickCustomerField(
+                _QuickGenderDropdown(
                   label: 'Gender',
                   controller: _genderController,
-                  hint: 'Female / Male',
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -2114,6 +2126,48 @@ class _QuickCustomerField extends StatelessWidget {
   }
 }
 
+class _QuickGenderDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _QuickGenderDropdown({
+    required this.label,
+    required this.controller,
+  });
+
+  String? get _value {
+    final normalized = controller.text.trim().toLowerCase();
+    if (normalized.startsWith('f')) return 'Female';
+    if (normalized.startsWith('m')) return 'Male';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _value,
+      items: const [
+        DropdownMenuItem(value: 'Female', child: Text('Female')),
+        DropdownMenuItem(value: 'Male', child: Text('Male')),
+      ],
+      onChanged: (value) => controller.text = value ?? '',
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
 class _WalkInStepCard extends StatelessWidget {
   final int number;
   final String title;
@@ -2129,12 +2183,16 @@ class _WalkInStepCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isCompactTablet = MediaQuery.of(context).size.width < 1100;
+    final padding = isCompactTablet ? 14.0 : 20.0;
+    final markerSize = isCompactTablet ? 24.0 : 28.0;
+    final titleSize = isCompactTablet ? 15.0 : 16.0;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(padding),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(isCompactTablet ? 12 : 16),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.04),
@@ -2149,8 +2207,8 @@ class _WalkInStepCard extends StatelessWidget {
           Row(
             children: [
               Container(
-                width: 28,
-                height: 28,
+                width: markerSize,
+                height: markerSize,
                 decoration: const BoxDecoration(
                   shape: BoxShape.circle,
                   color: Color(0xFF1B6B72),
@@ -2161,24 +2219,24 @@ class _WalkInStepCard extends StatelessWidget {
                     style: const TextStyle(
                       color: Colors.white,
                       fontWeight: FontWeight.bold,
-                      fontSize: 13,
+                      fontSize: 12,
                     ),
                   ),
                 ),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: isCompactTablet ? 8 : 10),
               Text(
                 title,
-                style: const TextStyle(
-                  fontSize: 16,
+                style: TextStyle(
+                  fontSize: titleSize,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
+                  color: const Color(0xFF1A1A2E),
                 ),
               ),
               if (badge != null) ...[const SizedBox(width: 8), badge!],
             ],
           ),
-          const SizedBox(height: 16),
+          SizedBox(height: isCompactTablet ? 12 : 16),
           child,
         ],
       ),

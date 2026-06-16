@@ -1,6 +1,11 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+
+import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/customer_repository.dart';
+import '../../data/repositories/room_repository.dart';
+import '../../data/repositories/service_repository.dart';
+import '../../data/repositories/therapist_repository.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -30,10 +35,9 @@ class _Service {
     required this.price,
   });
 
-  factory _Service.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _Service.fromMap(Map<String, dynamic> d) {
     return _Service(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name']?.toString() ?? '',
       imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
       roomType: _normalizeRoomType(d['roomType']),
@@ -78,10 +82,9 @@ class _Therapist {
     required this.busyUntil,
   });
 
-  factory _Therapist.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _Therapist.fromMap(Map<String, dynamic> d) {
     return _Therapist(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name']?.toString() ?? '',
       gender: d['gender']?.toString().trim().toLowerCase() ?? '',
       imageUrl:
@@ -89,7 +92,7 @@ class _Therapist {
               ?.toString()
               .trim() ??
           '',
-      isFree: d['availabilityStatus'] ?? true,
+      isFree: _isActiveDoc({'isActive': d['availabilityStatus'] ?? true}),
       busyUntil: d['busyUntil']?.toString() ?? '',
     );
   }
@@ -149,17 +152,16 @@ class _Customer {
   final String id, name, phone;
   const _Customer({required this.id, required this.name, required this.phone});
 
-  factory _Customer.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _Customer.fromMap(Map<String, dynamic> d) {
     return _Customer(
-      id: doc.id,
+      id: d['id']?.toString() ?? '',
       name: d['name'] ?? '',
       phone: d['phone'] ?? '',
     );
   }
 
   static _Customer get guest =>
-      const _Customer(id: 'walk_in_guest', name: 'Guest Account', phone: '');
+      const _Customer(id: 'walk_in_guest', name: 'Guest', phone: '');
 
   bool get isGuest => id == 'walk_in_guest';
 }
@@ -175,6 +177,12 @@ class NewAppointmentScreen extends StatefulWidget {
 }
 
 class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
+  final _appointmentRepository = AppointmentRepository();
+  final _customerRepository = CustomerRepository();
+  final _roomRepository = RoomRepository();
+  final _serviceRepository = ServiceRepository();
+  final _therapistRepository = TherapistRepository();
+
   // State
   DateTime _selectedDate = DateTime.now();
   _Customer? _selectedCustomer;
@@ -235,17 +243,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   Future<void> _loadServices() async {
     try {
-      final snap = await FirebaseFirestore.instance
-          .collection('services')
-          .get(const GetOptions(source: Source.server));
+      final rows = await _serviceRepository.getActiveServices();
       final services = <_Service>[];
 
-      for (final doc in snap.docs) {
-        final d = doc.data();
+      for (final d in rows) {
         final active = _isActiveDoc(d);
 
         if (active) {
-          services.add(_Service.fromDoc(doc));
+          services.add(_Service.fromMap(d));
         }
       }
 
@@ -262,36 +267,28 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   Future<void> _loadTherapists() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('therapists')
-        .get();
+    final rows = await _therapistRepository.getActiveTherapists();
     setState(() {
-      _therapists = snap.docs.map((d) => _Therapist.fromDoc(d)).toList();
+      _therapists = rows.map((d) => _Therapist.fromMap(d)).toList();
     });
   }
 
   Future<void> _loadRooms() async {
-    final snap = await FirebaseFirestore.instance.collection('rooms').get();
+    final rows = await _roomRepository.getActiveRooms();
 
     final zones = <_RoomZone>[];
-    for (final doc in snap.docs) {
-      final d = doc.data();
+    for (final d in rows) {
       if (!_isActiveDoc(d)) continue;
       final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
-      final freeSlots = await _countFreeSlots(
-        doc.id,
-        totalSlots,
-        _selectedDate,
-      );
       zones.add(
         _RoomZone(
-          id: doc.id,
+          id: d['id']?.toString() ?? '',
           name: d['name'] ?? '',
           type: _normalizeRoomType(d['type'] ?? d['roomType']),
           floor: d['floor'] ?? '',
           imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
           totalSlots: totalSlots,
-          freeSlots: freeSlots,
+          freeSlots: totalSlots,
         ),
       );
     }
@@ -305,35 +302,21 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return fallback;
   }
 
-  Future<int> _countFreeSlots(
-    String roomId,
-    int totalSlots,
-    DateTime date,
-  ) async {
-    final dateStr = DateFormat('yyyy-MM-dd').format(date);
-    final snap = await FirebaseFirestore.instance
-        .collection('appointments')
-        .where('roomId', isEqualTo: roomId)
-        .where('date', isEqualTo: dateStr)
-        .where('status', whereIn: ['confirmed', 'in_progress'])
-        .get();
-    return (totalSlots - snap.docs.length).clamp(0, totalSlots);
-  }
-
   Future<void> _loadCustomers() async {
-    final snap = await FirebaseFirestore.instance
-        .collection('customers')
-        .orderBy('name')
-        .get();
+    final rows = await _customerRepository.getCustomers();
     setState(() {
-      _customers = snap.docs.map((d) => _Customer.fromDoc(d)).toList();
+      _customers = rows.map((d) => _Customer.fromMap(d)).toList();
       _filteredCustomers = _customers;
     });
   }
 
   void _filterCustomers() {
-    final q = _customerSearchController.text.toLowerCase();
+    final q = _customerSearchController.text.trim().toLowerCase();
     setState(() {
+      if (_selectedCustomer != null &&
+          q != _selectedCustomer!.name.toLowerCase()) {
+        _selectedCustomer = null;
+      }
       _filteredCustomers = _customers
           .where(
             (c) =>
@@ -405,101 +388,33 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       setState(() => _loadingSlots = true);
     }
 
-    final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
     final duration = _selectedService!.duration;
 
     try {
-      // Fetch existing appointments for therapist and room on date
-      final therapistSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('therapistId', isEqualTo: _selectedTherapist!.id)
-          .where('date', isEqualTo: dateStr)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
-
-      final roomSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('roomId', isEqualTo: _selectedRoom!.id)
-          .where('date', isEqualTo: dateStr)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
-
-      // Build blocked intervals
-      final blocked = <Map<String, int>>[];
-      for (final doc in [...therapistSnap.docs, ...roomSnap.docs]) {
-        final d = doc.data();
-        final start = _timeToMinutes(d['startTime'] ?? '09:00');
-        final end = _timeToMinutes(d['endTime'] ?? '10:00');
-        blocked.add({'start': start, 'end': end});
-      }
-
-      // Generate candidate slots
       final open = _openHour * 60;
       final close = _closeHour * 60;
       final slots = <_TimeSlot>[];
       var cursor = open;
+      var recommendedCount = 0;
 
       while (cursor + duration <= close) {
         final slotEnd = cursor + duration;
-        final available = !_hasOverlap(cursor, slotEnd, blocked);
-
-        if (available) {
-          // Heuristic: slot is "recommended" if it starts right after
-          // an existing booking (minimises gap)
-          final isRecommended =
-              blocked.any((b) => b['end'] == cursor) ||
-              blocked.isEmpty && cursor == open;
-
-          slots.add(
-            _TimeSlot(
-              start: _minutesToTime(cursor),
-              end: _minutesToTime(slotEnd),
-              isRecommended: isRecommended,
-              isAvailable: true,
-            ),
-          );
-        } else {
-          // Show as unavailable
-          slots.add(
-            _TimeSlot(
-              start: _minutesToTime(cursor),
-              end: _minutesToTime(cursor + duration),
-              isRecommended: false,
-              isAvailable: false,
-            ),
-          );
-        }
+        slots.add(
+          _TimeSlot(
+            start: _minutesToTime(cursor),
+            end: _minutesToTime(slotEnd),
+            isRecommended: recommendedCount < 3,
+            isAvailable: true,
+          ),
+        );
+        recommendedCount++;
         cursor += _slotStep;
-      }
-
-      // If no recommended slots, mark first 3 available as recommended
-      final hasRecommended = slots.any((s) => s.isRecommended && s.isAvailable);
-      if (!hasRecommended) {
-        int count = 0;
-        for (var i = 0; i < slots.length && count < 3; i++) {
-          if (slots[i].isAvailable) {
-            slots[i] = _TimeSlot(
-              start: slots[i].start,
-              end: slots[i].end,
-              isRecommended: true,
-              isAvailable: true,
-            );
-            count++;
-          }
-        }
       }
 
       if (mounted) setState(() => _slots = slots);
     } finally {
       if (mounted) setState(() => _loadingSlots = false);
     }
-  }
-
-  bool _hasOverlap(int start, int end, List<Map<String, int>> blocked) {
-    for (final b in blocked) {
-      if (start < b['end']! && end > b['start']!) return true;
-    }
-    return false;
   }
 
   int _timeToMinutes(String t) {
@@ -603,60 +518,39 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         _timeToMinutes(_selectedSlot!.start) + _selectedService!.duration,
       );
 
-      // CSP final validation before saving
-      final therapistSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('therapistId', isEqualTo: _selectedTherapist!.id)
-          .where('date', isEqualTo: dateStr)
-          .where('status', whereIn: ['confirmed', 'in_progress'])
-          .get();
-
-      final blocked = therapistSnap.docs.map((doc) {
-        final d = doc.data();
-        return {
-          'start': _timeToMinutes(d['startTime'] ?? '09:00'),
-          'end': _timeToMinutes(d['endTime'] ?? '10:00'),
-        };
-      }).toList();
-
       final slotStart = _timeToMinutes(_selectedSlot!.start);
       final slotEnd = _timeToMinutes(endTime);
-
-      if (_hasOverlap(slotStart, slotEnd, blocked)) {
+      if (slotStart >= slotEnd) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text('Conflict detected — slot no longer available'),
+              content: Text('Invalid appointment time selected'),
               backgroundColor: Color(0xFFE53935),
               behavior: SnackBarBehavior.floating,
             ),
           );
         }
-        await _generateSlots();
         return;
       }
 
-      // Save to Firestore
-      await FirebaseFirestore.instance.collection('appointments').add({
+      await _appointmentRepository.createAppointment({
         'customerId': _selectedCustomer!.id,
-        'customerName': _selectedCustomer!.name,
-        'customerPhone': _selectedCustomer!.phone,
         'therapistId': _selectedTherapist!.id,
         'roomId': _selectedRoom!.id,
         'serviceId': _selectedService!.id,
         'date': dateStr,
         'startTime': _selectedSlot!.start,
         'endTime': endTime,
-        'status': 'confirmed',
+        'status': 'pending',
         'totalPrice': _selectedService!.price,
         'type': 'appointment',
-        'createdAt': FieldValue.serverTimestamp(),
+        'createdAt': DateTime.now().toIso8601String(),
       });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Appointment confirmed successfully'),
+            content: Text('Appointment created as pending'),
             backgroundColor: Color(0xFF1B6B72),
             behavior: SnackBarBehavior.floating,
           ),
@@ -681,7 +575,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   // ── Build ──────────────────────────────────────────────────────
 
   bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
+      MediaQuery.of(context).size.width >= 900;
 
   @override
   Widget build(BuildContext context) {
@@ -1414,6 +1308,7 @@ class _QuickCustomerDialog<T> extends StatefulWidget {
 }
 
 class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
+  final _customerRepository = CustomerRepository();
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
   final _phoneController = TextEditingController();
@@ -1466,11 +1361,10 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     };
 
     try {
-      final docRef = await FirebaseFirestore.instance
-          .collection('customers')
-          .add(data);
+      final savedRow = await _customerRepository.addCustomer(data);
+      final customerId = savedRow['id']?.toString() ?? '';
       if (!mounted) return;
-      Navigator.of(context).pop(widget.customerBuilder(docRef.id, data));
+      Navigator.of(context).pop(widget.customerBuilder(customerId, data));
     } catch (_) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -1533,10 +1427,9 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   requiredField: true,
                 ),
                 const SizedBox(height: 14),
-                _QuickCustomerField(
+                _QuickGenderDropdown(
                   label: 'Gender',
                   controller: _genderController,
-                  hint: 'Female / Male',
                 ),
                 const SizedBox(height: 14),
                 _QuickCustomerField(
@@ -1660,6 +1553,48 @@ class _QuickCustomerField extends StatelessWidget {
                   color: Color(0xFF1B6B72),
                 ),
               ),
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickGenderDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _QuickGenderDropdown({
+    required this.label,
+    required this.controller,
+  });
+
+  String? get _value {
+    final normalized = controller.text.trim().toLowerCase();
+    if (normalized.startsWith('f')) return 'Female';
+    if (normalized.startsWith('m')) return 'Male';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _value,
+      items: const [
+        DropdownMenuItem(value: 'Female', child: Text('Female')),
+        DropdownMenuItem(value: 'Male', child: Text('Male')),
+      ],
+      onChanged: (value) => controller.text = value ?? '',
+      decoration: InputDecoration(
+        labelText: label,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -2067,7 +2002,7 @@ class _GuestCustomerOption extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Guest Account',
+                      'Guest',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
@@ -2447,7 +2382,7 @@ class _TherapistCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
+    final isTablet = MediaQuery.of(context).size.width >= 900;
 
     return GestureDetector(
       onTap: isDisabled ? null : onTap,

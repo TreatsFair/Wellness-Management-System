@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../data/repositories/therapist_repository.dart';
 
 // ── Data model ────────────────────────────────────────────────────
 class TherapistModel {
@@ -9,11 +10,11 @@ class TherapistModel {
   final String gender;
   final String employmentType;
   final String joinDate;
-  final bool   availabilityStatus;
+  final bool availabilityStatus;
   final String notes;
 
   // Calculated
-  final int    totalAppointments;
+  final int totalAppointments;
 
   const TherapistModel({
     required this.id,
@@ -29,12 +30,6 @@ class TherapistModel {
 
   static String _stringValue(dynamic value) {
     if (value == null) return '';
-    if (value is Timestamp) {
-      final date = value.toDate();
-      final month = date.month.toString().padLeft(2, '0');
-      final day = date.day.toString().padLeft(2, '0');
-      return '${date.year}-$month-$day';
-    }
     return value.toString();
   }
 
@@ -44,17 +39,16 @@ class TherapistModel {
     return true;
   }
 
-  factory TherapistModel.fromFirestore(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory TherapistModel.fromMap(Map<String, dynamic> d) {
     return TherapistModel(
-      id:                 doc.id,
-      name:               _stringValue(d['name']),
-      phone:              _stringValue(d['phone']),
-      gender:             _stringValue(d['gender']),
-      employmentType:     _stringValue(d['employmentType']),
-      joinDate:           _stringValue(d['joinDate']),
+      id: _stringValue(d['id']),
+      name: _stringValue(d['name']),
+      phone: _stringValue(d['phone']),
+      gender: _stringValue(d['gender']),
+      employmentType: _stringValue(d['employmentType']),
+      joinDate: _stringValue(d['joinDate']),
       availabilityStatus: _boolValue(d['availabilityStatus']),
-      notes:              _stringValue(d['notes']),
+      notes: _stringValue(d['notes']),
     );
   }
 
@@ -78,19 +72,17 @@ class TherapistModel {
     return colors[name.length % colors.length];
   }
 
-  TherapistModel copyWith({
-    int? totalAppointments,
-  }) {
+  TherapistModel copyWith({int? totalAppointments}) {
     return TherapistModel(
-      id:                 id,
-      name:               name,
-      phone:              phone,
-      gender:             gender,
-      employmentType:     employmentType,
-      joinDate:           joinDate,
+      id: id,
+      name: name,
+      phone: phone,
+      gender: gender,
+      employmentType: employmentType,
+      joinDate: joinDate,
       availabilityStatus: availabilityStatus,
-      notes:              notes,
-      totalAppointments:  totalAppointments ?? this.totalAppointments,
+      notes: notes,
+      totalAppointments: totalAppointments ?? this.totalAppointments,
     );
   }
 }
@@ -105,11 +97,12 @@ class TherapistsScreen extends StatefulWidget {
 }
 
 class _TherapistsScreenState extends State<TherapistsScreen> {
+  final _therapistRepository = TherapistRepository();
   List<TherapistModel> _therapists = [];
-  List<TherapistModel> _filtered   = [];
-  TherapistModel?      _selected;
-  bool                 _loading    = true;
-  final _searchController          = TextEditingController();
+  List<TherapistModel> _filtered = [];
+  TherapistModel? _selected;
+  bool _loading = true;
+  final _searchController = TextEditingController();
 
   bool get _isAdmin => widget.userRole == 'admin';
 
@@ -129,14 +122,8 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   Future<void> _loadTherapists() async {
     setState(() => _loading = true);
     try {
-      final snapshot = await FirebaseFirestore.instance
-          .collection('therapists')
-          .orderBy('name')
-          .get();
-
-      final therapists = snapshot.docs
-          .map((doc) => TherapistModel.fromFirestore(doc))
-          .toList();
+      final rows = await _therapistRepository.getTherapists();
+      final therapists = rows.map(TherapistModel.fromMap).toList();
 
       final enriched = await Future.wait(
         therapists.map((t) => _enrichTherapist(t)),
@@ -144,8 +131,8 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
 
       setState(() {
         _therapists = enriched;
-        _filtered   = enriched;
-        _loading    = false;
+        _filtered = enriched;
+        _loading = false;
         if (enriched.isNotEmpty) _selected = enriched.first;
       });
     } catch (e) {
@@ -156,20 +143,16 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   Future<TherapistModel> _enrichTherapist(TherapistModel t) async {
     try {
       // Total completed appointments
-      final today = _todayString();
-      final todaySnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('therapistId', isEqualTo: t.id)
-          .where('status', isEqualTo: 'completed')
-          .where('date', isEqualTo: today)
-          .get();
+      final stats = await _therapistRepository.getTherapistAppointmentStats(
+        t.id,
+        date: DateTime.now(),
+      );
 
       // This month
 
-
       // Last session — most recent appointment
       return t.copyWith(
-        totalAppointments: todaySnap.docs.length,
+        totalAppointments: stats['completedAppointments'] as int? ?? 0,
       );
     } catch (_) {
       return t;
@@ -197,8 +180,9 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     if (savedTherapist == null) return null;
 
     setState(() {
-      final existingIndex =
-          _therapists.indexWhere((t) => t.id == savedTherapist.id);
+      final existingIndex = _therapists.indexWhere(
+        (t) => t.id == savedTherapist.id,
+      );
       if (existingIndex == -1) {
         _therapists = [..._therapists, savedTherapist];
       } else {
@@ -213,7 +197,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
       final query = _searchController.text.toLowerCase();
       _filtered = _therapists.where((t) {
         return t.name.toLowerCase().contains(query) ||
-               t.phone.toLowerCase().contains(query);
+            t.phone.toLowerCase().contains(query);
       }).toList();
       _selected = savedTherapist;
     });
@@ -237,10 +221,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     if (secondConfirm != true) return false;
 
     try {
-      await FirebaseFirestore.instance
-          .collection('therapists')
-          .doc(therapist.id)
-          .delete();
+      await _therapistRepository.deleteTherapist(therapist.id);
 
       if (!mounted) return false;
       setState(() {
@@ -250,7 +231,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
         final query = _searchController.text.toLowerCase();
         _filtered = _therapists.where((t) {
           return t.name.toLowerCase().contains(query) ||
-                 t.phone.toLowerCase().contains(query);
+              t.phone.toLowerCase().contains(query);
         }).toList();
 
         if (_selected?.id == therapist.id) {
@@ -304,13 +285,13 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     setState(() {
       _filtered = _therapists.where((t) {
         return t.name.toLowerCase().contains(query) ||
-               t.phone.toLowerCase().contains(query);
+            t.phone.toLowerCase().contains(query);
       }).toList();
     });
   }
 
   bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
+      MediaQuery.of(context).size.width >= 900;
 
   @override
   Widget build(BuildContext context) {
@@ -319,30 +300,29 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
       body: SafeArea(
         child: _loading
             ? const Center(
-                child: CircularProgressIndicator(
-                  color: Color(0xFF1B6B72),
-                ))
+                child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
+              )
             : _isTablet(context)
-                ? _TabletLayout(
-                    therapists:       _filtered,
-                    selected:         _selected,
-                    searchController: _searchController,
-                    isAdmin:          _isAdmin,
-                    onSelect:         (t) => setState(() => _selected = t),
-                    onRefresh:        _loadTherapists,
-                    onAdd:            () => _openTherapistForm(),
-                    onEdit:           (t) => _openTherapistForm(therapist: t),
-                    onDelete:         _deleteTherapist,
-                  )
-                : _PhoneLayout(
-                    therapists:       _filtered,
-                    searchController: _searchController,
-                    isAdmin:          _isAdmin,
-                    onRefresh:        _loadTherapists,
-                    onAdd:            () => _openTherapistForm(),
-                    onEdit:           (t) => _openTherapistForm(therapist: t),
-                    onDelete:         _deleteTherapist,
-                  ),
+            ? _TabletLayout(
+                therapists: _filtered,
+                selected: _selected,
+                searchController: _searchController,
+                isAdmin: _isAdmin,
+                onSelect: (t) => setState(() => _selected = t),
+                onRefresh: _loadTherapists,
+                onAdd: () => _openTherapistForm(),
+                onEdit: (t) => _openTherapistForm(therapist: t),
+                onDelete: _deleteTherapist,
+              )
+            : _PhoneLayout(
+                therapists: _filtered,
+                searchController: _searchController,
+                isAdmin: _isAdmin,
+                onRefresh: _loadTherapists,
+                onAdd: () => _openTherapistForm(),
+                onEdit: (t) => _openTherapistForm(therapist: t),
+                onDelete: _deleteTherapist,
+              ),
       ),
     );
   }
@@ -353,12 +333,12 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
 // ─────────────────────────────────────────────────────────────────
 class _TabletLayout extends StatelessWidget {
   final List<TherapistModel> therapists;
-  final TherapistModel?      selected;
+  final TherapistModel? selected;
   final TextEditingController searchController;
-  final bool                 isAdmin;
+  final bool isAdmin;
   final Function(TherapistModel) onSelect;
-  final VoidCallback         onRefresh;
-  final VoidCallback         onAdd;
+  final VoidCallback onRefresh;
+  final VoidCallback onAdd;
   final Future<TherapistModel?> Function(TherapistModel) onEdit;
   final Future<bool> Function(TherapistModel) onDelete;
 
@@ -392,13 +372,15 @@ class _TabletLayout extends StatelessWidget {
                   children: [
                     const BackButton(),
                     const Expanded(
-                      child: Text('Therapists',
+                      child: Text(
+                        'Therapists',
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          fontSize:   18,
+                          fontSize: 18,
                           fontWeight: FontWeight.bold,
-                          color:      Color(0xFF1A1A2E),
-                        )),
+                          color: Color(0xFF1A1A2E),
+                        ),
+                      ),
                     ),
                     const SizedBox(width: 36, height: 36),
                   ],
@@ -419,9 +401,9 @@ class _TabletLayout extends StatelessWidget {
                   child: ListView.builder(
                     itemCount: therapists.length,
                     itemBuilder: (_, i) => _TabletListItem(
-                      therapist:  therapists[i],
+                      therapist: therapists[i],
                       isSelected: selected?.id == therapists[i].id,
-                      onTap:      () => onSelect(therapists[i]),
+                      onTap: () => onSelect(therapists[i]),
                     ),
                   ),
                 ),
@@ -449,9 +431,9 @@ class _TabletLayout extends StatelessWidget {
                       )
                     : _DetailPanel(
                         therapist: selected!,
-                        isAdmin:   isAdmin,
-                        onEdit:    () => onEdit(selected!),
-                        onDelete:  () => onDelete(selected!),
+                        isAdmin: isAdmin,
+                        onEdit: () => onEdit(selected!),
+                        onDelete: () => onDelete(selected!),
                         showTabletHeader: false,
                       ),
               ),
@@ -465,8 +447,8 @@ class _TabletLayout extends StatelessWidget {
 
 class _TabletListItem extends StatelessWidget {
   final TherapistModel therapist;
-  final bool           isSelected;
-  final VoidCallback   onTap;
+  final bool isSelected;
+  final VoidCallback onTap;
 
   const _TabletListItem({
     required this.therapist,
@@ -479,7 +461,7 @@ class _TabletListItem extends StatelessWidget {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        margin:  const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
           color: isSelected
@@ -498,43 +480,48 @@ class _TabletListItem extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(therapist.name,
+                  Text(
+                    therapist.name,
                     style: const TextStyle(
-                      fontSize:   14,
+                      fontSize: 14,
                       fontWeight: FontWeight.w600,
-                      color:      Color(0xFF1A1A2E),
-                    )),
-                  Row(children: [
-                    Container(
-                      width: 7, height: 7,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: therapist.availabilityStatus
-                            ? const Color(0xFF4CAF50)
-                            : const Color(0xFFF59E0B),
-                      ),
+                      color: Color(0xFF1A1A2E),
                     ),
-                    const SizedBox(width: 5),
-                    Text(
-                      therapist.availabilityStatus
-                          ? 'Available'
-                          : 'Unavailable',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: therapist.availabilityStatus
-                            ? const Color(0xFF4CAF50)
-                            : const Color(0xFFF59E0B),
-                        fontWeight: FontWeight.w500,
-                      )),
-                  ]),
+                  ),
+                  Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: therapist.availabilityStatus
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFFF59E0B),
+                        ),
+                      ),
+                      const SizedBox(width: 5),
+                      Text(
+                        therapist.availabilityStatus
+                            ? 'Available'
+                            : 'Unavailable',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: therapist.availabilityStatus
+                              ? const Color(0xFF4CAF50)
+                              : const Color(0xFFF59E0B),
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ],
               ),
             ),
-            Text('${therapist.totalAppointments} done today',
-              style: const TextStyle(
-                fontSize: 11,
-                color:    Color(0xFF9E9E9E),
-              )),
+            Text(
+              '${therapist.totalAppointments} done today',
+              style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+            ),
           ],
         ),
       ),
@@ -546,11 +533,11 @@ class _TabletListItem extends StatelessWidget {
 // PHONE LAYOUT
 // ─────────────────────────────────────────────────────────────────
 class _PhoneLayout extends StatelessWidget {
-  final List<TherapistModel>  therapists;
+  final List<TherapistModel> therapists;
   final TextEditingController searchController;
-  final bool                  isAdmin;
-  final VoidCallback          onRefresh;
-  final VoidCallback          onAdd;
+  final bool isAdmin;
+  final VoidCallback onRefresh;
+  final VoidCallback onAdd;
   final Future<TherapistModel?> Function(TherapistModel) onEdit;
   final Future<bool> Function(TherapistModel) onDelete;
 
@@ -566,39 +553,42 @@ class _PhoneLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final horizontalPadding =
-        MediaQuery.of(context).size.width < 360 ? 12.0 : 16.0;
+    final horizontalPadding = MediaQuery.of(context).size.width < 360
+        ? 12.0
+        : 16.0;
 
     return Column(
       children: [
         // Header
         Container(
-          color:   Colors.white,
+          color: Colors.white,
           padding: EdgeInsets.fromLTRB(4, 12, horizontalPadding, 12),
           child: Row(
             children: [
               const BackButton(),
               const Expanded(
-                child: Text('Therapists',
+                child: Text(
+                  'Therapists',
                   textAlign: TextAlign.start,
                   style: TextStyle(
-                    fontSize:   18,
+                    fontSize: 18,
                     fontWeight: FontWeight.w700,
-                    color:      Color(0xFF1A1A2E),
-                  )),
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
               ),
               Container(
-                  width: 36, height: 36,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color(0xFF1B6B72),
-                  ),
-                  child: IconButton(
-                    padding: EdgeInsets.zero,
-                    icon: const Icon(Icons.add,
-                      color: Colors.white, size: 20),
-                    onPressed: onAdd,
-                  ),
+                width: 36,
+                height: 36,
+                decoration: const BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Color(0xFF1B6B72),
+                ),
+                child: IconButton(
+                  padding: EdgeInsets.zero,
+                  icon: const Icon(Icons.add, color: Colors.white, size: 20),
+                  onPressed: onAdd,
+                ),
               ),
             ],
           ),
@@ -635,9 +625,9 @@ class _PhoneLayout extends StatelessWidget {
                   MaterialPageRoute(
                     builder: (_) => _PhoneDetailScreen(
                       therapist: therapists[i],
-                      isAdmin:   isAdmin,
-                      onEdit:    onEdit,
-                      onDelete:  onDelete,
+                      isAdmin: isAdmin,
+                      onEdit: onEdit,
+                      onDelete: onDelete,
                     ),
                   ),
                 ),
@@ -652,28 +642,25 @@ class _PhoneLayout extends StatelessWidget {
 
 class _PhoneListCard extends StatelessWidget {
   final TherapistModel therapist;
-  final VoidCallback   onTap;
+  final VoidCallback onTap;
 
-  const _PhoneListCard({
-    required this.therapist,
-    required this.onTap,
-  });
+  const _PhoneListCard({required this.therapist, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
       child: Container(
-        margin:  const EdgeInsets.only(bottom: 10),
+        margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color:        Colors.white,
+          color: Colors.white,
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color:      Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withValues(alpha: 0.04),
               blurRadius: 6,
-              offset:     const Offset(0, 2),
+              offset: const Offset(0, 2),
             ),
           ],
         ),
@@ -688,12 +675,14 @@ class _PhoneListCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(therapist.name,
+                      Text(
+                        therapist.name,
                         style: const TextStyle(
-                          fontSize:   15,
+                          fontSize: 15,
                           fontWeight: FontWeight.w600,
-                          color:      Color(0xFF1A1A2E),
-                        )),
+                          color: Color(0xFF1A1A2E),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -703,33 +692,38 @@ class _PhoneListCard extends StatelessWidget {
                     Text(
                       '${therapist.totalAppointments} done today',
                       style: const TextStyle(
-                        fontSize:   13,
+                        fontSize: 13,
                         fontWeight: FontWeight.bold,
-                        color:      Color(0xFF1B6B72),
-                      )),
-                    const SizedBox(height: 4),
-                    Row(children: [
-                      Container(
-                        width: 7, height: 7,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: therapist.availabilityStatus
-                              ? const Color(0xFF4CAF50)
-                              : const Color(0xFFF59E0B),
-                        ),
+                        color: Color(0xFF1B6B72),
                       ),
-                      const SizedBox(width: 4),
-                      Text(
-                        therapist.availabilityStatus
-                            ? 'Available'
-                            : 'Unavailable',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: therapist.availabilityStatus
-                              ? const Color(0xFF4CAF50)
-                              : const Color(0xFFF59E0B),
-                        )),
-                    ]),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Container(
+                          width: 7,
+                          height: 7,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: therapist.availabilityStatus
+                                ? const Color(0xFF4CAF50)
+                                : const Color(0xFFF59E0B),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          therapist.availabilityStatus
+                              ? 'Available'
+                              : 'Unavailable',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: therapist.availabilityStatus
+                                ? const Color(0xFF4CAF50)
+                                : const Color(0xFFF59E0B),
+                          ),
+                        ),
+                      ],
+                    ),
                   ],
                 ),
               ],
@@ -743,7 +737,7 @@ class _PhoneListCard extends StatelessWidget {
 
 class _PhoneDetailScreen extends StatefulWidget {
   final TherapistModel therapist;
-  final bool           isAdmin;
+  final bool isAdmin;
   final Future<TherapistModel?> Function(TherapistModel) onEdit;
   final Future<bool> Function(TherapistModel) onDelete;
 
@@ -787,15 +781,17 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
       backgroundColor: const Color(0xFFF0F0F0),
       appBar: AppBar(
         backgroundColor: Colors.white,
-        elevation:       0,
-        leading:         const BackButton(color: Color(0xFF1A1A2E)),
+        elevation: 0,
+        leading: const BackButton(color: Color(0xFF1A1A2E)),
         centerTitle: true,
-        title: const Text('Therapist Details',
+        title: const Text(
+          'Therapist Details',
           style: TextStyle(
-            fontSize:   18,
+            fontSize: 18,
             fontWeight: FontWeight.w700,
-            color:      Color(0xFF1A1A2E),
-          )),
+            color: Color(0xFF1A1A2E),
+          ),
+        ),
         actions: [
           _CircleIconButton(
             icon: Icons.edit_outlined,
@@ -806,7 +802,9 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         ],
       ),
       body: SingleChildScrollView(
-        padding: EdgeInsets.all(MediaQuery.of(context).size.width < 360 ? 12 : 16),
+        padding: EdgeInsets.all(
+          MediaQuery.of(context).size.width < 360 ? 12 : 16,
+        ),
         child: _DetailPanel(
           therapist: _therapist,
           isAdmin: widget.isAdmin,
@@ -824,11 +822,11 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
 // ─────────────────────────────────────────────────────────────────
 class _DetailPanel extends StatelessWidget {
   final TherapistModel therapist;
-  final bool           isAdmin;
-  final VoidCallback   onEdit;
-  final VoidCallback   onDelete;
-  final bool           showTabletHeader;
-  final bool           showInlineEdit;
+  final bool isAdmin;
+  final VoidCallback onEdit;
+  final VoidCallback onDelete;
+  final bool showTabletHeader;
+  final bool showInlineEdit;
 
   const _DetailPanel({
     required this.therapist,
@@ -841,14 +839,13 @@ class _DetailPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
+    final isTablet = MediaQuery.of(context).size.width >= 900;
 
     return SingleChildScrollView(
       padding: EdgeInsets.all(isTablet ? 24 : 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-
           // Tablet title + edit button row
           if (isTablet && showTabletHeader)
             Padding(
@@ -856,18 +853,25 @@ class _DetailPanel extends StatelessWidget {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  const Text('Therapist Details',
+                  const Text(
+                    'Therapist Details',
                     style: TextStyle(
-                      fontSize:   22,
+                      fontSize: 22,
                       fontWeight: FontWeight.bold,
-                      color:      Color(0xFF1A1A2E),
-                    )),
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
                   OutlinedButton.icon(
                     onPressed: onEdit,
-                    icon: const Icon(Icons.edit_outlined,
-                      size: 16, color: Color(0xFF1B6B72)),
-                    label: const Text('Edit',
-                      style: TextStyle(color: Color(0xFF1B6B72))),
+                    icon: const Icon(
+                      Icons.edit_outlined,
+                      size: 16,
+                      color: Color(0xFF1B6B72),
+                    ),
+                    label: const Text(
+                      'Edit',
+                      style: TextStyle(color: Color(0xFF1B6B72)),
+                    ),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: Color(0xFF1B6B72)),
                       shape: RoundedRectangleBorder(
@@ -889,69 +893,95 @@ class _DetailPanel extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(therapist.name,
+                      Text(
+                        therapist.name,
                         style: const TextStyle(
-                          fontSize:   20,
+                          fontSize: 20,
                           fontWeight: FontWeight.bold,
-                          color:      Color(0xFF1A1A2E),
-                        )),
-                      const SizedBox(height: 6),
-                      Row(children: [
-                        const Icon(Icons.transgender,
-                          size: 14, color: Color(0xFF9E9E9E)),
-                        const SizedBox(width: 4),
-                        Text(therapist.gender,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            color:    Color(0xFF9E9E9E),
-                          )),
-                        const SizedBox(width: 12),
-                        // Availability badge
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: therapist.availabilityStatus
-                                ? const Color(0xFF4CAF50).withValues(alpha: 0.1)
-                                : const Color(0xFFF59E0B).withValues(alpha: 0.1),
-                            borderRadius: BorderRadius.circular(20),
-                          ),
-                          child: Row(children: [
-                            Container(
-                              width: 6, height: 6,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                color: therapist.availabilityStatus
-                                    ? const Color(0xFF4CAF50)
-                                    : const Color(0xFFF59E0B),
-                              ),
-                            ),
-                            const SizedBox(width: 5),
-                            Text(
-                              therapist.availabilityStatus
-                                  ? 'Available'
-                                  : 'Unavailable',
-                              style: TextStyle(
-                                fontSize:   11,
-                                fontWeight: FontWeight.w600,
-                                color: therapist.availabilityStatus
-                                    ? const Color(0xFF4CAF50)
-                                    : const Color(0xFFF59E0B),
-                              )),
-                          ]),
+                          color: Color(0xFF1A1A2E),
                         ),
-                      ]),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.transgender,
+                            size: 14,
+                            color: Color(0xFF9E9E9E),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            therapist.gender,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF9E9E9E),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          // Availability badge
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 8,
+                              vertical: 3,
+                            ),
+                            decoration: BoxDecoration(
+                              color: therapist.availabilityStatus
+                                  ? const Color(
+                                      0xFF4CAF50,
+                                    ).withValues(alpha: 0.1)
+                                  : const Color(
+                                      0xFFF59E0B,
+                                    ).withValues(alpha: 0.1),
+                              borderRadius: BorderRadius.circular(20),
+                            ),
+                            child: Row(
+                              children: [
+                                Container(
+                                  width: 6,
+                                  height: 6,
+                                  decoration: BoxDecoration(
+                                    shape: BoxShape.circle,
+                                    color: therapist.availabilityStatus
+                                        ? const Color(0xFF4CAF50)
+                                        : const Color(0xFFF59E0B),
+                                  ),
+                                ),
+                                const SizedBox(width: 5),
+                                Text(
+                                  therapist.availabilityStatus
+                                      ? 'Available'
+                                      : 'Unavailable',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: therapist.availabilityStatus
+                                        ? const Color(0xFF4CAF50)
+                                        : const Color(0xFFF59E0B),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 4),
-                      Row(children: [
-                        const Icon(Icons.phone_outlined,
-                          size: 14, color: Color(0xFF9E9E9E)),
-                        const SizedBox(width: 4),
-                        Text(therapist.phone,
-                          style: const TextStyle(
-                            fontSize: 13,
-                            color:    Color(0xFF9E9E9E),
-                          )),
-                      ]),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.phone_outlined,
+                            size: 14,
+                            color: Color(0xFF9E9E9E),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            therapist.phone,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF9E9E9E),
+                            ),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -987,15 +1017,19 @@ class _DetailPanel extends StatelessWidget {
           const SizedBox(height: 12),
 
           // ── Stats row ──────────────────────────────────────
-          Row(children: [
-            Expanded(child: _StatCard(
-              icon:      Icons.check_circle_outline,
-              iconBg:    const Color(0xFFE8F5E9),
-              iconColor: const Color(0xFF4CAF50),
-              label:     'Done Today',
-              value:     '${therapist.totalAppointments}',
-            )),
-          ]),
+          Row(
+            children: [
+              Expanded(
+                child: _StatCard(
+                  icon: Icons.check_circle_outline,
+                  iconBg: const Color(0xFFE8F5E9),
+                  iconColor: const Color(0xFF4CAF50),
+                  label: 'Done Today',
+                  value: '${therapist.totalAppointments}',
+                ),
+              ),
+            ],
+          ),
 
           const SizedBox(height: 12),
 
@@ -1004,25 +1038,18 @@ class _DetailPanel extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Therapist Information',
+                const Text(
+                  'Therapist Information',
                   style: TextStyle(
-                    fontSize:   16,
+                    fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color:      Color(0xFF1A1A2E),
-                  )),
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
                 const SizedBox(height: 16),
-                _InfoRow(
-                  label: 'Join Date',
-                  value: therapist.joinDate,
-                ),
-                _InfoRow(
-                  label: 'Employment',
-                  value: therapist.employmentType,
-                ),
-                _InfoRow(
-                  label: 'Phone Number',
-                  value: therapist.phone,
-                ),
+                _InfoRow(label: 'Join Date', value: therapist.joinDate),
+                _InfoRow(label: 'Employment', value: therapist.employmentType),
+                _InfoRow(label: 'Phone Number', value: therapist.phone),
                 _InfoRow(
                   label: 'Gender',
                   value: therapist.gender,
@@ -1039,27 +1066,33 @@ class _DetailPanel extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: const [
-                  Icon(Icons.article_outlined,
-                    size: 18, color: Color(0xFF9E9E9E)),
-                  SizedBox(width: 8),
-                  Text('Notes',
-                    style: TextStyle(
-                      fontSize:   16,
-                      fontWeight: FontWeight.bold,
-                      color:      Color(0xFF1A1A2E),
-                    )),
-                ]),
+                Row(
+                  children: const [
+                    Icon(
+                      Icons.article_outlined,
+                      size: 18,
+                      color: Color(0xFF9E9E9E),
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'Notes',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 10),
                 Text(
-                  therapist.notes.isEmpty
-                      ? 'No notes added.'
-                      : therapist.notes,
+                  therapist.notes.isEmpty ? 'No notes added.' : therapist.notes,
                   style: const TextStyle(
                     fontSize: 14,
-                    color:    Color(0xFF6B6B6B),
-                    height:   1.5,
-                  )),
+                    color: Color(0xFF6B6B6B),
+                    height: 1.5,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1071,16 +1104,21 @@ class _DetailPanel extends StatelessWidget {
               width: double.infinity,
               child: OutlinedButton.icon(
                 onPressed: onDelete,
-                icon: const Icon(Icons.delete_outline,
-                  color: Color(0xFFE53935), size: 18),
-                label: const Text('Remove Therapist',
+                icon: const Icon(
+                  Icons.delete_outline,
+                  color: Color(0xFFE53935),
+                  size: 18,
+                ),
+                label: const Text(
+                  'Remove Therapist',
                   style: TextStyle(
-                    color:      Color(0xFFE53935),
+                    color: Color(0xFFE53935),
                     fontWeight: FontWeight.w500,
-                  )),
+                  ),
+                ),
                 style: OutlinedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
-                  side:    const BorderSide(color: Color(0xFFE53935)),
+                  side: const BorderSide(color: Color(0xFFE53935)),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
@@ -1103,10 +1141,7 @@ class _TherapistFormDialog extends StatefulWidget {
   final TherapistModel? therapist;
   final String defaultJoinDate;
 
-  const _TherapistFormDialog({
-    this.therapist,
-    required this.defaultJoinDate,
-  });
+  const _TherapistFormDialog({this.therapist, required this.defaultJoinDate});
 
   @override
   State<_TherapistFormDialog> createState() => _TherapistFormDialogState();
@@ -1161,9 +1196,7 @@ class _TabletDetailHeader extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 30),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(
-          bottom: BorderSide(color: Color(0xFFE6E8EB)),
-        ),
+        border: Border(bottom: BorderSide(color: Color(0xFFE6E8EB))),
       ),
       child: Row(
         children: [
@@ -1197,6 +1230,7 @@ class _TabletDetailHeader extends StatelessWidget {
 }
 
 class _TherapistFormDialogState extends State<_TherapistFormDialog> {
+  final _therapistRepository = TherapistRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _nameController;
   late final TextEditingController _phoneController;
@@ -1255,39 +1289,42 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
 
     try {
       late final String therapistId;
+      late final Map<String, dynamic> savedRow;
       if (_isEditing) {
         therapistId = widget.therapist!.id;
-        await FirebaseFirestore.instance
-            .collection('therapists')
-            .doc(therapistId)
-            .set(data, SetOptions(merge: true));
+        savedRow = await _therapistRepository.updateTherapist(
+          therapistId,
+          data,
+        );
       } else {
-        final docRef = await FirebaseFirestore.instance
-            .collection('therapists')
-            .add(data);
-        therapistId = docRef.id;
+        savedRow = await _therapistRepository.addTherapist(data);
+        therapistId = savedRow['id']?.toString() ?? '';
       }
 
       final savedTherapist = TherapistModel(
         id: therapistId,
-        name: data['name']! as String,
-        phone: data['phone']! as String,
-        gender: data['gender']! as String,
-        employmentType: data['employmentType']! as String,
-        joinDate: data['joinDate']! as String,
-        availabilityStatus: data['availabilityStatus']! as bool,
-        notes: data['notes']! as String,
+        name: (savedRow['name'] ?? data['name'])!.toString(),
+        phone: (savedRow['phone'] ?? data['phone'])!.toString(),
+        gender: (savedRow['gender'] ?? data['gender'])!.toString(),
+        employmentType: (savedRow['employmentType'] ?? data['employmentType'])!
+            .toString(),
+        joinDate: (savedRow['joinDate'] ?? data['joinDate'])!.toString(),
+        availabilityStatus: TherapistModel._boolValue(
+          savedRow['availabilityStatus'] ?? data['availabilityStatus'],
+        ),
+        notes: (savedRow['notes'] ?? data['notes'])!.toString(),
         totalAppointments: widget.therapist?.totalAppointments ?? 0,
       );
 
       _close(savedTherapist);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Unable to save therapist: $e');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to save therapist'),
-          backgroundColor: Color(0xFFE53935),
+        SnackBar(
+          content: Text('Unable to save therapist: $e'),
+          backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -1331,8 +1368,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                         ),
                       ),
                       IconButton(
-                        onPressed:
-                            _saving ? null : () => _close(),
+                        onPressed: _saving ? null : () => _close(),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -1351,10 +1387,9 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     requiredField: true,
                   ),
                   const SizedBox(height: 14),
-                  _TherapistFormField(
+                  _TherapistGenderDropdown(
                     label: 'Gender',
                     controller: _genderController,
-                    hint: 'Female / Male',
                   ),
                   const SizedBox(height: 14),
                   _TherapistFormField(
@@ -1375,8 +1410,8 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     onChanged: _saving
                         ? null
                         : (value) => setState(
-                              () => _availabilityStatus = value ?? true,
-                            ),
+                            () => _availabilityStatus = value ?? true,
+                          ),
                     contentPadding: EdgeInsets.zero,
                     activeColor: const Color(0xFF1B6B72),
                     title: const Text('Available'),
@@ -1393,9 +1428,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     children: [
                       Expanded(
                         child: TextButton(
-                          onPressed: _saving
-                              ? null
-                              : () => _close(),
+                          onPressed: _saving ? null : () => _close(),
                           style: TextButton.styleFrom(
                             minimumSize: const Size.fromHeight(52),
                             backgroundColor: const Color(0xFFF1F3F6),
@@ -1430,9 +1463,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                                   ),
                                 )
                               : Text(
-                                  _isEditing
-                                      ? 'Save Changes'
-                                      : 'Add Therapist',
+                                  _isEditing ? 'Save Changes' : 'Add Therapist',
                                 ),
                         ),
                       ),
@@ -1472,12 +1503,55 @@ class _TherapistFormField extends StatelessWidget {
       keyboardType: keyboardType,
       maxLines: maxLines,
       validator: requiredField
-          ? (value) =>
-              value == null || value.trim().isEmpty ? '$label is required' : null
+          ? (value) => value == null || value.trim().isEmpty
+                ? '$label is required'
+                : null
           : null,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _TherapistGenderDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _TherapistGenderDropdown({
+    required this.label,
+    required this.controller,
+  });
+
+  String? get _value {
+    final normalized = controller.text.trim().toLowerCase();
+    if (normalized.startsWith('f')) return 'Female';
+    if (normalized.startsWith('m')) return 'Male';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _value,
+      items: const [
+        DropdownMenuItem(value: 'Female', child: Text('Female')),
+        DropdownMenuItem(value: 'Male', child: Text('Male')),
+      ],
+      onChanged: (value) => controller.text = value ?? '',
+      decoration: InputDecoration(
+        labelText: label,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -1503,18 +1577,22 @@ class _SearchBar extends StatelessWidget {
       controller: controller,
       style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
       decoration: InputDecoration(
-        hintText:   'Search therapists...',
-        hintStyle:  const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-        prefixIcon: const Icon(Icons.search,
-          color: Color(0xFF9E9E9E), size: 20),
-        filled:    true,
+        hintText: 'Search therapists...',
+        hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
+        prefixIcon: const Icon(
+          Icons.search,
+          color: Color(0xFF9E9E9E),
+          size: 20,
+        ),
+        filled: true,
         fillColor: const Color(0xFFF5F5F5),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide.none,
+          borderSide: BorderSide.none,
         ),
         contentPadding: const EdgeInsets.symmetric(
-          horizontal: 16, vertical: 12,
+          horizontal: 16,
+          vertical: 12,
         ),
       ),
     );
@@ -1523,21 +1601,22 @@ class _SearchBar extends StatelessWidget {
 
 class _Avatar extends StatelessWidget {
   final TherapistModel therapist;
-  final double         radius;
+  final double radius;
   const _Avatar({required this.therapist, required this.radius});
 
   @override
   Widget build(BuildContext context) {
     return CircleAvatar(
-      radius:          radius,
+      radius: radius,
       backgroundColor: therapist.avatarColor,
       child: Text(
         therapist.initials,
         style: TextStyle(
-          color:      Colors.white,
+          color: Colors.white,
           fontWeight: FontWeight.bold,
-          fontSize:   radius * 0.7,
-        )),
+          fontSize: radius * 0.7,
+        ),
+      ),
     );
   }
 }
@@ -1549,16 +1628,16 @@ class _Card extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width:   double.infinity,
+      width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color:        Colors.white,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withValues(alpha: 0.04),
+            color: Colors.black.withValues(alpha: 0.04),
             blurRadius: 8,
-            offset:     const Offset(0, 2),
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -1569,10 +1648,10 @@ class _Card extends StatelessWidget {
 
 class _StatCard extends StatelessWidget {
   final IconData icon;
-  final Color    iconBg;
-  final Color    iconColor;
-  final String   label;
-  final String   value;
+  final Color iconBg;
+  final Color iconColor;
+  final String label;
+  final String value;
 
   const _StatCard({
     required this.icon,
@@ -1587,42 +1666,46 @@ class _StatCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color:        Colors.white,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withValues(alpha: 0.04),
+            color: Colors.black.withValues(alpha: 0.04),
             blurRadius: 6,
-            offset:     const Offset(0, 2),
+            offset: const Offset(0, 2),
           ),
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Container(
-              width: 28, height: 28,
-              decoration: BoxDecoration(
-                color:        iconBg,
-                borderRadius: BorderRadius.circular(8),
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: iconBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, color: iconColor, size: 16),
               ),
-              child: Icon(icon, color: iconColor, size: 16),
-            ),
-            const SizedBox(width: 8),
-            Text(label,
-              style: const TextStyle(
-                fontSize: 12,
-                color:    Color(0xFF9E9E9E),
-              )),
-          ]),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
-          Text(value,
+          Text(
+            value,
             style: const TextStyle(
-              fontSize:   18,
+              fontSize: 18,
               fontWeight: FontWeight.bold,
-              color:      Color(0xFF1A1A2E),
-            )),
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
         ],
       ),
     );
@@ -1632,7 +1715,7 @@ class _StatCard extends StatelessWidget {
 class _InfoRow extends StatelessWidget {
   final String label;
   final String value;
-  final bool   isLast;
+  final bool isLast;
 
   const _InfoRow({
     required this.label,
@@ -1649,25 +1732,25 @@ class _InfoRow extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(label,
-                style: const TextStyle(
-                  fontSize: 14,
-                  color:    Color(0xFF9E9E9E),
-                )),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF9E9E9E)),
+              ),
               Flexible(
-                child: Text(value,
+                child: Text(
+                  value,
                   textAlign: TextAlign.right,
                   style: const TextStyle(
-                    fontSize:   14,
+                    fontSize: 14,
                     fontWeight: FontWeight.w500,
-                    color:      Color(0xFF1A1A2E),
-                  )),
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
               ),
             ],
           ),
         ),
-        if (!isLast)
-          const Divider(height: 1, color: Color(0xFFF0F0F0)),
+        if (!isLast) const Divider(height: 1, color: Color(0xFFF0F0F0)),
       ],
     );
   }

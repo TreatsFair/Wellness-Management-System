@@ -1,15 +1,20 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_core/firebase_core.dart';
-import 'firebase_options.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'data/repositories/auth_repository.dart';
+import 'core/supabase/supabase_config.dart';
+import 'core/utils/responsive.dart';
 import 'screens/auth/login_screen.dart';
 import 'screens/dashboard/dashboard_screen.dart';
 
-void main() async {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp(
-    options: DefaultFirebaseOptions.currentPlatform,
+
+  await Supabase.initialize(
+    url: SupabaseConfig.url,
+    publishableKey: SupabaseConfig.publishableKey,
   );
+
   runApp(const MyApp());
 }
 
@@ -24,22 +29,36 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         scaffoldBackgroundColor: const Color(0xFFF0F0F0),
         useMaterial3: true,
+        visualDensity: VisualDensity.compact,
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
       ),
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              backgroundColor: Color(0xFFF8F7F4),
-              body: Center(
-                child: CircularProgressIndicator(
-                  color: Color(0xFF1B6B72),
-                ),
-              ),
-            );
-          }
-          if (snapshot.hasData) return const DashboardScreen();
-          return const LoginScreen();
+      builder: (context, child) {
+        final mediaQuery = MediaQuery.of(context);
+        final scale = Responsive.uiScale(mediaQuery.size);
+        return MediaQuery(
+          data: mediaQuery.copyWith(
+            textScaler: TextScaler.linear(
+              mediaQuery.textScaler.scale(1) * scale,
+            ),
+          ),
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
+      home: Builder(
+        builder: (context) {
+          final authRepository = AuthRepository();
+
+          return StreamBuilder<Session?>(
+            stream: authRepository.sessionChanges,
+            initialData: authRepository.currentSession,
+            builder: (context, snapshot) {
+              if (snapshot.hasData) {
+                return const DashboardScreen();
+              }
+
+              return const LoginScreen();
+            },
+          );
         },
       ),
     );

@@ -1,5 +1,22 @@
 import 'package:flutter/material.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
+
+import '../../data/repositories/customer_repository.dart';
+
+DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
+
+String _formatDate(DateTime date) {
+  final clean = _stripDate(date);
+  final month = clean.month.toString().padLeft(2, '0');
+  final day = clean.day.toString().padLeft(2, '0');
+  return '${clean.year}-$month-$day';
+}
+
+String _genderLabel(String gender) {
+  final normalized = gender.trim().toLowerCase();
+  if (normalized.startsWith('f')) return 'Female';
+  if (normalized.startsWith('m')) return 'Male';
+  return gender.trim();
+}
 
 // ── Data model ────────────────────────────────────────────────────
 class CustomerModel {
@@ -29,16 +46,15 @@ class CustomerModel {
     this.lastVisit = '-',
   });
 
-  factory CustomerModel.fromFirestore(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory CustomerModel.fromMap(Map<String, dynamic> d) {
     return CustomerModel(
-      id:          doc.id,
-      name:        d['name']        ?? '',
-      phone:       d['phone']       ?? '',
-      gender:      d['gender']      ?? '',
+      id: d['id']?.toString() ?? '',
+      name: d['name'] ?? '',
+      phone: d['phone'] ?? '',
+      gender: d['gender'] ?? '',
       dateOfBirth: d['dateOfBirth'] ?? '',
-      joinDate:    d['joinDate']    ?? '',
-      notes:       d['notes']       ?? '',
+      joinDate: d['joinDate'] ?? '',
+      notes: d['notes'] ?? '',
     );
   }
 
@@ -46,13 +62,13 @@ class CustomerModel {
     if (dateOfBirth.isEmpty) return 0;
     try {
       final parts = dateOfBirth.split('-');
-      final dob   = DateTime(
+      final dob = DateTime(
         int.parse(parts[0]),
         int.parse(parts[1]),
         int.parse(parts[2]),
       );
-      final now   = DateTime.now();
-      int age     = now.year - dob.year;
+      final now = DateTime.now();
+      int age = now.year - dob.year;
       if (now.month < dob.month ||
           (now.month == dob.month && now.day < dob.day)) {
         age--;
@@ -90,16 +106,16 @@ class CustomerModel {
     String? lastVisit,
   }) {
     return CustomerModel(
-      id:               id,
-      name:             name,
-      phone:            phone,
-      gender:           gender,
-      dateOfBirth:      dateOfBirth,
-      joinDate:         joinDate,
-      notes:            notes,
-      totalSales:       totalSales       ?? this.totalSales,
+      id: id,
+      name: name,
+      phone: phone,
+      gender: gender,
+      dateOfBirth: dateOfBirth,
+      joinDate: joinDate,
+      notes: notes,
+      totalSales: totalSales ?? this.totalSales,
       appointmentCount: appointmentCount ?? this.appointmentCount,
-      lastVisit:        lastVisit        ?? this.lastVisit,
+      lastVisit: lastVisit ?? this.lastVisit,
     );
   }
 }
@@ -113,11 +129,12 @@ class CustomerScreen extends StatefulWidget {
 }
 
 class _CustomerScreenState extends State<CustomerScreen> {
-  List<CustomerModel> _customers    = [];
-  List<CustomerModel> _filtered     = [];
-  CustomerModel?      _selected;
-  bool                _loading      = true;
-  final _searchController           = TextEditingController();
+  final _customerRepository = CustomerRepository();
+  List<CustomerModel> _customers = [];
+  List<CustomerModel> _filtered = [];
+  CustomerModel? _selected;
+  bool _loading = true;
+  final _searchController = TextEditingController();
 
   @override
   void initState() {
@@ -132,19 +149,13 @@ class _CustomerScreenState extends State<CustomerScreen> {
     super.dispose();
   }
 
-  // ── Firebase fetch ──────────────────────────────────────────────
+  // ── Supabase fetch ──────────────────────────────────────────────
   Future<void> _loadCustomers() async {
     setState(() => _loading = true);
     try {
       final selectedId = _selected?.id;
-      final snapshot = await FirebaseFirestore.instance
-          .collection('customers')
-          .orderBy('name')
-          .get();
-
-      final customers = snapshot.docs
-          .map((doc) => CustomerModel.fromFirestore(doc))
-          .toList();
+      final rows = await _customerRepository.getCustomers();
+      final customers = rows.map(CustomerModel.fromMap).toList();
 
       // Fetch calculated fields for each customer
       final enriched = await Future.wait(
@@ -153,8 +164,8 @@ class _CustomerScreenState extends State<CustomerScreen> {
 
       setState(() {
         _customers = enriched;
-        _filtered  = enriched;
-        _loading   = false;
+        _filtered = enriched;
+        _loading = false;
         if (enriched.isEmpty) {
           _selected = null;
         } else {
@@ -172,29 +183,12 @@ class _CustomerScreenState extends State<CustomerScreen> {
   // Fetch total sales, appointment count, last visit per customer
   Future<CustomerModel> _enrichCustomer(CustomerModel c) async {
     try {
-      final apptSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('customerId', isEqualTo: c.id)
-          .orderBy('date', descending: true)
-          .get();
-
-      double totalSales      = 0;
-      String lastVisit       = '-';
-      int    appointmentCount = apptSnap.docs.length;
-
-      for (final doc in apptSnap.docs) {
-        final data = doc.data();
-        totalSales += (data['totalPrice'] as num?)?.toDouble() ?? 0;
-      }
-
-      if (apptSnap.docs.isNotEmpty) {
-        lastVisit = apptSnap.docs.first.data()['date'] ?? '-';
-      }
+      final stats = await _customerRepository.getCustomerAppointmentStats(c.id);
 
       return c.copyWith(
-        totalSales:       totalSales,
-        appointmentCount: appointmentCount,
-        lastVisit:        lastVisit,
+        totalSales: (stats['totalSales'] as num?)?.toDouble() ?? 0,
+        appointmentCount: stats['appointmentCount'] as int? ?? 0,
+        lastVisit: stats['lastVisit']?.toString() ?? '-',
       );
     } catch (_) {
       return c;
@@ -206,7 +200,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
     setState(() {
       _filtered = _customers.where((c) {
         return c.name.toLowerCase().contains(query) ||
-               c.phone.toLowerCase().contains(query);
+            c.phone.toLowerCase().contains(query);
       }).toList();
     });
   }
@@ -216,10 +210,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   String _todayString() {
-    final now = DateTime.now();
-    final month = now.month.toString().padLeft(2, '0');
-    final day = now.day.toString().padLeft(2, '0');
-    return '${now.year}-$month-$day';
+    return _formatDate(DateTime.now());
   }
 
   Future<CustomerModel?> _openCustomerForm({CustomerModel? customer}) async {
@@ -234,7 +225,9 @@ class _CustomerScreenState extends State<CustomerScreen> {
     if (savedCustomer == null) return null;
 
     setState(() {
-      final existingIndex = _customers.indexWhere((c) => c.id == savedCustomer.id);
+      final existingIndex = _customers.indexWhere(
+        (c) => c.id == savedCustomer.id,
+      );
       if (existingIndex == -1) {
         _customers = [..._customers, savedCustomer];
       } else {
@@ -249,7 +242,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
       final query = _searchController.text.toLowerCase();
       _filtered = _customers.where((c) {
         return c.name.toLowerCase().contains(query) ||
-               c.phone.toLowerCase().contains(query);
+            c.phone.toLowerCase().contains(query);
       }).toList();
       _selected = savedCustomer;
     });
@@ -258,7 +251,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
   }
 
   bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
+      MediaQuery.of(context).size.width >= 900;
 
   @override
   Widget build(BuildContext context) {
@@ -267,27 +260,25 @@ class _CustomerScreenState extends State<CustomerScreen> {
       body: SafeArea(
         child: _loading
             ? const Center(
-                child: CircularProgressIndicator(
-                  color: Color(0xFF1B6B72),
-                ),
+                child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
               )
             : _isTablet(context)
-                ? _TabletLayout(
-                    customers:        _filtered,
-                    selected:         _selected,
-                    searchController: _searchController,
-                    onSelect:         _selectCustomer,
-                    onRefresh:        _loadCustomers,
-                    onAdd:            () => _openCustomerForm(),
-                    onEdit:           (c) => _openCustomerForm(customer: c),
-                  )
-                : _PhoneLayout(
-                    customers:        _filtered,
-                    searchController: _searchController,
-                    onRefresh:        _loadCustomers,
-                    onAdd:            () => _openCustomerForm(),
-                    onEdit:           (c) => _openCustomerForm(customer: c),
-                  ),
+            ? _TabletLayout(
+                customers: _filtered,
+                selected: _selected,
+                searchController: _searchController,
+                onSelect: _selectCustomer,
+                onRefresh: _loadCustomers,
+                onAdd: () => _openCustomerForm(),
+                onEdit: (c) => _openCustomerForm(customer: c),
+              )
+            : _PhoneLayout(
+                customers: _filtered,
+                searchController: _searchController,
+                onRefresh: _loadCustomers,
+                onAdd: () => _openCustomerForm(),
+                onEdit: (c) => _openCustomerForm(customer: c),
+              ),
       ),
     );
   }
@@ -298,7 +289,7 @@ class _CustomerScreenState extends State<CustomerScreen> {
 // ─────────────────────────────────────────────────────────────────
 class _TabletLayout extends StatelessWidget {
   final List<CustomerModel> customers;
-  final CustomerModel?      selected;
+  final CustomerModel? selected;
   final TextEditingController searchController;
   final Function(CustomerModel) onSelect;
   final VoidCallback onRefresh;
@@ -333,13 +324,15 @@ class _TabletLayout extends StatelessWidget {
                   children: [
                     const BackButton(),
                     const Expanded(
-                      child: Text('Members',
+                      child: Text(
+                        'Members',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.bold,
                           color: Color(0xFF1A1A2E),
-                        )),
+                        ),
+                      ),
                     ),
                     const SizedBox(width: 36, height: 36),
                   ],
@@ -360,9 +353,9 @@ class _TabletLayout extends StatelessWidget {
                   child: ListView.builder(
                     itemCount: customers.length,
                     itemBuilder: (_, i) => _TabletListItem(
-                      customer:   customers[i],
+                      customer: customers[i],
                       isSelected: selected?.id == customers[i].id,
-                      onTap:      () => onSelect(customers[i]),
+                      onTap: () => onSelect(customers[i]),
                     ),
                   ),
                 ),
@@ -404,8 +397,8 @@ class _TabletLayout extends StatelessWidget {
 
 class _TabletListItem extends StatelessWidget {
   final CustomerModel customer;
-  final bool          isSelected;
-  final VoidCallback  onTap;
+  final bool isSelected;
+  final VoidCallback onTap;
 
   const _TabletListItem({
     required this.customer,
@@ -437,17 +430,31 @@ class _TabletListItem extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(customer.name,
-                    style: const TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A2E),
-                    )),
-                  Text(customer.phone,
+                  Row(
+                    children: [
+                      Flexible(
+                        fit: FlexFit.loose,
+                        child: Text(
+                          customer.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF1A1A2E),
+                          ),
+                        ),
+                      ),
+                      _GenderChip(gender: customer.gender),
+                    ],
+                  ),
+                  Text(
+                    customer.phone,
                     style: const TextStyle(
                       fontSize: 12,
                       color: Color(0xFF9E9E9E),
-                    )),
+                    ),
+                  ),
                   const SizedBox(height: 2),
                   Text(
                     customer.lastVisit == '-'
@@ -456,7 +463,8 @@ class _TabletListItem extends StatelessWidget {
                     style: const TextStyle(
                       fontSize: 11,
                       color: Color(0xFF9E9E9E),
-                    )),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -471,10 +479,10 @@ class _TabletListItem extends StatelessWidget {
 // PHONE LAYOUT — list screen, tap to navigate to detail screen
 // ─────────────────────────────────────────────────────────────────
 class _PhoneLayout extends StatelessWidget {
-  final List<CustomerModel>   customers;
+  final List<CustomerModel> customers;
   final TextEditingController searchController;
-  final VoidCallback          onRefresh;
-  final VoidCallback          onAdd;
+  final VoidCallback onRefresh;
+  final VoidCallback onAdd;
   final Future<CustomerModel?> Function(CustomerModel) onEdit;
 
   const _PhoneLayout({
@@ -487,8 +495,9 @@ class _PhoneLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final horizontalPadding =
-        MediaQuery.of(context).size.width < 360 ? 12.0 : 16.0;
+    final horizontalPadding = MediaQuery.of(context).size.width < 360
+        ? 12.0
+        : 16.0;
 
     return Column(
       children: [
@@ -500,24 +509,26 @@ class _PhoneLayout extends StatelessWidget {
             children: [
               const BackButton(),
               const Expanded(
-                child: Text('Members',
+                child: Text(
+                  'Members',
                   textAlign: TextAlign.start,
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
                     color: Color(0xFF1A1A2E),
-                  )),
+                  ),
+                ),
               ),
               Container(
-                width: 36, height: 36,
+                width: 36,
+                height: 36,
                 decoration: const BoxDecoration(
                   shape: BoxShape.circle,
                   color: Color(0xFF1B6B72),
                 ),
                 child: IconButton(
                   padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.add,
-                    color: Colors.white, size: 20),
+                  icon: const Icon(Icons.add, color: Colors.white, size: 20),
                   onPressed: onAdd,
                 ),
               ),
@@ -571,12 +582,9 @@ class _PhoneLayout extends StatelessWidget {
 
 class _PhoneListCard extends StatelessWidget {
   final CustomerModel customer;
-  final VoidCallback  onTap;
+  final VoidCallback onTap;
 
-  const _PhoneListCard({
-    required this.customer,
-    required this.onTap,
-  });
+  const _PhoneListCard({required this.customer, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -586,13 +594,13 @@ class _PhoneListCard extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 10),
         padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
-          color:        Colors.white,
+          color: Colors.white,
           borderRadius: BorderRadius.circular(14),
           boxShadow: [
             BoxShadow(
-              color:      Colors.black.withValues(alpha: 0.04),
+              color: Colors.black.withValues(alpha: 0.04),
               blurRadius: 6,
-              offset:     const Offset(0, 2),
+              offset: const Offset(0, 2),
             ),
           ],
         ),
@@ -607,17 +615,31 @@ class _PhoneListCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(customer.name,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A2E),
-                        )),
-                      Text(customer.phone,
+                      Row(
+                        children: [
+                          Flexible(
+                            fit: FlexFit.loose,
+                            child: Text(
+                              customer.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                color: Color(0xFF1A1A2E),
+                              ),
+                            ),
+                          ),
+                          _GenderChip(gender: customer.gender),
+                        ],
+                      ),
+                      Text(
+                        customer.phone,
                         style: const TextStyle(
                           fontSize: 13,
                           color: Color(0xFF9E9E9E),
-                        )),
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -630,13 +652,15 @@ class _PhoneListCard extends StatelessWidget {
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
                         color: Color(0xFF1B6B72),
-                      )),
+                      ),
+                    ),
                     Text(
                       '${customer.appointmentCount} visits',
                       style: const TextStyle(
                         fontSize: 12,
                         color: Color(0xFF9E9E9E),
-                      )),
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -646,10 +670,8 @@ class _PhoneListCard extends StatelessWidget {
               customer.lastVisit == '-'
                   ? 'No visits yet'
                   : 'Last visit: ${customer.lastVisit}',
-              style: const TextStyle(
-                fontSize: 12,
-                color: Color(0xFF9E9E9E),
-              )),
+              style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+            ),
           ],
         ),
       ),
@@ -662,10 +684,7 @@ class _PhoneDetailScreen extends StatefulWidget {
   final CustomerModel customer;
   final Future<CustomerModel?> Function(CustomerModel) onEdit;
 
-  const _PhoneDetailScreen({
-    required this.customer,
-    required this.onEdit,
-  });
+  const _PhoneDetailScreen({required this.customer, required this.onEdit});
 
   @override
   State<_PhoneDetailScreen> createState() => _PhoneDetailScreenState();
@@ -693,15 +712,17 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
       backgroundColor: const Color(0xFFF0F0F0),
       appBar: AppBar(
         backgroundColor: Colors.white,
-        elevation:       0,
-        leading:         const BackButton(color: Color(0xFF1A1A2E)),
+        elevation: 0,
+        leading: const BackButton(color: Color(0xFF1A1A2E)),
         centerTitle: true,
-        title: const Text('Member Details',
+        title: const Text(
+          'Member Details',
           style: TextStyle(
-            fontSize:   18,
+            fontSize: 18,
             fontWeight: FontWeight.w700,
-            color:      Color(0xFF1A1A2E),
-          )),
+            color: Color(0xFF1A1A2E),
+          ),
+        ),
         actions: [
           _CircleIconButton(
             onPressed: () => _editAndReturn(context),
@@ -712,7 +733,9 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         ],
       ),
       body: SingleChildScrollView(
-        padding: EdgeInsets.all(MediaQuery.of(context).size.width < 360 ? 12 : 16),
+        padding: EdgeInsets.all(
+          MediaQuery.of(context).size.width < 360 ? 12 : 16,
+        ),
         child: _DetailPanel(
           customer: _customer,
           onEdit: () => _editAndReturn(context),
@@ -741,26 +764,27 @@ class _DetailPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 600;
+    final isTablet = MediaQuery.of(context).size.width >= 900;
 
     return SingleChildScrollView(
       padding: EdgeInsets.all(isTablet ? 24 : 0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-
           if (isTablet && showTabletHeader)
             Padding(
               padding: const EdgeInsets.only(bottom: 20),
               child: Row(
                 children: [
                   const Expanded(
-                    child: Text('Member Details',
+                    child: Text(
+                      'Member Details',
                       style: TextStyle(
-                        fontSize:   22,
+                        fontSize: 22,
                         fontWeight: FontWeight.bold,
-                        color:      Color(0xFF1A1A2E),
-                      )),
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
                   ),
                   IconButton(
                     onPressed: onEdit,
@@ -782,34 +806,54 @@ class _DetailPanel extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(customer.name,
-                        style: const TextStyle(
-                          fontSize:   20,
-                          fontWeight: FontWeight.bold,
-                          color:      Color(0xFF1A1A2E),
-                        )),
+                      Row(
+                        children: [
+                          Flexible(
+                            fit: FlexFit.loose,
+                            child: Text(
+                              customer.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.bold,
+                                color: Color(0xFF1A1A2E),
+                              ),
+                            ),
+                          ),
+                          _GenderChip(gender: customer.gender),
+                        ],
+                      ),
                       const SizedBox(height: 6),
-                      Row(children: [
-                        const Icon(Icons.transgender,
-                          size: 14, color: Color(0xFF9E9E9E)),
-                        const SizedBox(width: 4),
-                        Text(customer.gender,
-                          style: const TextStyle(
-                            fontSize: 13, color: Color(0xFF9E9E9E))),
-                        const SizedBox(width: 12),
-                        Text('Age: ${customer.age}',
-                          style: const TextStyle(
-                            fontSize: 13, color: Color(0xFF9E9E9E))),
-                      ]),
+                      Row(
+                        children: [
+                          Text(
+                            'Age: ${customer.age}',
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF9E9E9E),
+                            ),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 4),
-                      Row(children: [
-                        const Icon(Icons.phone_outlined,
-                          size: 14, color: Color(0xFF9E9E9E)),
-                        const SizedBox(width: 4),
-                        Text(customer.phone,
-                          style: const TextStyle(
-                            fontSize: 13, color: Color(0xFF9E9E9E))),
-                      ]),
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.phone_outlined,
+                            size: 14,
+                            color: Color(0xFF9E9E9E),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            customer.phone,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF9E9E9E),
+                            ),
+                          ),
+                        ],
+                      ),
                     ],
                   ),
                 ),
@@ -846,48 +890,62 @@ class _DetailPanel extends StatelessWidget {
 
           // ── Stats row ─────────────────────────────────────────
           isTablet
-              ? Row(children: [
-                  Expanded(child: _StatCard(
-                    icon:  Icons.shopping_cart_outlined,
-                    iconBg: const Color(0xFFE3F2FD),
-                    iconColor: const Color(0xFF1B6B72),
-                    label: 'Total Sales',
-                    value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
-                  )),
-                  const SizedBox(width: 12),
-                  Expanded(child: _StatCard(
-                    icon:  Icons.calendar_today_outlined,
-                    iconBg: const Color(0xFFE8F5E9),
-                    iconColor: const Color(0xFF1B6B72),
-                    label: 'Appointments',
-                    value: '${customer.appointmentCount}',
-                  )),
-                  const SizedBox(width: 12),
-                  Expanded(child: _StatCard(
-                    icon:  Icons.calendar_month_outlined,
-                    iconBg: const Color(0xFFFFF3E0),
-                    iconColor: const Color(0xFFF59E0B),
-                    label: 'Last Visit',
-                    value: customer.lastVisit,
-                  )),
-                ])
-              : Row(children: [
-                  Expanded(child: _StatCard(
-                    icon:  Icons.shopping_cart_outlined,
-                    iconBg: const Color(0xFFE3F2FD),
-                    iconColor: const Color(0xFF1B6B72),
-                    label: 'Total Sales',
-                    value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
-                  )),
-                  const SizedBox(width: 12),
-                  Expanded(child: _StatCard(
-                    icon:  Icons.calendar_today_outlined,
-                    iconBg: const Color(0xFFE8F5E9),
-                    iconColor: const Color(0xFF1B6B72),
-                    label: 'Appointments',
-                    value: '${customer.appointmentCount}',
-                  )),
-                ]),
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.shopping_cart_outlined,
+                        iconBg: const Color(0xFFE3F2FD),
+                        iconColor: const Color(0xFF1B6B72),
+                        label: 'Total Sales',
+                        value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.calendar_today_outlined,
+                        iconBg: const Color(0xFFE8F5E9),
+                        iconColor: const Color(0xFF1B6B72),
+                        label: 'Appointments',
+                        value: '${customer.appointmentCount}',
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.calendar_month_outlined,
+                        iconBg: const Color(0xFFFFF3E0),
+                        iconColor: const Color(0xFFF59E0B),
+                        label: 'Last Visit',
+                        value: customer.lastVisit,
+                      ),
+                    ),
+                  ],
+                )
+              : Row(
+                  children: [
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.shopping_cart_outlined,
+                        iconBg: const Color(0xFFE3F2FD),
+                        iconColor: const Color(0xFF1B6B72),
+                        label: 'Total Sales',
+                        value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: _StatCard(
+                        icon: Icons.calendar_today_outlined,
+                        iconBg: const Color(0xFFE8F5E9),
+                        iconColor: const Color(0xFF1B6B72),
+                        label: 'Appointments',
+                        value: '${customer.appointmentCount}',
+                      ),
+                    ),
+                  ],
+                ),
 
           const SizedBox(height: 12),
 
@@ -896,17 +954,19 @@ class _DetailPanel extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text('Member Information',
+                const Text(
+                  'Member Information',
                   style: TextStyle(
-                    fontSize:   16,
+                    fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color:      Color(0xFF1A1A2E),
-                  )),
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
                 const SizedBox(height: 16),
-                _InfoRow(label: 'Join Date',     value: customer.joinDate),
-                _InfoRow(label: 'Last Visit',    value: customer.lastVisit),
-                _InfoRow(label: 'Phone Number',  value: customer.phone),
-                _InfoRow(label: 'Gender',        value: customer.gender),
+                _InfoRow(label: 'Join Date', value: customer.joinDate),
+                _InfoRow(label: 'Last Visit', value: customer.lastVisit),
+                _InfoRow(label: 'Phone Number', value: customer.phone),
+                _InfoRow(label: 'Gender', value: _genderLabel(customer.gender)),
                 _InfoRow(
                   label: 'Age',
                   value: '${customer.age} years',
@@ -923,27 +983,33 @@ class _DetailPanel extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(children: const [
-                  Icon(Icons.article_outlined,
-                    size: 18, color: Color(0xFF9E9E9E)),
-                  SizedBox(width: 8),
-                  Text('Notes',
-                    style: TextStyle(
-                      fontSize:   16,
-                      fontWeight: FontWeight.bold,
-                      color:      Color(0xFF1A1A2E),
-                    )),
-                ]),
+                Row(
+                  children: const [
+                    Icon(
+                      Icons.article_outlined,
+                      size: 18,
+                      color: Color(0xFF9E9E9E),
+                    ),
+                    SizedBox(width: 8),
+                    Text(
+                      'Notes',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                  ],
+                ),
                 const SizedBox(height: 10),
                 Text(
-                  customer.notes.isEmpty
-                      ? 'No notes added.'
-                      : customer.notes,
+                  customer.notes.isEmpty ? 'No notes added.' : customer.notes,
                   style: const TextStyle(
                     fontSize: 14,
-                    color:    Color(0xFF6B6B6B),
-                    height:   1.5,
-                  )),
+                    color: Color(0xFF6B6B6B),
+                    height: 1.5,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1004,9 +1070,7 @@ class _TabletDetailHeader extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 30),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(
-          bottom: BorderSide(color: Color(0xFFE6E8EB)),
-        ),
+        border: Border(bottom: BorderSide(color: Color(0xFFE6E8EB))),
       ),
       child: Row(
         children: [
@@ -1047,16 +1111,14 @@ class _CustomerFormDialog extends StatefulWidget {
   final CustomerModel? customer;
   final String defaultJoinDate;
 
-  const _CustomerFormDialog({
-    this.customer,
-    required this.defaultJoinDate,
-  });
+  const _CustomerFormDialog({this.customer, required this.defaultJoinDate});
 
   @override
   State<_CustomerFormDialog> createState() => _CustomerFormDialogState();
 }
 
 class _CustomerFormDialogState extends State<_CustomerFormDialog> {
+  final _customerRepository = CustomerRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _nameController;
   late final TextEditingController _phoneController;
@@ -1094,55 +1156,82 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
     super.dispose();
   }
 
+  Future<void> _openFieldDatePicker(
+    TextEditingController controller, {
+    bool allowFutureDates = true,
+  }) async {
+    final today = _stripDate(DateTime.now());
+    final initialDate = DateTime.tryParse(controller.text.trim()) ?? today;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate.isAfter(today) && !allowFutureDates
+          ? today
+          : initialDate,
+      firstDate: DateTime(1900),
+      lastDate: allowFutureDates ? DateTime(today.year + 5, 12, 31) : today,
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: Theme.of(context).colorScheme.copyWith(
+              primary: const Color(0xFF1B6B72),
+            ),
+          ),
+          child: child!,
+        );
+      },
+    );
+    if (picked == null) return;
+    controller.text = _formatDate(picked);
+  }
+
   Future<void> _save() async {
     if (_saving || _closing) return;
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
+    final dateOfBirth = _dobController.text.trim();
     final data = {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
       'gender': _genderController.text.trim(),
-      'dateOfBirth': _dobController.text.trim(),
+      if (dateOfBirth.isNotEmpty) 'dateOfBirth': dateOfBirth,
       'joinDate': _joinDateController.text.trim(),
       'notes': _notesController.text.trim(),
     };
 
     try {
       late final String customerId;
+      late final Map<String, dynamic> savedRow;
       if (_isEditing) {
         customerId = widget.customer!.id;
-        await FirebaseFirestore.instance
-            .collection('customers')
-            .doc(customerId)
-            .set(data, SetOptions(merge: true));
+        savedRow = await _customerRepository.updateCustomer(customerId, data);
       } else {
-        final docRef =
-            await FirebaseFirestore.instance.collection('customers').add(data);
-        customerId = docRef.id;
+        savedRow = await _customerRepository.addCustomer(data);
+        customerId = savedRow['id']?.toString() ?? '';
       }
 
       final savedCustomer = CustomerModel(
         id: customerId,
-        name: data['name']!,
-        phone: data['phone']!,
-        gender: data['gender']!,
-        dateOfBirth: data['dateOfBirth']!,
-        joinDate: data['joinDate']!,
-        notes: data['notes']!,
+        name: (savedRow['name'] ?? data['name'])!.toString(),
+        phone: (savedRow['phone'] ?? data['phone'])!.toString(),
+        gender: (savedRow['gender'] ?? data['gender'])!.toString(),
+        dateOfBirth: (savedRow['dateOfBirth'] ?? dateOfBirth).toString(),
+        joinDate: (savedRow['joinDate'] ?? data['joinDate'])!.toString(),
+        notes: (savedRow['notes'] ?? data['notes'])!.toString(),
         totalSales: widget.customer?.totalSales ?? 0,
         appointmentCount: widget.customer?.appointmentCount ?? 0,
         lastVisit: widget.customer?.lastVisit ?? '-',
       );
 
       _close(savedCustomer);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Unable to save member: $e');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to save member'),
-          backgroundColor: Color(0xFFE53935),
+        SnackBar(
+          content: Text('Unable to save member: $e'),
+          backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -1186,9 +1275,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                         ),
                       ),
                       IconButton(
-                        onPressed: _saving
-                            ? null
-                            : () => _close(),
+                        onPressed: _saving ? null : () => _close(),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -1207,10 +1294,9 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                     requiredField: true,
                   ),
                   const SizedBox(height: 14),
-                  _CustomerFormField(
+                  _CustomerGenderDropdown(
                     label: 'Gender',
                     controller: _genderController,
-                    hint: 'Female / Male',
                   ),
                   const SizedBox(height: 14),
                   _CustomerFormField(
@@ -1218,6 +1304,10 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                     controller: _dobController,
                     hint: 'YYYY-MM-DD',
                     keyboardType: TextInputType.datetime,
+                    onCalendarTap: () => _openFieldDatePicker(
+                      _dobController,
+                      allowFutureDates: false,
+                    ),
                   ),
                   const SizedBox(height: 14),
                   _CustomerFormField(
@@ -1225,6 +1315,8 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                     controller: _joinDateController,
                     hint: 'YYYY-MM-DD',
                     keyboardType: TextInputType.datetime,
+                    onCalendarTap: () =>
+                        _openFieldDatePicker(_joinDateController),
                   ),
                   const SizedBox(height: 14),
                   _CustomerFormField(
@@ -1237,9 +1329,7 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                     children: [
                       Expanded(
                         child: TextButton(
-                          onPressed: _saving
-                              ? null
-                              : () => _close(),
+                          onPressed: _saving ? null : () => _close(),
                           style: TextButton.styleFrom(
                             minimumSize: const Size.fromHeight(52),
                             backgroundColor: const Color(0xFFF1F3F6),
@@ -1273,7 +1363,9 @@ class _CustomerFormDialogState extends State<_CustomerFormDialog> {
                                     color: Colors.white,
                                   ),
                                 )
-                              : Text(_isEditing ? 'Save Changes' : 'Add Member'),
+                              : Text(
+                                  _isEditing ? 'Save Changes' : 'Add Member',
+                                ),
                         ),
                       ),
                     ],
@@ -1295,6 +1387,7 @@ class _CustomerFormField extends StatelessWidget {
   final TextInputType? keyboardType;
   final bool requiredField;
   final int maxLines;
+  final VoidCallback? onCalendarTap;
 
   const _CustomerFormField({
     required this.label,
@@ -1303,6 +1396,7 @@ class _CustomerFormField extends StatelessWidget {
     this.keyboardType,
     this.requiredField = false,
     this.maxLines = 1,
+    this.onCalendarTap,
   });
 
   @override
@@ -1312,12 +1406,66 @@ class _CustomerFormField extends StatelessWidget {
       keyboardType: keyboardType,
       maxLines: maxLines,
       validator: requiredField
-          ? (value) =>
-              value == null || value.trim().isEmpty ? '$label is required' : null
+          ? (value) => value == null || value.trim().isEmpty
+                ? '$label is required'
+                : null
           : null,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        suffixIcon: onCalendarTap == null
+            ? null
+            : IconButton(
+                onPressed: onCalendarTap,
+                tooltip: 'Pick date',
+                icon: const Icon(
+                  Icons.calendar_today_outlined,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomerGenderDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _CustomerGenderDropdown({
+    required this.label,
+    required this.controller,
+  });
+
+  String? get _value {
+    final normalized = controller.text.trim().toLowerCase();
+    if (normalized.startsWith('f')) return 'Female';
+    if (normalized.startsWith('m')) return 'Male';
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _value,
+      items: const [
+        DropdownMenuItem(value: 'Female', child: Text('Female')),
+        DropdownMenuItem(value: 'Male', child: Text('Male')),
+      ],
+      onChanged: (value) => controller.text = value ?? '',
+      decoration: InputDecoration(
+        labelText: label,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -1343,17 +1491,22 @@ class _SearchBar extends StatelessWidget {
       controller: controller,
       style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
       decoration: InputDecoration(
-        hintText:    'Search members...',
-        hintStyle:   const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-        prefixIcon:  const Icon(Icons.search, color: Color(0xFF9E9E9E), size: 20),
-        filled:      true,
-        fillColor:   const Color(0xFFF5F5F5),
+        hintText: 'Search members...',
+        hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
+        prefixIcon: const Icon(
+          Icons.search,
+          color: Color(0xFF9E9E9E),
+          size: 20,
+        ),
+        filled: true,
+        fillColor: const Color(0xFFF5F5F5),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide.none,
+          borderSide: BorderSide.none,
         ),
         contentPadding: const EdgeInsets.symmetric(
-          horizontal: 16, vertical: 12,
+          horizontal: 16,
+          vertical: 12,
         ),
       ),
     );
@@ -1362,21 +1515,59 @@ class _SearchBar extends StatelessWidget {
 
 class _Avatar extends StatelessWidget {
   final CustomerModel customer;
-  final double        radius;
+  final double radius;
   const _Avatar({required this.customer, required this.radius});
 
   @override
   Widget build(BuildContext context) {
     return CircleAvatar(
-      radius:          radius,
+      radius: radius,
       backgroundColor: customer.avatarColor,
       child: Text(
         customer.initials,
         style: TextStyle(
-          color:      Colors.white,
+          color: Colors.white,
           fontWeight: FontWeight.bold,
-          fontSize:   radius * 0.7,
-        )),
+          fontSize: radius * 0.7,
+        ),
+      ),
+    );
+  }
+}
+
+class _GenderChip extends StatelessWidget {
+  final String gender;
+
+  const _GenderChip({required this.gender});
+
+  @override
+  Widget build(BuildContext context) {
+    final label = _genderLabel(gender);
+    if (label.isEmpty) return const SizedBox.shrink();
+    final isFemale = label == 'Female';
+    final color = isFemale ? const Color(0xFFE91E63) : const Color(0xFF2563EB);
+    final bg = isFemale ? const Color(0xFFFCE7F3) : const Color(0xFFEFF6FF);
+    final border = isFemale
+        ? const Color(0xFFF9A8D4)
+        : const Color(0xFFBFDBFE);
+
+    return Tooltip(
+      message: label,
+      child: Container(
+        width: 24,
+        height: 24,
+        margin: const EdgeInsets.only(left: 6),
+        decoration: BoxDecoration(
+          color: bg,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: border),
+        ),
+        child: Icon(
+          isFemale ? Icons.female : Icons.male,
+          size: 16,
+          color: color,
+        ),
+      ),
     );
   }
 }
@@ -1388,16 +1579,16 @@ class _Card extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      width:   double.infinity,
+      width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color:        Colors.white,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withValues(alpha: 0.04),
+            color: Colors.black.withValues(alpha: 0.04),
             blurRadius: 8,
-            offset:     const Offset(0, 2),
+            offset: const Offset(0, 2),
           ),
         ],
       ),
@@ -1408,10 +1599,10 @@ class _Card extends StatelessWidget {
 
 class _StatCard extends StatelessWidget {
   final IconData icon;
-  final Color    iconBg;
-  final Color    iconColor;
-  final String   label;
-  final String   value;
+  final Color iconBg;
+  final Color iconColor;
+  final String label;
+  final String value;
 
   const _StatCard({
     required this.icon,
@@ -1426,41 +1617,46 @@ class _StatCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color:        Colors.white,
+        color: Colors.white,
         borderRadius: BorderRadius.circular(14),
         boxShadow: [
           BoxShadow(
-            color:      Colors.black.withValues(alpha: 0.04),
+            color: Colors.black.withValues(alpha: 0.04),
             blurRadius: 6,
-            offset:     const Offset(0, 2),
+            offset: const Offset(0, 2),
           ),
         ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [
-            Container(
-              width: 28, height: 28,
-              decoration: BoxDecoration(
-                color:        iconBg,
-                borderRadius: BorderRadius.circular(8),
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                decoration: BoxDecoration(
+                  color: iconBg,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Icon(icon, color: iconColor, size: 16),
               ),
-              child: Icon(icon, color: iconColor, size: 16),
-            ),
-            const SizedBox(width: 8),
-            Text(label,
-              style: const TextStyle(
-                fontSize: 12, color: Color(0xFF9E9E9E),
-              )),
-          ]),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              ),
+            ],
+          ),
           const SizedBox(height: 8),
-          Text(value,
+          Text(
+            value,
             style: const TextStyle(
-              fontSize:   18,
+              fontSize: 18,
               fontWeight: FontWeight.bold,
-              color:      Color(0xFF1A1A2E),
-            )),
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
         ],
       ),
     );
@@ -1470,7 +1666,7 @@ class _StatCard extends StatelessWidget {
 class _InfoRow extends StatelessWidget {
   final String label;
   final String value;
-  final bool   isLast;
+  final bool isLast;
 
   const _InfoRow({
     required this.label,
@@ -1487,21 +1683,22 @@ class _InfoRow extends StatelessWidget {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(label,
+              Text(
+                label,
+                style: const TextStyle(fontSize: 14, color: Color(0xFF9E9E9E)),
+              ),
+              Text(
+                value,
                 style: const TextStyle(
-                  fontSize: 14, color: Color(0xFF9E9E9E),
-                )),
-              Text(value,
-                style: const TextStyle(
-                  fontSize:   14,
+                  fontSize: 14,
                   fontWeight: FontWeight.w500,
-                  color:      Color(0xFF1A1A2E),
-                )),
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
             ],
           ),
         ),
-        if (!isLast)
-          const Divider(height: 1, color: Color(0xFFF0F0F0)),
+        if (!isLast) const Divider(height: 1, color: Color(0xFFF0F0F0)),
       ],
     );
   }

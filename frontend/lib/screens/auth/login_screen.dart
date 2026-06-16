@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 
 import '../../core/utils/responsive.dart';
+import '../../data/repositories/auth_repository.dart';
+import '../../data/repositories/profile_repository.dart';
 
 class LoginScreen extends StatefulWidget {
   const LoginScreen({super.key});
@@ -11,10 +12,12 @@ class LoginScreen extends StatefulWidget {
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _emailController    = TextEditingController();
+  final _authRepository = AuthRepository();
+  final _profileRepository = ProfileRepository();
+  final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  bool _obscurePassword     = true;
-  bool _isLoading           = false;
+  bool _obscurePassword = true;
+  bool _isLoading = false;
 
   @override
   void dispose() {
@@ -24,7 +27,7 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   void _handleSignIn() async {
-    final email    = _emailController.text.trim();
+    final email = _emailController.text.trim();
     final password = _passwordController.text.trim();
 
     if (email.isEmpty || password.isEmpty) {
@@ -35,19 +38,17 @@ class _LoginScreenState extends State<LoginScreen> {
     setState(() => _isLoading = true);
 
     try {
-      await FirebaseAuth.instance.signInWithEmailAndPassword(
-        email:    email,
-        password: password,
-      );
-    } on FirebaseAuthException catch (e) {
-      String message = 'Sign in failed';
-      if (e.code == 'user-not-found')  message = 'No account found for this email';
-      if (e.code == 'wrong-password')  message = 'Incorrect password';
-      if (e.code == 'invalid-credential') message = 'Invalid email or password';
-      if (e.code == 'invalid-email')   message = 'Invalid email address';
-      if (e.code == 'user-disabled')   message = 'This account has been disabled';
-      if (e.code == 'too-many-requests') message = 'Too many attempts. Try again later';
-      _showError(message);
+      final response = await _authRepository.signIn(email, password);
+      final userId = response.user?.id ?? _authRepository.currentUser?.id;
+      final role = await _profileRepository.getCurrentRole();
+
+      debugPrint('SUPABASE LOGIN SUCCESS');
+      debugPrint('current Supabase user id: ${userId ?? 'unknown'}');
+      debugPrint('loaded profile role: ${role ?? 'unknown'}');
+    } on AuthRepositoryException catch (e) {
+      _showError(e.message);
+    } catch (_) {
+      _showError('Sign in failed');
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -62,7 +63,7 @@ class _LoginScreenState extends State<LoginScreen> {
     }
 
     try {
-      await FirebaseAuth.instance.sendPasswordResetEmail(email: email);
+      await _authRepository.resetPassword(email);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -72,11 +73,10 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         );
       }
-    } on FirebaseAuthException catch (e) {
-      String message = 'Failed to send reset email';
-      if (e.code == 'user-not-found') message = 'No account found for this email';
-      if (e.code == 'invalid-email') message = 'Invalid email address';
-      if (mounted) _showError(message);
+    } on AuthRepositoryException catch (e) {
+      if (mounted) _showError(e.message);
+    } catch (_) {
+      if (mounted) _showError('Failed to send reset email');
     }
   }
 
@@ -92,13 +92,14 @@ class _LoginScreenState extends State<LoginScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isTablet  = Responsive.isTablet(context);
-    final hPadding  = Responsive.horizontalPadding(context);
+    final isTablet = Responsive.isTablet(context);
+    final hPadding = Responsive.horizontalPadding(context);
 
     return Scaffold(
       backgroundColor: const Color(0xFFF8F7F4),
       body: SafeArea(
-        child: Center(                         // centers content on tablet
+        child: Center(
+          // centers content on tablet
           child: SingleChildScrollView(
             padding: EdgeInsets.symmetric(horizontal: hPadding),
             child: ConstrainedBox(
@@ -110,7 +111,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   // ── Logo ───────────────────────────────────────
                   Container(
-                    width:  isTablet ? 110 : 90,
+                    width: isTablet ? 110 : 90,
                     height: isTablet ? 110 : 90,
                     decoration: const BoxDecoration(
                       shape: BoxShape.circle,
@@ -135,9 +136,9 @@ class _LoginScreenState extends State<LoginScreen> {
                   Text(
                     'Treats',
                     style: TextStyle(
-                      fontSize:   isTablet ? 30 : 26,
+                      fontSize: isTablet ? 30 : 26,
                       fontWeight: FontWeight.bold,
-                      color:      const Color(0xFF1A1A2E),
+                      color: const Color(0xFF1A1A2E),
                     ),
                   ),
 
@@ -145,41 +146,37 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   const Text(
                     'Login Portal',
-                    style: TextStyle(
-                      fontSize: 14,
-                      color:    Color(0xFF9E9E9E),
-                    ),
+                    style: TextStyle(fontSize: 14, color: Color(0xFF9E9E9E)),
                   ),
 
                   SizedBox(height: isTablet ? 48 : 40),
 
                   // ── Form card ──────────────────────────────────
                   Container(
-                    width:   double.infinity,
+                    width: double.infinity,
                     padding: EdgeInsets.all(isTablet ? 32 : 24),
                     decoration: BoxDecoration(
-                      color:        Colors.white,
+                      color: Colors.white,
                       borderRadius: BorderRadius.circular(20),
                       boxShadow: [
                         BoxShadow(
-                          color:      Colors.black.withValues(alpha: 0.07),
+                          color: Colors.black.withValues(alpha: 0.07),
                           blurRadius: 20,
-                          offset:     const Offset(0, 4),
+                          offset: const Offset(0, 4),
                         ),
                       ],
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-
                         // Email
                         _buildLabel('Email'),
                         const SizedBox(height: 8),
                         _buildTextField(
-                          controller:  _emailController,
-                          hint:        'staff@treats.com',
-                          keyType:     TextInputType.emailAddress,
-                          isTablet:    isTablet,
+                          controller: _emailController,
+                          hint: 'staff@treats.com',
+                          keyType: TextInputType.emailAddress,
+                          isTablet: isTablet,
                         ),
 
                         const SizedBox(height: 20),
@@ -193,7 +190,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                         // Sign In button
                         SizedBox(
-                          width:  double.infinity,
+                          width: double.infinity,
                           height: isTablet ? 56 : 52,
                           child: ElevatedButton(
                             onPressed: _isLoading ? null : _handleSignIn,
@@ -207,16 +204,17 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                             child: _isLoading
                                 ? const SizedBox(
-                                    width: 20, height: 20,
+                                    width: 20,
+                                    height: 20,
                                     child: CircularProgressIndicator(
-                                      color:       Colors.white,
+                                      color: Colors.white,
                                       strokeWidth: 2,
                                     ),
                                   )
                                 : Text(
                                     'Sign In',
                                     style: TextStyle(
-                                      fontSize:   isTablet ? 17 : 16,
+                                      fontSize: isTablet ? 17 : 16,
                                       fontWeight: FontWeight.w600,
                                     ),
                                   ),
@@ -232,8 +230,8 @@ class _LoginScreenState extends State<LoginScreen> {
                             child: const Text(
                               'Forgot Password?',
                               style: TextStyle(
-                                fontSize:   14,
-                                color:      Color(0xFF1B6B72),
+                                fontSize: 14,
+                                color: Color(0xFF1B6B72),
                                 fontWeight: FontWeight.w500,
                               ),
                             ),
@@ -247,10 +245,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
                   const Text(
                     'v1.0.0',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color:    Color(0xFFBDBDBD),
-                    ),
+                    style: TextStyle(fontSize: 12, color: Color(0xFFBDBDBD)),
                   ),
 
                   const SizedBox(height: 24),
@@ -269,9 +264,9 @@ class _LoginScreenState extends State<LoginScreen> {
     return Text(
       text,
       style: const TextStyle(
-        fontSize:   14,
+        fontSize: 14,
         fontWeight: FontWeight.w600,
-        color:      Color(0xFF1A1A2E),
+        color: Color(0xFF1A1A2E),
       ),
     );
   }
@@ -283,31 +278,28 @@ class _LoginScreenState extends State<LoginScreen> {
     required bool isTablet,
   }) {
     return TextField(
-      controller:   controller,
+      controller: controller,
       keyboardType: keyType,
       style: TextStyle(
         fontSize: isTablet ? 15 : 14,
-        color:    const Color(0xFF1A1A2E),
+        color: const Color(0xFF1A1A2E),
       ),
       decoration: InputDecoration(
-        hintText:  hint,
+        hintText: hint,
         hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-        filled:    true,
+        filled: true,
         fillColor: const Color(0xFFF5F5F5),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide.none,
+          borderSide: BorderSide.none,
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(
-            color: Color(0xFF1B6B72),
-            width: 1.5,
-          ),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.5),
         ),
         contentPadding: EdgeInsets.symmetric(
           horizontal: 16,
-          vertical:   isTablet ? 16 : 14,
+          vertical: isTablet ? 16 : 14,
         ),
       ),
     );
@@ -315,31 +307,28 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Widget _buildPasswordField(bool isTablet) {
     return TextField(
-      controller:  _passwordController,
+      controller: _passwordController,
       obscureText: _obscurePassword,
       style: TextStyle(
         fontSize: isTablet ? 15 : 14,
-        color:    const Color(0xFF1A1A2E),
+        color: const Color(0xFF1A1A2E),
       ),
       decoration: InputDecoration(
-        hintText:  '••••••••',
+        hintText: '••••••••',
         hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-        filled:    true,
+        filled: true,
         fillColor: const Color(0xFFF5F5F5),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide:   BorderSide.none,
+          borderSide: BorderSide.none,
         ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
-          borderSide: const BorderSide(
-            color: Color(0xFF1B6B72),
-            width: 1.5,
-          ),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.5),
         ),
         contentPadding: EdgeInsets.symmetric(
           horizontal: 16,
-          vertical:   isTablet ? 16 : 14,
+          vertical: isTablet ? 16 : 14,
         ),
         suffixIcon: GestureDetector(
           onTap: () => setState(() => _obscurePassword = !_obscurePassword),
@@ -348,7 +337,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 ? Icons.visibility_outlined
                 : Icons.visibility_off_outlined,
             color: const Color(0xFF9E9E9E),
-            size:  20,
+            size: 20,
           ),
         ),
       ),

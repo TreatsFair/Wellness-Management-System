@@ -1,7 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/room_repository.dart';
+import '../../data/repositories/service_repository.dart';
+import '../../data/repositories/therapist_repository.dart';
 import '../therapists/therapist_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
@@ -11,7 +14,6 @@ const _page = Color(0xFFF4F5F7);
 
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
-  if (value is Timestamp) return DateFormat('yyyy-MM-dd').format(value.toDate());
   return value.toString();
 }
 
@@ -63,7 +65,11 @@ int _timeToMinutes(String value) {
 }
 
 String _initials(String name) {
-  final parts = name.trim().split(RegExp(r'\s+')).where((p) => p.isNotEmpty).toList();
+  final parts = name
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((p) => p.isNotEmpty)
+      .toList();
   if (parts.length >= 2) return '${parts.first[0]}${parts[1][0]}'.toUpperCase();
   return name.isNotEmpty ? name[0].toUpperCase() : '?';
 }
@@ -190,7 +196,10 @@ class _ManagementHeader extends StatelessWidget {
                 ),
                 if (!isCompact) ...[
                   const SizedBox(height: 4),
-                  Text(subtitle, style: const TextStyle(color: _muted, fontSize: 14)),
+                  Text(
+                    subtitle,
+                    style: const TextStyle(color: _muted, fontSize: 14),
+                  ),
                 ],
               ],
             ),
@@ -300,17 +309,17 @@ class _ResourceItem {
     required this.raw,
   });
 
-  factory _ResourceItem.fromService(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _ResourceItem.fromService(Map<String, dynamic> d) {
     final name = _asString(d['name']);
     final duration = _asInt(d['duration'], 60);
     final price = _asDouble(d['price']);
     final active = _asBool(d['active'] ?? d['isActive'], true);
     return _ResourceItem(
-      id: doc.id,
+      id: _asString(d['id']),
       name: name,
       subtitle: _asString(d['category'], 'Services'),
-      detail: '$duration min | RM ${price.toStringAsFixed(0)} | ${_roomTypeLabel(_asString(d['roomType']))}',
+      detail:
+          '$duration min | RM ${price.toStringAsFixed(0)} | ${_roomTypeLabel(_asString(d['roomType']))}',
       statusText: active ? 'Active' : 'Inactive',
       active: active,
       color: _teal,
@@ -318,16 +327,16 @@ class _ResourceItem {
     );
   }
 
-  factory _ResourceItem.fromRoom(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _ResourceItem.fromRoom(Map<String, dynamic> d) {
     final name = _asString(d['name']);
     final totalSlots = _asInt(d['totalSlots'], 1);
     final active = _asBool(d['active'] ?? d['isActive'], true);
     return _ResourceItem(
-      id: doc.id,
+      id: _asString(d['id']),
       name: name,
       subtitle: _roomTypeLabel(_asString(d['type'] ?? d['roomType'])),
-      detail: '${_asString(d['floor'], 'Main Floor')} | $totalSlots slot${totalSlots == 1 ? '' : 's'}',
+      detail:
+          '${_asString(d['floor'], 'Main Floor')} | $totalSlots slot${totalSlots == 1 ? '' : 's'}',
       statusText: active ? 'Available' : 'Unavailable',
       active: active,
       color: const Color(0xFF8B5CF6),
@@ -340,24 +349,23 @@ class _ServiceRoomScreen extends StatefulWidget {
   final _ResourceType type;
   final String userRole;
 
-  const _ServiceRoomScreen({
-    required this.type,
-    required this.userRole,
-  });
+  const _ServiceRoomScreen({required this.type, required this.userRole});
 
   @override
   State<_ServiceRoomScreen> createState() => _ServiceRoomScreenState();
 }
 
 class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
+  final _serviceRepository = ServiceRepository();
+  final _roomRepository = RoomRepository();
   final _searchController = TextEditingController();
   List<_ResourceItem> _items = [];
   List<_ResourceItem> _filtered = [];
   _ResourceItem? _selected;
   bool _loading = true;
 
-  String get _collection => widget.type == _ResourceType.service ? 'services' : 'rooms';
-  String get _title => widget.type == _ResourceType.service ? 'Services' : 'Rooms';
+  String get _title =>
+      widget.type == _ResourceType.service ? 'Services' : 'Rooms';
   String get _subtitle => widget.type == _ResourceType.service
       ? 'Manage service offerings and pricing'
       : 'Manage room availability and equipment';
@@ -380,11 +388,15 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final snapshot = await FirebaseFirestore.instance.collection(_collection).orderBy('name').get();
-      final items = snapshot.docs
-          .map((doc) => widget.type == _ResourceType.service
-              ? _ResourceItem.fromService(doc)
-              : _ResourceItem.fromRoom(doc))
+      final rows = widget.type == _ResourceType.service
+          ? await _serviceRepository.getServices()
+          : await _roomRepository.getRooms();
+      final items = rows
+          .map(
+            (row) => widget.type == _ResourceType.service
+                ? _ResourceItem.fromService(row)
+                : _ResourceItem.fromRoom(row),
+          )
           .toList();
       if (!mounted) return;
       setState(() {
@@ -414,7 +426,8 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
       }).toList();
       if (_filtered.isEmpty) {
         _selected = null;
-      } else if (_selected == null || !_filtered.any((item) => item.id == _selected!.id)) {
+      } else if (_selected == null ||
+          !_filtered.any((item) => item.id == _selected!.id)) {
         _selected = _filtered.first;
       }
     });
@@ -430,8 +443,9 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
 
   Future<void> _delete(_ResourceItem item) async {
     if (!_isAdmin) {
-      final resourceName =
-          widget.type == _ResourceType.service ? 'services' : 'rooms';
+      final resourceName = widget.type == _ResourceType.service
+          ? 'services'
+          : 'rooms';
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Only admins can delete $resourceName'),
@@ -445,26 +459,38 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: Text('Remove ${widget.type == _ResourceType.service ? 'Service' : 'Room'}'),
+        title: Text(
+          'Remove ${widget.type == _ResourceType.service ? 'Service' : 'Room'}',
+        ),
         content: Text('Remove ${item.name} from $_title?'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
           ElevatedButton(
             onPressed: () => Navigator.pop(context, true),
-            style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFFE53935), foregroundColor: Colors.white),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFE53935),
+              foregroundColor: Colors.white,
+            ),
             child: const Text('Remove'),
           ),
         ],
       ),
     );
     if (confirmed != true) return;
-    await FirebaseFirestore.instance.collection(_collection).doc(item.id).delete();
+    if (widget.type == _ResourceType.service) {
+      await _serviceRepository.deleteService(item.id);
+    } else {
+      await _roomRepository.deleteRoom(item.id);
+    }
     await _load();
   }
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 760;
+    final isWide = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
       backgroundColor: _page,
       body: SafeArea(
@@ -484,13 +510,13 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
               child: _loading
                   ? const Center(child: CircularProgressIndicator(color: _teal))
                   : isWide
-                      ? Row(
-                          children: [
-                            SizedBox(width: 360, child: _resourceListPane()),
-                            Expanded(child: _resourceDetailPane()),
-                          ],
-                        )
-                      : _resourceListPane(phone: true),
+                  ? Row(
+                      children: [
+                        SizedBox(width: 360, child: _resourceListPane()),
+                        Expanded(child: _resourceDetailPane()),
+                      ],
+                    )
+                  : _resourceListPane(phone: true),
             ),
           ],
         ),
@@ -499,8 +525,9 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   }
 
   Widget _resourceListPane({bool phone = false}) {
-    final horizontalPadding =
-        MediaQuery.of(context).size.width < 360 ? 12.0 : 16.0;
+    final horizontalPadding = MediaQuery.of(context).size.width < 360
+        ? 12.0
+        : 16.0;
     return Container(
       color: phone ? _page : Colors.white,
       child: Column(
@@ -565,7 +592,12 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   Widget _resourceDetailPane() {
     final item = _selected;
     if (item == null) {
-      return Center(child: Text('Select ${_title.toLowerCase()} to view details', style: const TextStyle(color: _muted)));
+      return Center(
+        child: Text(
+          'Select ${_title.toLowerCase()} to view details',
+          style: const TextStyle(color: _muted),
+        ),
+      );
     }
     return Padding(
       padding: const EdgeInsets.all(18),
@@ -605,7 +637,9 @@ class _ResourceListCard extends StatelessWidget {
             padding: const EdgeInsets.all(14),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: selected ? _teal : const Color(0xFFE5E7EB)),
+              border: Border.all(
+                color: selected ? _teal : const Color(0xFFE5E7EB),
+              ),
             ),
             child: Row(
               children: [
@@ -613,7 +647,10 @@ class _ResourceListCard extends StatelessWidget {
                   backgroundColor: item.color,
                   child: Text(
                     _initials(item.name),
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
                 const SizedBox(width: 12),
@@ -621,11 +658,26 @@ class _ResourceListCard extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(item.name, style: const TextStyle(color: _ink, fontWeight: FontWeight.w800)),
+                      Text(
+                        item.name,
+                        style: const TextStyle(
+                          color: _ink,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
                       const SizedBox(height: 4),
-                      Text(item.subtitle, style: const TextStyle(color: _muted, fontSize: 12)),
+                      Text(
+                        item.subtitle,
+                        style: const TextStyle(color: _muted, fontSize: 12),
+                      ),
                       const SizedBox(height: 3),
-                      Text(item.detail, style: const TextStyle(color: Color(0xFF94A3B8), fontSize: 12)),
+                      Text(
+                        item.detail,
+                        style: const TextStyle(
+                          color: Color(0xFF94A3B8),
+                          fontSize: 12,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -672,7 +724,9 @@ class _ResourcePhoneDetail extends StatelessWidget {
             ),
             Expanded(
               child: Padding(
-                padding: EdgeInsets.all(MediaQuery.of(context).size.width < 360 ? 12 : 16),
+                padding: EdgeInsets.all(
+                  MediaQuery.of(context).size.width < 360 ? 12 : 16,
+                ),
                 child: _ResourceDetailCard(
                   item: item,
                   title: title,
@@ -723,7 +777,11 @@ class _ResourceDetailCard extends StatelessWidget {
                     backgroundColor: item.color,
                     child: Text(
                       _initials(item.name),
-                      style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.w800),
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 14),
@@ -731,9 +789,19 @@ class _ResourceDetailCard extends StatelessWidget {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(item.name, style: const TextStyle(fontSize: 20, color: _ink, fontWeight: FontWeight.w800)),
+                        Text(
+                          item.name,
+                          style: const TextStyle(
+                            fontSize: 20,
+                            color: _ink,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                         const SizedBox(height: 4),
-                        Text(item.subtitle, style: const TextStyle(color: _muted)),
+                        Text(
+                          item.subtitle,
+                          style: const TextStyle(color: _muted),
+                        ),
                       ],
                     ),
                   ),
@@ -761,15 +829,30 @@ class _ResourceDetailCard extends StatelessWidget {
               const Divider(height: 30),
               if (isService) ...[
                 _InfoRow('Category', item.subtitle),
-                _InfoRow('Duration', '${_asInt(item.raw['duration'], 60)} minutes'),
-                _InfoRow('Price', 'RM ${_asDouble(item.raw['price']).toStringAsFixed(2)}'),
-                _InfoRow('Room Type', _roomTypeLabel(_asString(item.raw['roomType']))),
+                _InfoRow(
+                  'Duration',
+                  '${_asInt(item.raw['duration'], 60)} minutes',
+                ),
+                _InfoRow(
+                  'Price',
+                  'RM ${_asDouble(item.raw['price']).toStringAsFixed(2)}',
+                ),
+                _InfoRow(
+                  'Room Type',
+                  _roomTypeLabel(_asString(item.raw['roomType'])),
+                ),
                 _InfoRow('Status', item.statusText, isLast: true),
               ] else ...[
                 _InfoRow('Room Type', item.subtitle),
                 _InfoRow('Floor', _asString(item.raw['floor'], 'Main Floor')),
-                _InfoRow('Capacity', '${_asInt(item.raw['totalSlots'], 1)} slot(s)'),
-                _InfoRow('Equipment', _asString(item.raw['equipment'], 'Not specified')),
+                _InfoRow(
+                  'Capacity',
+                  '${_asInt(item.raw['totalSlots'], 1)} slot(s)',
+                ),
+                _InfoRow(
+                  'Equipment',
+                  _asString(item.raw['equipment'], 'Not specified'),
+                ),
                 _InfoRow('Status', item.statusText, isLast: true),
               ],
             ],
@@ -785,7 +868,9 @@ class _ResourceDetailCard extends StatelessWidget {
               foregroundColor: const Color(0xFFE53935),
               side: const BorderSide(color: Color(0xFFE53935)),
               padding: const EdgeInsets.symmetric(vertical: 14),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
           ),
         ],
@@ -805,12 +890,13 @@ class _ResourceFormDialog extends StatefulWidget {
 }
 
 class _ResourceFormDialogState extends State<_ResourceFormDialog> {
+  final _serviceRepository = ServiceRepository();
+  final _roomRepository = RoomRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _category;
   late final TextEditingController _duration;
   late final TextEditingController _price;
-  late final TextEditingController _imageUrl;
   late final TextEditingController _roomType;
   late final TextEditingController _floor;
   late final TextEditingController _slots;
@@ -827,13 +913,25 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     super.initState();
     final raw = widget.item?.raw ?? {};
     _name = TextEditingController(text: _asString(raw['name']));
-    _category = TextEditingController(text: _asString(raw['category'], 'Services'));
-    _duration = TextEditingController(text: _asInt(raw['duration'], 60).toString());
-    _price = TextEditingController(text: _asDouble(raw['price']).toStringAsFixed(0));
-    _imageUrl = TextEditingController(text: _asString(raw['imageUrl'] ?? raw['image']));
-    _roomType = TextEditingController(text: _asString(raw['roomType'] ?? raw['type'], _isService ? 'body_room' : 'body_room'));
+    _category = TextEditingController(
+      text: _asString(raw['category'], 'Services'),
+    );
+    _duration = TextEditingController(
+      text: _asInt(raw['duration'], 60).toString(),
+    );
+    _price = TextEditingController(
+      text: _asDouble(raw['price']).toStringAsFixed(0),
+    );
+    _roomType = TextEditingController(
+      text: _asString(
+        raw['roomType'] ?? raw['type'],
+        _isService ? 'body_room' : 'body_room',
+      ),
+    );
     _floor = TextEditingController(text: _asString(raw['floor'], 'Main Floor'));
-    _slots = TextEditingController(text: _asInt(raw['totalSlots'], 1).toString());
+    _slots = TextEditingController(
+      text: _asInt(raw['totalSlots'], 1).toString(),
+    );
     _equipment = TextEditingController(text: _asString(raw['equipment']));
     _active = _asBool(raw['active'] ?? raw['isActive'], true);
   }
@@ -844,7 +942,6 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     _category.dispose();
     _duration.dispose();
     _price.dispose();
-    _imageUrl.dispose();
     _roomType.dispose();
     _floor.dispose();
     _slots.dispose();
@@ -856,18 +953,16 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     if (_saving || _closing) return;
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
-    final collection = _isService ? 'services' : 'rooms';
     final data = _isService
         ? {
             'name': _name.text.trim(),
-            'category': _category.text.trim().isEmpty ? 'Services' : _category.text.trim(),
+            'category': _category.text.trim().isEmpty
+                ? 'Services'
+                : _category.text.trim(),
             'duration': int.tryParse(_duration.text.trim()) ?? 60,
             'price': double.tryParse(_price.text.trim()) ?? 0,
             'roomType': _normalizeRoomType(_roomType.text),
-            'imageUrl': _imageUrl.text.trim(),
-            'active': _active,
             'isActive': _active,
-            'updatedAt': FieldValue.serverTimestamp(),
           }
         : {
             'name': _name.text.trim(),
@@ -876,24 +971,33 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
             'floor': _floor.text.trim(),
             'totalSlots': int.tryParse(_slots.text.trim()) ?? 1,
             'equipment': _equipment.text.trim(),
-            'imageUrl': _imageUrl.text.trim(),
-            'active': _active,
             'isActive': _active,
-            'updatedAt': FieldValue.serverTimestamp(),
           };
     try {
-      final ref = FirebaseFirestore.instance.collection(collection);
       if (_isEditing) {
-        await ref.doc(widget.item!.id).set(data, SetOptions(merge: true));
+        if (_isService) {
+          await _serviceRepository.updateService(widget.item!.id, data);
+        } else {
+          await _roomRepository.updateRoom(widget.item!.id, data);
+        }
       } else {
-        await ref.add({...data, 'createdAt': FieldValue.serverTimestamp()});
+        if (_isService) {
+          await _serviceRepository.addService(data);
+        } else {
+          await _roomRepository.createRoom(data);
+        }
       }
       _close(true);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Unable to save ${_isService ? 'service' : 'room'}: $e');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Unable to save ${_isService ? 'service' : 'room'}')),
+        SnackBar(
+          content: Text(
+            'Unable to save ${_isService ? 'service' : 'room'}: $e',
+          ),
+        ),
       );
     }
   }
@@ -927,7 +1031,11 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                     Expanded(
                       child: Text(
                         _isEditing ? 'Edit $label' : 'Add $label',
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _ink),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          color: _ink,
+                        ),
                       ),
                     ),
                     IconButton(
@@ -937,41 +1045,79 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                _FormField(label: 'Name', controller: _name, requiredField: true),
+                _FormField(
+                  label: 'Name',
+                  controller: _name,
+                  requiredField: true,
+                ),
                 const SizedBox(height: 12),
                 if (_isService) ...[
-                  _FormField(label: 'Category', controller: _category, hint: 'Services / Packages / Add-ons'),
+                  _FormField(
+                    label: 'Category',
+                    controller: _category,
+                    hint: 'Services / Packages / Add-ons',
+                  ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
-                      Expanded(child: _FormField(label: 'Duration', controller: _duration, keyboardType: TextInputType.number)),
+                      Expanded(
+                        child: _FormField(
+                          label: 'Duration',
+                          controller: _duration,
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
                       const SizedBox(width: 12),
-                      Expanded(child: _FormField(label: 'Price', controller: _price, keyboardType: TextInputType.number)),
+                      Expanded(
+                        child: _FormField(
+                          label: 'Price',
+                          controller: _price,
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 12),
-                  _FormField(label: 'Room Type', controller: _roomType, hint: 'body_room / foot_chair'),
-                  const SizedBox(height: 12),
-                  _FormField(label: 'Service Picture URL', controller: _imageUrl, hint: 'https://...'),
+                  _FormField(
+                    label: 'Room Type',
+                    controller: _roomType,
+                    hint: 'body_room / foot_chair',
+                  ),
                 ] else ...[
-                  _FormField(label: 'Room Type', controller: _roomType, hint: 'body_room / foot_chair'),
+                  _FormField(
+                    label: 'Room Type',
+                    controller: _roomType,
+                    hint: 'body_room / foot_chair',
+                  ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
-                      Expanded(child: _FormField(label: 'Floor', controller: _floor)),
+                      Expanded(
+                        child: _FormField(label: 'Floor', controller: _floor),
+                      ),
                       const SizedBox(width: 12),
-                      Expanded(child: _FormField(label: 'Slots', controller: _slots, keyboardType: TextInputType.number)),
+                      Expanded(
+                        child: _FormField(
+                          label: 'Slots',
+                          controller: _slots,
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 12),
-                  _FormField(label: 'Equipment', controller: _equipment, maxLines: 3),
-                  const SizedBox(height: 12),
-                  _FormField(label: 'Room Picture URL', controller: _imageUrl, hint: 'https://...'),
+                  _FormField(
+                    label: 'Equipment',
+                    controller: _equipment,
+                    maxLines: 3,
+                  ),
                 ],
                 const SizedBox(height: 12),
                 SwitchListTile(
                   value: _active,
-                  onChanged: _saving ? null : (value) => setState(() => _active = value),
+                  onChanged: _saving
+                      ? null
+                      : (value) => setState(() => _active = value),
                   activeThumbColor: Colors.white,
                   activeTrackColor: const Color(0xFF10B981),
                   contentPadding: EdgeInsets.zero,
@@ -1012,10 +1158,9 @@ class _ManagedTherapist {
     required this.raw,
   });
 
-  factory _ManagedTherapist.fromDoc(DocumentSnapshot doc) {
-    final d = doc.data() as Map<String, dynamic>;
+  factory _ManagedTherapist.fromMap(Map<String, dynamic> d) {
     return _ManagedTherapist(
-      id: doc.id,
+      id: _asString(d['id']),
       name: _asString(d['name']),
       phone: _asString(d['phone']),
       available: _asBool(d['availabilityStatus'], true),
@@ -1025,7 +1170,11 @@ class _ManagedTherapist {
     );
   }
 
-  _ManagedTherapist copyWith({bool? available, String? busyUntil, int? doneToday}) {
+  _ManagedTherapist copyWith({
+    bool? available,
+    String? busyUntil,
+    int? doneToday,
+  }) {
     return _ManagedTherapist(
       id: id,
       name: name,
@@ -1048,6 +1197,8 @@ class TherapistAvailabilityScreen extends StatefulWidget {
 
 class _TherapistAvailabilityScreenState
     extends State<TherapistAvailabilityScreen> {
+  final _appointmentRepository = AppointmentRepository();
+  final _therapistRepository = TherapistRepository();
   final _searchController = TextEditingController();
   List<_ManagedTherapist> _therapists = [];
   List<_ManagedTherapist> _filtered = [];
@@ -1069,9 +1220,9 @@ class _TherapistAvailabilityScreenState
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final snap = await FirebaseFirestore.instance.collection('therapists').orderBy('name').get();
+      final rows = await _therapistRepository.getTherapists();
       final loaded = await Future.wait(
-        snap.docs.map((doc) async => _enrich(_ManagedTherapist.fromDoc(doc))),
+        rows.map((row) async => _enrich(_ManagedTherapist.fromMap(row))),
       );
       if (!mounted) return;
       setState(() {
@@ -1087,25 +1238,26 @@ class _TherapistAvailabilityScreenState
 
   Future<_ManagedTherapist> _enrich(_ManagedTherapist therapist) async {
     final today = _today();
-    final appointments = await FirebaseFirestore.instance
-        .collection('appointments')
-        .where('therapistId', isEqualTo: therapist.id)
-        .where('date', isEqualTo: today)
-        .get();
+    final appointments = await _appointmentRepository
+        .getAppointmentsByTherapist(
+          therapist.id,
+          date: DateTime.tryParse(today),
+        );
 
     var done = 0;
     var busyUntil = therapist.busyUntil;
     final now = TimeOfDay.now();
     final nowMinutes = now.hour * 60 + now.minute;
 
-    for (final doc in appointments.docs) {
-      final d = doc.data();
+    for (final d in appointments) {
       final status = _asString(d['status']).toLowerCase();
       if (status == 'completed') done++;
       if (status == 'confirmed' || status == 'in_progress') {
         final start = _timeToMinutes(_asString(d['startTime'], '00:00'));
         final end = _timeToMinutes(_asString(d['endTime'], '00:00'));
-        if (start <= nowMinutes && end > nowMinutes) busyUntil = _asString(d['endTime']);
+        if (start <= nowMinutes && end > nowMinutes) {
+          busyUntil = _asString(d['endTime']);
+        }
       }
     }
 
@@ -1123,12 +1275,17 @@ class _TherapistAvailabilityScreenState
   }
 
   Future<void> _setAvailability(_ManagedTherapist therapist, bool value) async {
-    await FirebaseFirestore.instance.collection('therapists').doc(therapist.id).set({
+    await _therapistRepository.updateTherapist(therapist.id, {
       'availabilityStatus': value,
-      'updatedAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    });
     setState(() {
-      _therapists = _therapists.map((item) => item.id == therapist.id ? item.copyWith(available: value) : item).toList();
+      _therapists = _therapists
+          .map(
+            (item) => item.id == therapist.id
+                ? item.copyWith(available: value)
+                : item,
+          )
+          .toList();
     });
     _filter();
   }
@@ -1143,8 +1300,9 @@ class _TherapistAvailabilityScreenState
 
   @override
   Widget build(BuildContext context) {
-    final horizontalPadding =
-        MediaQuery.of(context).size.width < 360 ? 12.0 : 16.0;
+    final horizontalPadding = MediaQuery.of(context).size.width < 360
+        ? 12.0
+        : 16.0;
 
     return Scaffold(
       backgroundColor: _page,
@@ -1162,7 +1320,10 @@ class _TherapistAvailabilityScreenState
                 horizontalPadding,
                 8,
               ),
-              child: _SearchBar(controller: _searchController, hint: 'Search therapists...'),
+              child: _SearchBar(
+                controller: _searchController,
+                hint: 'Search therapists...',
+              ),
             ),
             Expanded(
               child: _loading
@@ -1182,7 +1343,8 @@ class _TherapistAvailabilityScreenState
                           final therapist = _filtered[index];
                           return _TherapistAvailabilityCard(
                             therapist: therapist,
-                            onChanged: (value) => _setAvailability(therapist, value),
+                            onChanged: (value) =>
+                                _setAvailability(therapist, value),
                             onEdit: () => _openForm(therapist: therapist),
                           );
                         },
@@ -1209,12 +1371,14 @@ class _TherapistAvailabilityCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = therapist.available ? const Color(0xFF10B981) : const Color(0xFF9CA3AF);
+    final statusColor = therapist.available
+        ? const Color(0xFF10B981)
+        : const Color(0xFF9CA3AF);
     final freeText = therapist.available
         ? 'Free now'
         : therapist.busyUntil.isNotEmpty
-            ? 'Free at ${therapist.busyUntil}'
-            : 'Unavailable';
+        ? 'Free at ${therapist.busyUntil}'
+        : 'Unavailable';
     final isCompact = MediaQuery.of(context).size.width < 600;
     final avatarRadius = isCompact ? 22.0 : 24.0;
     return Container(
@@ -1258,7 +1422,11 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                       therapist.name,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: isCompact ? 15 : 16, color: _ink, fontWeight: FontWeight.w800),
+                      style: TextStyle(
+                        fontSize: isCompact ? 15 : 16,
+                        color: _ink,
+                        fontWeight: FontWeight.w800,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     if (therapist.phone.isNotEmpty)
@@ -1273,7 +1441,9 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                       spacing: 6,
                       runSpacing: 6,
                       children: [
-                        _TherapistMiniPill('${therapist.doneToday} appts today'),
+                        _TherapistMiniPill(
+                          '${therapist.doneToday} appts today',
+                        ),
                         _TherapistMiniPill(freeText),
                       ],
                     ),
@@ -1303,7 +1473,10 @@ class _TherapistAvailabilityCard extends StatelessWidget {
               Container(
                 width: 8,
                 height: 8,
-                decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                decoration: BoxDecoration(
+                  color: statusColor,
+                  shape: BoxShape.circle,
+                ),
               ),
               const SizedBox(width: 8),
               Expanded(
@@ -1374,6 +1547,7 @@ class _TherapistFormDialog extends StatefulWidget {
 }
 
 class _TherapistFormDialogState extends State<_TherapistFormDialog> {
+  final _therapistRepository = TherapistRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _phone;
@@ -1411,20 +1585,24 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
       'phone': _phone.text.trim(),
       'availabilityStatus': _available,
       'busyUntil': _busyUntil.text.trim(),
-      'updatedAt': FieldValue.serverTimestamp(),
     };
     try {
-      final ref = FirebaseFirestore.instance.collection('therapists');
       if (_isEditing) {
-        await ref.doc(widget.therapist!.id).set(data, SetOptions(merge: true));
+        await _therapistRepository.updateTherapist(widget.therapist!.id, data);
       } else {
-        await ref.add({...data, 'createdAt': FieldValue.serverTimestamp()});
+        await _therapistRepository.addTherapist({
+          ...data,
+          'createdAt': DateTime.now().toIso8601String(),
+        });
       }
       _close(true);
-    } catch (_) {
+    } catch (e) {
+      debugPrint('Unable to save therapist: $e');
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Unable to save therapist')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Unable to save therapist: $e')));
     }
   }
 
@@ -1456,7 +1634,11 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     Expanded(
                       child: Text(
                         _isEditing ? 'Edit Therapist' : 'Add Therapist',
-                        style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w800, color: _ink),
+                        style: const TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.w800,
+                          color: _ink,
+                        ),
                       ),
                     ),
                     IconButton(
@@ -1466,15 +1648,29 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                   ],
                 ),
                 const SizedBox(height: 16),
-                _FormField(label: 'Name', controller: _name, requiredField: true),
+                _FormField(
+                  label: 'Name',
+                  controller: _name,
+                  requiredField: true,
+                ),
                 const SizedBox(height: 12),
-                _FormField(label: 'Phone', controller: _phone, keyboardType: TextInputType.phone),
+                _FormField(
+                  label: 'Phone',
+                  controller: _phone,
+                  keyboardType: TextInputType.phone,
+                ),
                 const SizedBox(height: 12),
-                _FormField(label: 'Free At', controller: _busyUntil, hint: 'Example: 14:30'),
+                _FormField(
+                  label: 'Free At',
+                  controller: _busyUntil,
+                  hint: 'Example: 14:30',
+                ),
                 const SizedBox(height: 12),
                 SwitchListTile(
                   value: _available,
-                  onChanged: _saving ? null : (value) => setState(() => _available = value),
+                  onChanged: _saving
+                      ? null
+                      : (value) => setState(() => _available = value),
                   activeThumbColor: Colors.white,
                   activeTrackColor: const Color(0xFF10B981),
                   contentPadding: EdgeInsets.zero,
@@ -1500,10 +1696,7 @@ class _AddButton extends StatelessWidget {
   final String label;
   final VoidCallback onTap;
 
-  const _AddButton({
-    required this.label,
-    required this.onTap,
-  });
+  const _AddButton({required this.label, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -1525,9 +1718,7 @@ class _AddButton extends StatelessWidget {
         foregroundColor: _teal,
         side: const BorderSide(color: _teal),
         padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 14),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }
@@ -1578,11 +1769,21 @@ class _SearchBar extends StatelessWidget {
       controller: controller,
       decoration: InputDecoration(
         hintText: hint,
-        prefixIcon: const Icon(Icons.search, color: Color(0xFF9CA3AF), size: 20),
+        prefixIcon: const Icon(
+          Icons.search,
+          color: Color(0xFF9CA3AF),
+          size: 20,
+        ),
         filled: true,
         fillColor: Colors.white,
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 14,
+          vertical: 12,
+        ),
       ),
     );
   }
@@ -1635,7 +1836,10 @@ class _InfoRow extends StatelessWidget {
                 child: Text(
                   value.isEmpty ? '-' : value,
                   textAlign: TextAlign.right,
-                  style: const TextStyle(color: _ink, fontWeight: FontWeight.w700),
+                  style: const TextStyle(
+                    color: _ink,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
             ],
@@ -1659,9 +1863,20 @@ class _StatusDot extends StatelessWidget {
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
         const SizedBox(width: 6),
-        Text(label, style: TextStyle(color: color, fontSize: 12, fontWeight: FontWeight.w700)),
+        Text(
+          label,
+          style: TextStyle(
+            color: color,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
       ],
     );
   }
@@ -1691,14 +1906,19 @@ class _FormField extends StatelessWidget {
       keyboardType: keyboardType,
       maxLines: maxLines,
       validator: requiredField
-          ? (value) => value == null || value.trim().isEmpty ? '$label is required' : null
+          ? (value) => value == null || value.trim().isEmpty
+                ? '$label is required'
+                : null
           : null,
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: BorderSide.none),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
         focusedBorder: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
           borderSide: const BorderSide(color: _teal, width: 1.4),
@@ -1732,7 +1952,9 @@ class _DialogActions extends StatelessWidget {
               minimumSize: const Size.fromHeight(50),
               backgroundColor: const Color(0xFFF1F3F6),
               foregroundColor: _ink,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             child: const Text('Cancel'),
           ),
@@ -1746,13 +1968,18 @@ class _DialogActions extends StatelessWidget {
               backgroundColor: _teal,
               foregroundColor: Colors.white,
               elevation: 0,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(8),
+              ),
             ),
             child: saving
                 ? const SizedBox(
                     width: 18,
                     height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Colors.white,
+                    ),
                   )
                 : Text(saveLabel),
           ),

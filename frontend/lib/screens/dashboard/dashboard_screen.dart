@@ -1,8 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../data/repositories/auth_repository.dart';
+import '../../data/repositories/dashboard_repository.dart';
+import '../../data/repositories/profile_repository.dart';
+import '../../data/repositories/settings_repository.dart';
 import '../appointments/appointment_screen.dart';
 import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
@@ -97,6 +99,7 @@ class _BusinessProfile {
 class _TransactionSummary {
   final String customerName;
   final String serviceName;
+  final String therapistName;
   final String date;
   final String time;
   final double amount;
@@ -104,6 +107,7 @@ class _TransactionSummary {
   const _TransactionSummary({
     required this.customerName,
     required this.serviceName,
+    required this.therapistName,
     required this.date,
     required this.time,
     required this.amount,
@@ -147,7 +151,8 @@ String _dateKey(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
 
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
-  return value.toString();
+  final text = value.toString();
+  return text.trim().isEmpty ? fallback : text;
 }
 
 double _asDouble(Object? value, [double fallback = 0]) {
@@ -157,7 +162,6 @@ double _asDouble(Object? value, [double fallback = 0]) {
 }
 
 DateTime? _asDateTime(Object? value) {
-  if (value is Timestamp) return value.toDate();
   if (value is DateTime) return value;
   if (value is String) return DateTime.tryParse(value);
   return null;
@@ -195,10 +199,15 @@ class DashboardScreen extends StatefulWidget {
 }
 
 class _DashboardScreenState extends State<DashboardScreen> {
+  final _authRepository = AuthRepository();
+  final _profileRepository = ProfileRepository();
+  final _dashboardRepository = DashboardRepository();
+  final _settingsRepository = SettingsRepository();
   _BusinessProfile _businessProfile = _placeholderBusinessProfile;
   _DashboardData _dashboardData = _DashboardData.empty;
   bool _isCurrentUserAdmin = false;
   String _currentUserRole = 'staff';
+  String _currentUserEmail = 'No email';
   bool _isLoadingBusinessSettings = true;
   bool _isLoadingDashboardData = true;
   String? _dashboardError;
@@ -211,23 +220,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 600;
+      MediaQuery.of(context).size.width >= 900;
 
   Future<Map<String, Map<String, dynamic>>> _loadDocMap(
     String collection,
     Iterable<String> ids,
   ) async {
-    final uniqueIds = ids.where((id) => id.trim().isNotEmpty).toSet();
-    final entries = await Future.wait(
-      uniqueIds.map((id) async {
-        final doc = await FirebaseFirestore.instance
-            .collection(collection)
-            .doc(id)
-            .get();
-        return MapEntry(id, doc.data() ?? <String, dynamic>{});
-      }),
-    );
-    return {for (final entry in entries) entry.key: entry.value};
+    return _dashboardRepository.loadByIds(collection, ids);
   }
 
   Future<void> _loadDashboardData() async {
@@ -242,7 +241,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final now = DateTime.now();
       final today = _stripDate(now);
       final tomorrow = today.add(const Duration(days: 1));
-      final dayEnd = today.add(const Duration(days: 1));
       final weekStart = _startOfWeek(today);
       final weekEnd = weekStart.add(const Duration(days: 7));
       final todayKey = _dateKey(today);
@@ -250,40 +248,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final weekStartKey = _dateKey(weekStart);
       final weekEndKey = _dateKey(weekEnd.subtract(const Duration(days: 1)));
 
-      final appointmentSnap = await FirebaseFirestore.instance
-          .collection('appointments')
-          .where('date', isGreaterThanOrEqualTo: weekStartKey)
-          .where('date', isLessThanOrEqualTo: weekEndKey)
-          .get();
-      final customerSnap = await FirebaseFirestore.instance
-          .collection('customers')
-          .get();
-      final therapistSnap = await FirebaseFirestore.instance
-          .collection('therapists')
-          .orderBy('name')
-          .get();
-      final todayTransactionSnap = await FirebaseFirestore.instance
-          .collection('transactions')
-          .where('createdAt', isGreaterThanOrEqualTo: Timestamp.fromDate(today))
-          .where('createdAt', isLessThan: Timestamp.fromDate(dayEnd))
-          .get();
-      final weekTransactionSnap = await FirebaseFirestore.instance
-          .collection('transactions')
-          .where(
-            'createdAt',
-            isGreaterThanOrEqualTo: Timestamp.fromDate(weekStart),
-          )
-          .where('createdAt', isLessThan: Timestamp.fromDate(weekEnd))
-          .get();
-      final recentTransactionSnap = await FirebaseFirestore.instance
-          .collection('transactions')
-          .orderBy('createdAt', descending: true)
-          .limit(8)
-          .get();
+      final appointments = await _dashboardRepository.appointmentsForDateRange(
+        weekStartKey,
+        weekEndKey,
+      );
+      final customerRows = await _dashboardRepository.listCustomers();
+      final therapistRows = await _dashboardRepository.listTherapists();
+      final todayTransactionRows = await _dashboardRepository
+          .transactionsForDate(today);
+      final weekTransactionRows = await _dashboardRepository
+          .transactionsForDateRange(weekStart, weekEnd);
+      final recentTransactionRows = await _dashboardRepository
+          .recentTransactions(limit: 8);
 
-      final appointments = appointmentSnap.docs
-          .map((doc) => doc.data())
-          .toList();
       final activeAppointments = appointments.where(
         (data) => !_isCancelled(data),
       );
@@ -303,26 +280,25 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .where((data) => _asString(data['status']).toLowerCase() == 'pending')
           .length;
 
-      final todayPaidTransactions = todayTransactionSnap.docs
-          .where((doc) => _isPaid(doc.data()))
+      final todayPaidTransactions = todayTransactionRows
+          .where((data) => _isPaid(data))
           .toList();
-      final weekPaidTransactions = weekTransactionSnap.docs
-          .where((doc) => _isPaid(doc.data()))
+      final weekPaidTransactions = weekTransactionRows
+          .where((data) => _isPaid(data))
           .toList();
       final todaySales = todayPaidTransactions.fold<double>(
         0,
-        (total, doc) => total + _asDouble(doc.data()['totalAmount']),
+        (total, data) => total + _asDouble(data['totalAmount']),
       );
       final weekRevenue = weekPaidTransactions.fold<double>(
         0,
-        (total, doc) => total + _asDouble(doc.data()['totalAmount']),
+        (total, data) => total + _asDouble(data['totalAmount']),
       );
 
       final customers = {
-        for (final doc in customerSnap.docs) doc.id: doc.data(),
+        for (final data in customerRows) _asString(data['id']): data,
       };
-      final newCustomersThisWeek = customerSnap.docs.where((doc) {
-        final data = doc.data();
+      final newCustomersThisWeek = customerRows.where((data) {
         final joinDate = DateTime.tryParse(_asString(data['joinDate']));
         final createdAt = _asDateTime(data['createdAt']);
         final customerDate = joinDate ?? createdAt;
@@ -332,11 +308,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }).length;
 
       final nowMinutes = now.hour * 60 + now.minute;
-      final therapistStatuses = therapistSnap.docs.map((doc) {
-        final data = doc.data();
+      final therapistStatuses = therapistRows.map((data) {
+        final therapistId = _asString(data['id']);
         final therapistAppointments = todayAppointments
             .where(
-              (appointment) => _asString(appointment['therapistId']) == doc.id,
+              (appointment) =>
+                  _asString(appointment['therapistId']) == therapistId,
             )
             .toList();
         final doneCount = therapistAppointments
@@ -361,8 +338,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final name = _asString(data['name'], 'Therapist');
         final availability = data['availabilityStatus'];
         final busyUntil = _asString(data['busyUntil']);
-        final isFirestoreFree = availability is bool ? availability : true;
-        final isFree = currentAppointment == null && isFirestoreFree;
+        final isAvailable = availability is bool ? availability : true;
+        final isFree = currentAppointment == null && isAvailable;
         final endTime = currentAppointment == null
             ? busyUntil
             : _asString(currentAppointment['endTime']);
@@ -380,13 +357,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
       }).toList();
 
-      final recentTransactionDocs = recentTransactionSnap.docs
-          .where((doc) => _isPaid(doc.data()))
+      final transactionData = recentTransactionRows
+          .where((data) => _isPaid(data))
           .take(6)
           .toList();
-      final transactionData = [
-        for (final doc in recentTransactionDocs) doc.data(),
-      ];
       final appointmentIds = transactionData
           .map((data) => _asString(data['appointmentId']))
           .where((id) => id.isNotEmpty);
@@ -394,28 +368,45 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'appointments',
         appointmentIds,
       );
-      final serviceIds = linkedAppointments.values
-          .map((data) => _asString(data['serviceId']))
-          .where((id) => id.isNotEmpty);
+      final serviceIds = [
+        ...transactionData.map((data) => _asString(data['serviceId'])),
+        ...linkedAppointments.values.map((data) => _asString(data['serviceId'])),
+      ].where((id) => id.isNotEmpty);
+      final therapistIds = [
+        ...transactionData.map((data) => _asString(data['therapistId'])),
+        ...linkedAppointments.values.map(
+          (data) => _asString(data['therapistId']),
+        ),
+      ].where((id) => id.isNotEmpty);
       final linkedServices = await _loadDocMap('services', serviceIds);
+      final linkedTherapists = await _loadDocMap('therapists', therapistIds);
 
       final recentTransactions = transactionData.map((data) {
         final appointment =
             linkedAppointments[_asString(data['appointmentId'])];
-        final service = appointment == null
-            ? null
-            : linkedServices[_asString(appointment['serviceId'])];
+        final serviceId = _asString(data['serviceId']).isNotEmpty
+            ? _asString(data['serviceId'])
+            : _asString(appointment?['serviceId']);
+        final therapistId = _asString(data['therapistId']).isNotEmpty
+            ? _asString(data['therapistId'])
+            : _asString(appointment?['therapistId']);
+        final service = linkedServices[serviceId];
+        final therapist = linkedTherapists[therapistId];
         final customerId = _asString(data['customerId']);
         final customer = customers[customerId];
         final createdAt = _asDateTime(data['createdAt']) ?? now;
         return _TransactionSummary(
           customerName: _asString(
             data['customerName'],
-            _asString(customer?['name'], 'Guest Account'),
+            _asString(customer?['name'], 'Guest'),
           ),
           serviceName: _asString(
             data['serviceName'],
             _asString(service?['name'], 'Service'),
+          ),
+          therapistName: _asString(
+            data['therapistName'],
+            _asString(therapist?['name'], '-'),
           ),
           date: DateFormat('d MMM yyyy').format(createdAt),
           time: DateFormat('h:mm a').format(createdAt),
@@ -431,7 +422,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         pendingAppointments: pendingAppointments,
         todaySales: todaySales,
         totalTransactions: todayPaidTransactions.length,
-        totalCustomers: customerSnap.docs.length,
+        totalCustomers: customerRows.length,
         newCustomersThisWeek: newCustomersThisWeek,
         weekRevenue: weekRevenue,
         weekAppointments: weekAppointments,
@@ -459,91 +450,38 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _loadBusinessSettings() async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    final uid = currentUser?.uid;
-    final email = currentUser?.email;
+    final currentUser = _authRepository.currentUser;
+    var email = currentUser?.email;
 
     var profile = _placeholderBusinessProfile;
     var normalizedRole = 'staff';
 
-    Map<String, dynamic>? userData;
-    if (email != null) {
-      try {
-        final trimmedEmail = email.trim();
-        final emailCandidates = {
-          trimmedEmail.toLowerCase(),
-          trimmedEmail,
-        }.where((value) => value.isNotEmpty);
-        final userDocs = <QueryDocumentSnapshot<Map<String, dynamic>>>[];
-
-        for (final emailCandidate in emailCandidates) {
-          final userByEmailSnapshot = await FirebaseFirestore.instance
-              .collection('users')
-              .where('email', isEqualTo: emailCandidate)
-              .get(const GetOptions(source: Source.server));
-          userDocs.addAll(userByEmailSnapshot.docs);
-        }
-
-        if (userDocs.isNotEmpty) {
-          QueryDocumentSnapshot<Map<String, dynamic>>? selectedDoc;
-          for (final doc in userDocs) {
-            if (doc.id == uid || doc.data()['uid'] == uid) {
-              selectedDoc = doc;
-              break;
-            }
-          }
-          if (selectedDoc == null) {
-            for (final doc in userDocs) {
-              if ((doc.data()['role'] as String?)?.toLowerCase().trim() ==
-                  'admin') {
-                selectedDoc = doc;
-                break;
-              }
-            }
-          }
-          userData = (selectedDoc ?? userDocs.first).data();
-        }
-      } on FirebaseException {
-        // Keep the default staff role when the optional user lookup fails.
-      }
-    }
-
-    if (userData == null && uid != null) {
-      try {
-        final userByUidSnapshot = await FirebaseFirestore.instance
-            .collection('users')
-            .doc(uid)
-            .get(const GetOptions(source: Source.server));
-        userData = userByUidSnapshot.data();
-      } on FirebaseException {
-        // Keep the default staff role when the optional user lookup fails.
-      }
-    }
-
-    if (userData != null) {
-      final role = (userData['role'] as String?)?.toLowerCase().trim();
+    try {
+      final userProfile = await _profileRepository.getCurrentProfile();
+      final role = userProfile?.role.toLowerCase().trim();
       normalizedRole = role == 'admin' ? 'admin' : 'staff';
+      if ((userProfile?.email ?? '').trim().isNotEmpty) {
+        email = userProfile!.email.trim();
+      }
+    } catch (_) {
+      // Keep the default staff role when the profile lookup fails.
     }
 
     try {
-      final settingsDoc = await FirebaseFirestore.instance
-          .collection('settings')
-          .doc(_businessSettingsDocumentId)
-          .get();
-      if (settingsDoc.exists) {
-        final data = settingsDoc.data();
+      final data = await _settingsRepository.getBusinessSettings();
+      if (data != null) {
         profile = _BusinessProfile(
-          name: (data?['businessName'] as String?)?.trim().isNotEmpty == true
-              ? (data?['businessName'] as String).trim()
+          name: (data['businessName'] as String?)?.trim().isNotEmpty == true
+              ? (data['businessName'] as String).trim()
               : _placeholderBusinessProfile.name,
-          location: (data?['location'] as String?)?.trim().isNotEmpty == true
-              ? (data?['location'] as String).trim()
+          location: (data['location'] as String?)?.trim().isNotEmpty == true
+              ? (data['location'] as String).trim()
               : _placeholderBusinessProfile.location,
           logoInitial: _placeholderBusinessProfile.logoInitial,
-          settingsDocumentId: settingsDoc.id,
+          settingsDocumentId: _asString(data['id']),
         );
       }
-    } on FirebaseException {
+    } catch (_) {
       // Keep the placeholder business profile when settings are unavailable.
     }
 
@@ -552,12 +490,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _businessProfile = profile;
       _isCurrentUserAdmin = normalizedRole == 'admin';
       _currentUserRole = normalizedRole;
+      _currentUserEmail = email?.trim().isNotEmpty == true
+          ? email!.trim()
+          : 'No email';
       _isLoadingBusinessSettings = false;
     });
   }
 
   Future<void> _saveBusinessSettings(_BusinessProfile profile) async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = _authRepository.currentUser?.id;
     if (!_isCurrentUserAdmin || uid == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -573,20 +514,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
         profile.settingsDocumentId ?? _businessSettingsDocumentId;
 
     try {
-      await FirebaseFirestore.instance
-          .collection('settings')
-          .doc(settingsDocumentId)
-          .set({
-            'businessName': profile.name,
-            'location': profile.location,
-            'updatedAt': FieldValue.serverTimestamp(),
-            'updatedBy': uid,
-          }, SetOptions(merge: true));
+      final savedSettings = await _settingsRepository.updateBusinessSettings(
+        {
+          'businessName': profile.name,
+          'location': profile.location,
+        },
+        id: settingsDocumentId == _businessSettingsDocumentId
+            ? null
+            : settingsDocumentId,
+      );
 
       if (!mounted) return;
       setState(() {
         _businessProfile = profile.copyWith(
-          settingsDocumentId: settingsDocumentId,
+          settingsDocumentId: _asString(
+            savedSettings['id'],
+            settingsDocumentId,
+          ),
         );
       });
 
@@ -597,11 +541,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
-    } on FirebaseException catch (e) {
+    } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to save business settings: ${e.code}'),
+          content: Text('Unable to save business settings: $e'),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -632,6 +576,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         child: isTablet
             ? _TabletLayout(
                 profile: _businessProfile,
+                email: _currentUserEmail,
                 role: _currentUserRole,
                 isLoadingSettings: _isLoadingBusinessSettings,
                 dashboardData: _dashboardData,
@@ -642,6 +587,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               )
             : _PhoneLayout(
                 profile: _businessProfile,
+                email: _currentUserEmail,
                 role: _currentUserRole,
                 isLoadingSettings: _isLoadingBusinessSettings,
                 dashboardData: _dashboardData,
@@ -660,6 +606,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 // ─────────────────────────────────────────────────────────────────────────────
 class _TabletLayout extends StatelessWidget {
   final _BusinessProfile profile;
+  final String email;
   final String role;
   final bool isLoadingSettings;
   final _DashboardData dashboardData;
@@ -670,6 +617,7 @@ class _TabletLayout extends StatelessWidget {
 
   const _TabletLayout({
     required this.profile,
+    required this.email,
     required this.role,
     required this.isLoadingSettings,
     required this.dashboardData,
@@ -686,6 +634,7 @@ class _TabletLayout extends StatelessWidget {
         // ── Top bar ────────────────────────────────────────────
         _TabletTopBar(
           profile: profile,
+          email: email,
           role: role,
           isLoadingSettings: isLoadingSettings,
           transactions: dashboardData.recentTransactions,
@@ -826,6 +775,7 @@ class _TabletLayout extends StatelessWidget {
 
 class _TabletTopBar extends StatelessWidget {
   final _BusinessProfile profile;
+  final String email;
   final String role;
   final bool isLoadingSettings;
   final List<_TransactionSummary> transactions;
@@ -833,6 +783,7 @@ class _TabletTopBar extends StatelessWidget {
 
   const _TabletTopBar({
     required this.profile,
+    required this.email,
     required this.role,
     required this.isLoadingSettings,
     required this.transactions,
@@ -842,7 +793,8 @@ class _TabletTopBar extends StatelessWidget {
   void _openBusinessProfile(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (context) => _BusinessProfileDialog(profile: profile),
+      builder: (context) =>
+          _BusinessProfileDialog(profile: profile, email: email),
     );
   }
 
@@ -1267,6 +1219,7 @@ class _TabletOtherCard extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────────────────
 class _PhoneLayout extends StatelessWidget {
   final _BusinessProfile profile;
+  final String email;
   final String role;
   final bool isLoadingSettings;
   final _DashboardData dashboardData;
@@ -1277,6 +1230,7 @@ class _PhoneLayout extends StatelessWidget {
 
   const _PhoneLayout({
     required this.profile,
+    required this.email,
     required this.role,
     required this.isLoadingSettings,
     required this.dashboardData,
@@ -1295,6 +1249,7 @@ class _PhoneLayout extends StatelessWidget {
           // ── Top bar ──────────────────────────────────────────
           _PhoneTopBar(
             profile: profile,
+            email: email,
             role: role,
             isLoadingSettings: isLoadingSettings,
             transactions: dashboardData.recentTransactions,
@@ -1449,6 +1404,7 @@ class _PhoneLayout extends StatelessWidget {
 
 class _PhoneTopBar extends StatelessWidget {
   final _BusinessProfile profile;
+  final String email;
   final String role;
   final bool isLoadingSettings;
   final List<_TransactionSummary> transactions;
@@ -1456,6 +1412,7 @@ class _PhoneTopBar extends StatelessWidget {
 
   const _PhoneTopBar({
     required this.profile,
+    required this.email,
     required this.role,
     required this.isLoadingSettings,
     required this.transactions,
@@ -1465,7 +1422,8 @@ class _PhoneTopBar extends StatelessWidget {
   void _openBusinessProfile(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (context) => _BusinessProfileDialog(profile: profile),
+      builder: (context) =>
+          _BusinessProfileDialog(profile: profile, email: email),
     );
   }
 
@@ -2069,13 +2027,12 @@ class _DashboardErrorBanner extends StatelessWidget {
 
 class _BusinessProfileDialog extends StatelessWidget {
   final _BusinessProfile profile;
+  final String email;
 
-  const _BusinessProfileDialog({required this.profile});
+  const _BusinessProfileDialog({required this.profile, required this.email});
 
   @override
   Widget build(BuildContext context) {
-    final email = FirebaseAuth.instance.currentUser?.email ?? 'No email';
-
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
@@ -2558,6 +2515,19 @@ class _TransactionTile extends StatelessWidget {
                     color: Color(0xFF5F6B7A),
                   ),
                 ),
+                if (transaction.therapistName != '-') ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    'By ${transaction.therapistName}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: Color(0xFF5F6B7A),
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
                 const SizedBox(height: 12),
                 Text(
                   '${transaction.date}  -  ${transaction.time}',
@@ -2639,6 +2609,7 @@ class _BusinessSettingsDialog extends StatefulWidget {
 }
 
 class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
+  final _authRepository = AuthRepository();
   late final TextEditingController _nameController;
   late final TextEditingController _locationController;
 
@@ -2697,9 +2668,20 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
 
     if (shouldSignOut != true || !mounted) return;
 
-    await FirebaseAuth.instance.signOut();
-    if (!mounted) return;
-    Navigator.of(context, rootNavigator: true).pop();
+    try {
+      await _authRepository.signOut();
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+    } on AuthRepositoryException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.message),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
   }
 
   @override

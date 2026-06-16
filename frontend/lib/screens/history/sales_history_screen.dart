@@ -1,6 +1,8 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+
+import '../../data/repositories/dashboard_repository.dart';
+import '../../data/repositories/transaction_repository.dart';
 
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF1A1A2E);
@@ -12,7 +14,8 @@ DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
-  return value.toString();
+  final text = value.toString();
+  return text.trim().isEmpty ? fallback : text;
 }
 
 double _asDouble(Object? value, [double fallback = 0]) {
@@ -29,7 +32,6 @@ int _asInt(Object? value, [int fallback = 0]) {
 }
 
 DateTime _asDateTime(Object? value) {
-  if (value is Timestamp) return value.toDate();
   if (value is DateTime) return value;
   if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
   return DateTime.now();
@@ -45,6 +47,8 @@ class SalesHistoryScreen extends StatefulWidget {
 }
 
 class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
+  final _dashboardRepository = DashboardRepository();
+  final _transactionRepository = TransactionRepository();
   DateTime _selectedDate = _stripDate(DateTime.now());
   List<_HistoryOrder> _orders = [];
   _HistorySummary _summary = _HistorySummary.empty;
@@ -65,17 +69,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     String collection,
     Iterable<String> ids,
   ) async {
-    final uniqueIds = ids.where((id) => id.trim().isNotEmpty).toSet();
-    final entries = await Future.wait(
-      uniqueIds.map((id) async {
-        final doc = await FirebaseFirestore.instance
-            .collection(collection)
-            .doc(id)
-            .get();
-        return MapEntry(id, doc.data() ?? <String, dynamic>{});
-      }),
-    );
-    return {for (final entry in entries) entry.key: entry.value};
+    return _dashboardRepository.loadByIds(collection, ids);
   }
 
   Future<void> _loadHistory() async {
@@ -86,24 +80,16 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     });
 
     try {
-      final dayStart = _stripDate(_selectedDate);
-      final dayEnd = dayStart.add(const Duration(days: 1));
-      final transactionSnap = await FirebaseFirestore.instance
-          .collection('transactions')
-          .where(
-            'createdAt',
-            isGreaterThanOrEqualTo: Timestamp.fromDate(dayStart),
-          )
-          .where('createdAt', isLessThan: Timestamp.fromDate(dayEnd))
-          .orderBy('createdAt', descending: true)
-          .get();
+      final transactionRows = await _transactionRepository.getSalesHistory(
+        _selectedDate,
+      );
 
-      final transactionDocs = transactionSnap.docs.where((doc) {
-        final status = _asString(doc.data()['paymentStatus']).toLowerCase();
+      final transactionDocs = transactionRows.where((row) {
+        final status = _asString(row['paymentStatus']).toLowerCase();
         return status.isEmpty || status == 'paid';
       }).toList();
 
-      final transactionData = [for (final doc in transactionDocs) doc.data()];
+      final transactionData = transactionDocs;
       final appointmentIds = transactionData
           .map((d) => _asString(d['appointmentId']))
           .where((id) => id.isNotEmpty);
@@ -115,15 +101,18 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       final linkedCustomerIds = appointments.values
           .map((d) => _asString(d['customerId']))
           .where((id) => id.isNotEmpty);
-      final serviceIds = appointments.values
-          .map((d) => _asString(d['serviceId']))
-          .where((id) => id.isNotEmpty);
-      final therapistIds = appointments.values
-          .map((d) => _asString(d['therapistId']))
-          .where((id) => id.isNotEmpty);
-      final roomIds = appointments.values
-          .map((d) => _asString(d['roomId']))
-          .where((id) => id.isNotEmpty);
+      final serviceIds = [
+        ...transactionData.map((d) => _asString(d['serviceId'])),
+        ...appointments.values.map((d) => _asString(d['serviceId'])),
+      ].where((id) => id.isNotEmpty);
+      final therapistIds = [
+        ...transactionData.map((d) => _asString(d['therapistId'])),
+        ...appointments.values.map((d) => _asString(d['therapistId'])),
+      ].where((id) => id.isNotEmpty);
+      final roomIds = [
+        ...transactionData.map((d) => _asString(d['roomId'])),
+        ...appointments.values.map((d) => _asString(d['roomId'])),
+      ].where((id) => id.isNotEmpty);
 
       final customers = await _loadDocMap('customers', [
         ...customerIds,
@@ -135,8 +124,8 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
       final orders = transactionDocs
           .map(
-            (doc) => _HistoryOrder.fromTransaction(
-              doc,
+            (transaction) => _HistoryOrder.fromTransaction(
+              transaction,
               appointments: appointments,
               customers: customers,
               services: services,
@@ -199,7 +188,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isTablet = MediaQuery.of(context).size.width >= 760;
+    final isTablet = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
       backgroundColor: _page,
       body: SafeArea(
@@ -325,6 +314,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 class _HistoryOrder {
   final String id;
   final String receiptNumber;
+  final String appointmentId;
   final String customerId;
   final String customerName;
   final String customerPhone;
@@ -341,6 +331,7 @@ class _HistoryOrder {
   const _HistoryOrder({
     required this.id,
     required this.receiptNumber,
+    required this.appointmentId,
     required this.customerId,
     required this.customerName,
     required this.customerPhone,
@@ -356,34 +347,44 @@ class _HistoryOrder {
   });
 
   factory _HistoryOrder.fromTransaction(
-    QueryDocumentSnapshot<Map<String, dynamic>> doc, {
+    Map<String, dynamic> tx, {
     required Map<String, Map<String, dynamic>> appointments,
     required Map<String, Map<String, dynamic>> customers,
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
   }) {
-    final tx = doc.data();
-    final appointment = appointments[_asString(tx['appointmentId'])] ?? {};
+    final appointmentId = _asString(tx['appointmentId']);
+    final appointment = appointments[appointmentId] ?? {};
     final customerId = _asString(tx['customerId']).isNotEmpty
         ? _asString(tx['customerId'])
         : _asString(appointment['customerId']);
     final customer = customers[customerId] ?? {};
-    final service = services[_asString(appointment['serviceId'])] ?? {};
-    final therapist = therapists[_asString(appointment['therapistId'])] ?? {};
-    final room = rooms[_asString(appointment['roomId'])] ?? {};
+    final serviceId = _asString(tx['serviceId']).isNotEmpty
+        ? _asString(tx['serviceId'])
+        : _asString(appointment['serviceId']);
+    final therapistId = _asString(tx['therapistId']).isNotEmpty
+        ? _asString(tx['therapistId'])
+        : _asString(appointment['therapistId']);
+    final roomId = _asString(tx['roomId']).isNotEmpty
+        ? _asString(tx['roomId'])
+        : _asString(appointment['roomId']);
+    final service = services[serviceId] ?? {};
+    final therapist = therapists[therapistId] ?? {};
+    final room = rooms[roomId] ?? {};
     final rawItems = tx['items'];
     final itemCount = rawItems is List
         ? rawItems.length
         : _asInt(tx['itemCount'], 1);
 
     return _HistoryOrder(
-      id: doc.id,
-      receiptNumber: _asString(tx['receiptNumber'], doc.id),
+      id: _asString(tx['id']),
+      receiptNumber: _asString(tx['receiptNumber'], _asString(tx['id'])),
+      appointmentId: appointmentId,
       customerId: customerId,
       customerName: _asString(
         tx['customerName'],
-        _asString(customer['name'], 'Walk-in Guest'),
+        _asString(customer['name'], 'Guest'),
       ),
       customerPhone: _asString(
         tx['customerPhone'],
@@ -393,8 +394,11 @@ class _HistoryOrder {
         tx['serviceName'],
         _asString(service['name'], 'Service'),
       ),
-      therapistName: _asString(therapist['name'], '-'),
-      roomName: _asString(room['name'], '-'),
+      therapistName: _asString(
+        tx['therapistName'],
+        _asString(therapist['name'], '-'),
+      ),
+      roomName: _asString(tx['roomName'], _asString(room['name'], '-')),
       paymentMethod: _asString(tx['paymentMethod'], 'unknown'),
       itemCount: itemCount <= 0 ? 1 : itemCount,
       servicePrice: _asDouble(
@@ -409,6 +413,8 @@ class _HistoryOrder {
       createdAt: _asDateTime(tx['createdAt']),
     );
   }
+
+  bool get isAppointmentBooking => appointmentId.isNotEmpty;
 
   String get paymentLabel {
     switch (paymentMethod) {
@@ -1473,6 +1479,8 @@ class _OrderDetailSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
+            if (order.isAppointmentBooking)
+              const _DetailRow('Source', 'Appointment booking'),
             _DetailRow('Customer', order.customerName),
             _DetailRow('Phone', order.customerPhone),
             _DetailRow('Service', order.serviceName),
