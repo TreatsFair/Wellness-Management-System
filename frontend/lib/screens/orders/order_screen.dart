@@ -1,7 +1,8 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -25,6 +26,8 @@ class _WalkInService {
   final String id, name, imageUrl, roomType, category;
   final int duration;
   final double price;
+  final double therapistCommission;
+  final double counterCommission;
 
   const _WalkInService({
     required this.id,
@@ -34,6 +37,8 @@ class _WalkInService {
     required this.category,
     required this.duration,
     required this.price,
+    required this.therapistCommission,
+    required this.counterCommission,
   });
 
   factory _WalkInService.fromMap(Map<String, dynamic> d) {
@@ -45,6 +50,8 @@ class _WalkInService {
       category: d['category']?.toString().trim() ?? 'Services',
       duration: _parseInt(d['duration'], fallback: 60),
       price: _parseDouble(d['price']),
+      therapistCommission: _parseDouble(d['therapistCommission']),
+      counterCommission: _parseDouble(d['counterCommission']),
     );
   }
 
@@ -74,6 +81,7 @@ class _WalkInTherapist {
   final bool isFree;
   final String busyUntil;
   final int freeInMinutes;
+  final Map<String, double> serviceCommissions;
 
   const _WalkInTherapist({
     required this.id,
@@ -81,6 +89,7 @@ class _WalkInTherapist {
     required this.isFree,
     required this.busyUntil,
     required this.freeInMinutes,
+    required this.serviceCommissions,
   });
 
   factory _WalkInTherapist.fromMap(
@@ -95,8 +104,15 @@ class _WalkInTherapist {
       isFree: isFree,
       busyUntil: busyUntil,
       freeInMinutes: freeInMinutes,
+      serviceCommissions: _commissionMap(d['serviceCommissions']),
     );
   }
+
+  Map<String, dynamic> get commissionData => {
+    'id': id,
+    'name': name,
+    'serviceCommissions': serviceCommissions,
+  };
 
   String get initials {
     final p = name.trim().split(' ');
@@ -118,6 +134,15 @@ class _WalkInTherapist {
     ];
     return colors[name.length % colors.length];
   }
+}
+
+Map<String, double> _commissionMap(Object? value) {
+  if (value is! Map) return {};
+  final result = <String, double>{};
+  value.forEach((key, item) {
+    result[key.toString()] = _WalkInService._parseDouble(item);
+  });
+  return result;
 }
 
 class _WalkInZone {
@@ -189,13 +214,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
   final _transactionRepository = TransactionRepository();
+  final _commissionRepository = CommissionRepository();
 
   // Step tracking
   bool _showPayment = false;
 
   // Selections
   _WalkInCustomer? _selectedCustomer;
-  _WalkInService? _selectedService;
+  final List<_WalkInService> _selectedServices = [];
   _WalkInTherapist? _selectedTherapist;
   _WalkInZone? _selectedZone;
   _StartTimeOption? _selectedStartTime;
@@ -447,7 +473,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   void _computeStartOptions() {
     if (_selectedTherapist == null ||
         _selectedZone == null ||
-        _selectedService == null) {
+        _selectedServices.isEmpty) {
       return;
     }
 
@@ -500,7 +526,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   void _onServiceSelected(_WalkInService s) {
     setState(() {
-      _selectedService = s;
+      final existingIndex = _selectedServices.indexWhere(
+        (service) => service.id == s.id,
+      );
+      if (existingIndex == -1) {
+        _selectedServices.add(s);
+      } else {
+        _selectedServices.removeAt(existingIndex);
+      }
       _selectedTherapist = null;
       _selectedZone = null;
       _selectedStartTime = null;
@@ -520,13 +553,51 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   // ── Computed Values ────────────────────────────────────────────
 
-  double get _servicePrice => _selectedService?.price ?? 0;
+  _WalkInService? get _primaryService =>
+      _selectedServices.isEmpty ? null : _selectedServices.first;
+
+  double get _servicePrice =>
+      _selectedServices.fold(0, (total, service) => total + service.price);
+
+  int get _serviceDuration => _selectedServices.fold(
+    0,
+    (total, service) => total + service.duration,
+  );
+
+  String get _serviceNameSummary {
+    if (_selectedServices.isEmpty) return '';
+    if (_selectedServices.length == 1) return _selectedServices.first.name;
+    return _selectedServices.map((service) => service.name).join(', ');
+  }
+
+  List<Map<String, dynamic>> get _serviceItems => _selectedServices
+      .map(
+        (service) => {
+          'id': service.id,
+          'name': service.name,
+          'category': service.category,
+          'duration': service.duration,
+          'price': service.price,
+          'therapistCommission': service.therapistCommission,
+          'counterCommission': service.counterCommission,
+        },
+      )
+      .toList();
+
+  String get _requiredRoomType {
+    final types = _selectedServices
+        .map((service) => service.roomType)
+        .where((type) => type.isNotEmpty)
+        .toSet();
+    return types.length == 1 ? types.first : '';
+  }
+
   double get _sstAmount => _servicePrice * 0.06;
   double get _totalAmount => _servicePrice + _sstAmount;
 
   bool get _canCheckout =>
       _selectedCustomer != null &&
-      _selectedService != null &&
+      _selectedServices.isNotEmpty &&
       _selectedTherapist != null &&
       _selectedZone != null &&
       _selectedStartTime != null;
@@ -540,19 +611,42 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     setState(() => _isConfirming = true);
 
     try {
+      final counterStaff = await _commissionRepository.getAvailableCounterStaff();
+      final therapistCommissionAmount =
+          CommissionRepository.commissionForServices(
+            _serviceItems,
+            staff: _selectedTherapist!.commissionData,
+            role: 'Therapist',
+          );
+      final counterCommissionAmount = counterStaff == null
+          ? 0.0
+          : CommissionRepository.commissionForServices(
+              _serviceItems,
+              staff: counterStaff,
+              role: 'Counter',
+            );
+
       await _transactionRepository.createTransaction({
         'customerId': _selectedCustomer!.id,
         'customerName': _selectedCustomer!.name,
         'customerPhone': _selectedCustomer!.phone,
-        'serviceId': _selectedService!.id,
-        'serviceName': _selectedService!.name,
+        'serviceId': _primaryService!.id,
+        'serviceName': _serviceNameSummary,
+        'serviceItems': _serviceItems,
+        'itemCount': _selectedServices.length,
         'therapistId': _selectedTherapist!.id,
         'therapistName': _selectedTherapist!.name,
+        if (counterStaff != null) ...{
+          'counterStaffId': counterStaff['id'],
+          'counterStaffName': counterStaff['name'],
+        },
         'roomId': _selectedZone!.id,
         'roomName': _selectedZone!.name,
         'servicePrice': _servicePrice,
         'sstAmount': _sstAmount,
         'totalAmount': _totalAmount,
+        'therapistCommissionAmount': therapistCommissionAmount,
+        'counterCommissionAmount': counterCommissionAmount,
         'paymentMethod': _paymentMethod,
         'paymentStatus': 'paid',
         'receiptNumber': _receiptNumber,
@@ -732,7 +826,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 bottom: 0,
                 child: _PhoneCheckoutBar(
                   customerName: _selectedCustomer?.name,
-                  serviceName: _selectedService?.name,
+                  serviceName: _selectedServices.isEmpty
+                      ? null
+                      : _serviceNameSummary,
                   totalAmount: _totalAmount,
                   canCheckout: _canCheckout,
                   onCheckout: () => setState(() => _showPayment = true),
@@ -972,9 +1068,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         ],
         LayoutBuilder(
           builder: (context, constraints) {
-            final columns = constraints.maxWidth >= 820
+            final columns = constraints.maxWidth >= 600
                 ? 3
-                : constraints.maxWidth >= 520
+                : constraints.maxWidth >= 430
                 ? 2
                 : 1;
             return GridView.builder(
@@ -984,12 +1080,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 crossAxisCount: columns,
                 crossAxisSpacing: 10,
                 mainAxisSpacing: 10,
-                childAspectRatio: columns == 1 ? 3.4 : 2.2,
+                childAspectRatio: columns == 1 ? 4.2 : 2.6,
               ),
               itemCount: filtered.length,
               itemBuilder: (_, i) => _WalkInServiceCard(
                 service: filtered[i],
-                isSelected: _selectedService?.id == filtered[i].id,
+                isSelected: _selectedServices.any(
+                  (service) => service.id == filtered[i].id,
+                ),
                 onTap: () => _onServiceSelected(filtered[i]),
               ),
             );
@@ -1002,10 +1100,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Widget _buildAvailabilitySection() {
     final compatibleZones = _zones
         .where(
-          (z) =>
-              _selectedService == null ||
-              _selectedService!.roomType.isEmpty ||
-              z.type == _selectedService!.roomType,
+          (z) => _requiredRoomType.isEmpty || z.type == _requiredRoomType,
         )
         .toList();
 
@@ -1198,12 +1293,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           ),
           _WalkInSummaryRow(
             label: 'Service',
-            value: _selectedService?.name ?? '—',
+            value: _selectedServices.isEmpty ? '-' : _serviceNameSummary,
           ),
           _WalkInSummaryRow(
             label: 'Duration',
-            value: _selectedService != null
-                ? '${_selectedService!.duration} min'
+            value: _selectedServices.isNotEmpty
+                ? '$_serviceDuration min'
                 : '—',
           ),
           _WalkInSummaryRow(
@@ -1218,7 +1313,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           _WalkInSummaryRow(label: 'Zone', value: _selectedZone?.name ?? '—'),
           _WalkInSummaryRow(label: 'Start Time', value: startLabel),
 
-          if (_selectedService != null) ...[
+          if (_selectedServices.isNotEmpty) ...[
             const SizedBox(height: 8),
             const Divider(color: Color(0xFFEEEEEE)),
             const SizedBox(height: 12),
@@ -1424,7 +1519,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                       children: [
                         Expanded(
                           child: Text(
-                            '${_selectedCustomer?.name ?? 'Guest'} - ${_selectedService?.name ?? ''}',
+                            '${_selectedCustomer?.name ?? 'Guest'} - ${_selectedServices.isEmpty ? '-' : _serviceNameSummary}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1445,7 +1540,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
-                            '${_selectedService?.duration ?? 0} min',
+                            '$_serviceDuration min',
                             style: const TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
@@ -2685,31 +2780,13 @@ class _WalkInServiceCard extends StatelessWidget {
     required this.onTap,
   });
 
-  Color get _chipBg => service.roomType == 'body_room'
-      ? const Color(0xFFEDE7F6)
-      : service.roomType.isEmpty
-      ? const Color(0xFFE8F5F5)
-      : const Color(0xFFFFF9E6);
-
-  Color get _chipColor => service.roomType == 'body_room'
-      ? const Color(0xFF7C3AED)
-      : service.roomType.isEmpty
-      ? const Color(0xFF1B6B72)
-      : const Color(0xFFC8963E);
-
-  String get _chipLabel => service.roomType == 'body_room'
-      ? 'Body Room'
-      : service.roomType.isEmpty
-      ? 'Any Room'
-      : 'Foot Chair';
-
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
           borderRadius: BorderRadius.circular(12),
@@ -2732,8 +2809,8 @@ class _WalkInServiceCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                _WalkInServiceImage(imageUrl: service.imageUrl, size: 58),
-                const SizedBox(width: 12),
+                _WalkInServiceImage(imageUrl: service.imageUrl, size: 44),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -2749,7 +2826,7 @@ class _WalkInServiceCard extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       Wrap(
                         spacing: 6,
                         runSpacing: 6,
@@ -2763,11 +2840,6 @@ class _WalkInServiceCard extends StatelessWidget {
                             label: 'RM ${service.price.toStringAsFixed(0)}',
                             bg: const Color(0xFFF5F5F5),
                             color: const Color(0xFF6B6B6B),
-                          ),
-                          _SmallBadge2(
-                            label: _chipLabel,
-                            bg: _chipBg,
-                            color: _chipColor,
                           ),
                         ],
                       ),

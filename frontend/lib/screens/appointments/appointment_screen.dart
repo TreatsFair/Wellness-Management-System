@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../booking/booking_screen.dart';
 
@@ -44,6 +45,13 @@ double _readDouble(Object? value) {
   return 0;
 }
 
+int _readInt(Object? value, [int fallback = 0]) {
+  if (value is int) return value;
+  if (value is num) return value.round();
+  if (value is String) return int.tryParse(value) ?? fallback;
+  return fallback;
+}
+
 String _generateReceiptNumber() {
   final now = DateTime.now();
   return 'TXN-${DateFormat('yyyyMMdd').format(now)}-'
@@ -60,12 +68,16 @@ class _ScheduleAppointment {
   final String status;
   final String customerName;
   final String customerPhone;
+  final String serviceId;
   final String serviceName;
   final String serviceDescription;
+  final String therapistId;
   final String therapistName;
   final String roomName;
   final String notes;
   final double price;
+  final List<Map<String, dynamic>> serviceItems;
+  final Map<String, dynamic> therapistCommissionData;
 
   const _ScheduleAppointment({
     required this.id,
@@ -77,12 +89,16 @@ class _ScheduleAppointment {
     required this.status,
     required this.customerName,
     required this.customerPhone,
+    required this.serviceId,
     required this.serviceName,
     required this.serviceDescription,
+    required this.therapistId,
     required this.therapistName,
     required this.roomName,
     required this.notes,
     required this.price,
+    required this.serviceItems,
+    required this.therapistCommissionData,
   });
 
   factory _ScheduleAppointment.fromMap(
@@ -94,8 +110,10 @@ class _ScheduleAppointment {
   }) {
     final customerId = data['customerId']?.toString() ?? '';
     final customer = customers[customerId];
-    final service = services[data['serviceId']?.toString() ?? ''];
-    final therapist = therapists[data['therapistId']?.toString() ?? ''];
+    final serviceId = data['serviceId']?.toString() ?? '';
+    final therapistId = data['therapistId']?.toString() ?? '';
+    final service = services[serviceId];
+    final therapist = therapists[therapistId];
     final room = rooms[data['roomId']?.toString() ?? ''];
     final dateKey = _readDateKey(data['date']);
     final isGuestCustomer =
@@ -120,6 +138,7 @@ class _ScheduleAppointment {
           data['customerPhone']?.toString() ??
           customer?['phone']?.toString() ??
           '-',
+      serviceId: serviceId,
       serviceName:
           data['serviceName']?.toString() ??
           service?['name']?.toString() ??
@@ -128,6 +147,7 @@ class _ScheduleAppointment {
           data['serviceDescription']?.toString() ??
           service?['description']?.toString() ??
           'Wellness treatment',
+      therapistId: therapistId,
       therapistName:
           data['therapistName']?.toString() ??
           therapist?['name']?.toString() ??
@@ -136,7 +156,69 @@ class _ScheduleAppointment {
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
       notes: data['notes']?.toString() ?? '',
       price: _readDouble(data['totalPrice'] ?? data['price']),
+      serviceItems: _readServiceItems(
+        data['serviceItems'],
+        serviceId: serviceId,
+        serviceName:
+            data['serviceName']?.toString() ??
+            service?['name']?.toString() ??
+            'Service',
+        service: service,
+        fallbackPrice: _readDouble(data['totalPrice'] ?? data['price']),
+      ),
+      therapistCommissionData: {
+        'id': therapistId,
+        'name': therapist?['name'],
+        'serviceCommissions': therapist?['serviceCommissions'],
+      },
     );
+  }
+
+  static List<Map<String, dynamic>> _readServiceItems(
+    Object? value, {
+    required String serviceId,
+    required String serviceName,
+    required Map<String, dynamic>? service,
+    required double fallbackPrice,
+  }) {
+    if (value is List && value.isNotEmpty) {
+      return value.whereType<Map>().map((item) {
+        final data = Map<String, dynamic>.from(item);
+        final itemId = data['id']?.toString() ?? data['serviceId']?.toString() ?? '';
+        final linkedService = itemId == serviceId ? service : null;
+        return {
+          ...data,
+          'id': itemId,
+          'name':
+              data['name']?.toString() ??
+              linkedService?['name']?.toString() ??
+              serviceName,
+          'duration': _readInt(
+            data['duration'] ?? linkedService?['duration'],
+            60,
+          ),
+          'price': _readDouble(data['price'] ?? linkedService?['price']),
+          'therapistCommission': _readDouble(
+            data['therapistCommission'] ??
+                linkedService?['therapistCommission'],
+          ),
+          'counterCommission': _readDouble(
+            data['counterCommission'] ?? linkedService?['counterCommission'],
+          ),
+        };
+      }).toList();
+    }
+
+    return [
+      {
+        'id': serviceId,
+        'name': serviceName,
+        'duration': _readInt(service?['duration'], 60),
+        'price': fallbackPrice > 0 ? fallbackPrice : _readDouble(service?['price']),
+        'therapistCommission': _readDouble(service?['therapistCommission']),
+        'counterCommission': _readDouble(service?['counterCommission']),
+      },
+    ];
   }
 
   static String _readDateKey(Object? value) {
@@ -2640,6 +2722,7 @@ class _AppointmentCheckoutSheet extends StatefulWidget {
 
 class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   final _appointmentRepository = AppointmentRepository();
+  final _commissionRepository = CommissionRepository();
   late final TextEditingController _name;
   late final TextEditingController _phone;
   late final String _receiptNumber;
@@ -2716,6 +2799,20 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     try {
       var customerId = widget.appointment.customerId;
       final customerName = _resolvedCustomerName();
+      final counterStaff = await _commissionRepository.getAvailableCounterStaff();
+      final therapistCommissionAmount =
+          CommissionRepository.commissionForServices(
+            widget.appointment.serviceItems,
+            staff: widget.appointment.therapistCommissionData,
+            role: 'Therapist',
+          );
+      final counterCommissionAmount = counterStaff == null
+          ? 0.0
+          : CommissionRepository.commissionForServices(
+              widget.appointment.serviceItems,
+              staff: counterStaff,
+              role: 'Counter',
+            );
       final shouldSaveCustomerProfile =
           widget.appointment.isGuestAccount &&
           _saveCustomerProfile &&
@@ -2741,16 +2838,25 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
           'customerPhone': _phone.text.trim().isNotEmpty
               ? _phone.text.trim()
               : widget.appointment.customerPhone,
+          'serviceId': widget.appointment.serviceId,
           'serviceName': widget.appointment.serviceName,
+          'serviceItems': widget.appointment.serviceItems,
+          'itemCount': widget.appointment.serviceItems.length,
+          'therapistId': widget.appointment.therapistId,
           'therapistName': widget.appointment.therapistName,
+          if (counterStaff != null) ...{
+            'counterStaffId': counterStaff['id'],
+            'counterStaffName': counterStaff['name'],
+          },
           'roomName': widget.appointment.roomName,
           'servicePrice': _servicePrice,
           'sstAmount': _sstAmount,
           'totalAmount': _totalAmount,
+          'therapistCommissionAmount': therapistCommissionAmount,
+          'counterCommissionAmount': counterCommissionAmount,
           'paymentMethod': _paymentMethod,
           'paymentStatus': 'paid',
           'receiptNumber': _receiptNumber,
-          'itemCount': 1,
         },
       );
 

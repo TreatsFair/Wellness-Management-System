@@ -18,7 +18,21 @@ class TherapistRepository {
 
   Future<List<Map<String, dynamic>>> getActiveTherapists() async {
     final rows = await getTherapists();
-    return rows.where(isActiveRow).toList();
+    return rows.where((row) => isActiveRow(row) && _isTherapistRole(row)).toList();
+  }
+
+  Future<Map<String, dynamic>?> getAvailableCounterStaff() async {
+    final rows = await getTherapists();
+    final availableCounters = rows
+        .where(
+          (row) =>
+              isActiveRow(row) &&
+              _isCounterRole(row) &&
+              asBool(row['availabilityStatus'], true),
+        )
+        .toList();
+    if (availableCounters.isEmpty) return null;
+    return availableCounters.first;
   }
 
   Future<Map<String, dynamic>?> getTherapist(String id) => _table.getById(id);
@@ -56,4 +70,15 @@ class TherapistRepository {
       'completedAppointments': completed,
     };
   }
+}
+
+bool _isTherapistRole(Map<String, dynamic> row) {
+  final role = asString(row['role'], asString(row['staffRole'])).toLowerCase();
+  if (role.isEmpty) return true;
+  return role == 'therapist';
+}
+
+bool _isCounterRole(Map<String, dynamic> row) {
+  final role = asString(row['role'], asString(row['staffRole'])).toLowerCase();
+  return role == 'counter' || role == 'cashier';
 }

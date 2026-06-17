@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/repositories/appointment_repository.dart';
@@ -24,6 +24,8 @@ class _Service {
   final String id, name, imageUrl, roomType, category;
   final int duration;
   final double price;
+  final double therapistCommission;
+  final double counterCommission;
 
   const _Service({
     required this.id,
@@ -33,6 +35,8 @@ class _Service {
     required this.category,
     required this.duration,
     required this.price,
+    required this.therapistCommission,
+    required this.counterCommission,
   });
 
   factory _Service.fromMap(Map<String, dynamic> d) {
@@ -44,6 +48,8 @@ class _Service {
       category: d['category']?.toString().trim() ?? 'Services',
       duration: _parseInt(d['duration'], fallback: 60),
       price: _parseDouble(d['price']),
+      therapistCommission: _parseDouble(d['therapistCommission']),
+      counterCommission: _parseDouble(d['counterCommission']),
     );
   }
 
@@ -186,7 +192,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   // State
   DateTime _selectedDate = DateTime.now();
   _Customer? _selectedCustomer;
-  _Service? _selectedService;
+  final List<_Service> _selectedServices = [];
   _Therapist? _selectedTherapist;
   _RoomZone? _selectedRoom;
   _TimeSlot? _selectedSlot;
@@ -380,7 +386,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   // ── CSP — Slot Generation ──────────────────────────────────────
 
   Future<void> _generateSlots() async {
-    if (_selectedService == null) return;
+    if (_selectedServices.isEmpty) return;
     if (_selectedTherapist == null) return;
     if (_selectedRoom == null) return;
 
@@ -388,7 +394,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       setState(() => _loadingSlots = true);
     }
 
-    final duration = _selectedService!.duration;
+    final duration = _serviceDuration;
 
     try {
       final open = _openHour * 60;
@@ -432,7 +438,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   void _onServiceSelected(_Service s) {
     setState(() {
-      _selectedService = s;
+      final existingIndex = _selectedServices.indexWhere(
+        (service) => service.id == s.id,
+      );
+      if (existingIndex == -1) {
+        _selectedServices.add(s);
+      } else {
+        _selectedServices.removeAt(existingIndex);
+      }
       _selectedTherapist = null;
       _selectedRoom = null;
       _selectedSlot = null;
@@ -448,7 +461,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _slots = [];
       _loadingSlots = false;
     });
-    if (_selectedService != null && _selectedRoom != null) _generateSlots();
+    if (_selectedServices.isNotEmpty && _selectedRoom != null) _generateSlots();
   }
 
   void _onRoomSelected(_RoomZone r) {
@@ -458,7 +471,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _slots = [];
       _loadingSlots = false;
     });
-    if (_selectedService != null && _selectedTherapist != null) {
+    if (_selectedServices.isNotEmpty && _selectedTherapist != null) {
       _generateSlots();
     }
   }
@@ -471,11 +484,50 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _loadingSlots = false;
     });
     _loadRooms();
-    if (_selectedService != null &&
+    if (_selectedServices.isNotEmpty &&
         _selectedTherapist != null &&
         _selectedRoom != null) {
       _generateSlots();
     }
+  }
+
+  _Service? get _primaryService =>
+      _selectedServices.isEmpty ? null : _selectedServices.first;
+
+  int get _serviceDuration => _selectedServices.fold(
+    0,
+    (total, service) => total + service.duration,
+  );
+
+  double get _servicePrice =>
+      _selectedServices.fold(0, (total, service) => total + service.price);
+
+  String get _serviceNameSummary {
+    if (_selectedServices.isEmpty) return '';
+    if (_selectedServices.length == 1) return _selectedServices.first.name;
+    return _selectedServices.map((service) => service.name).join(', ');
+  }
+
+  List<Map<String, dynamic>> get _serviceItems => _selectedServices
+      .map(
+        (service) => {
+          'id': service.id,
+          'name': service.name,
+          'category': service.category,
+          'duration': service.duration,
+          'price': service.price,
+          'therapistCommission': service.therapistCommission,
+          'counterCommission': service.counterCommission,
+        },
+      )
+      .toList();
+
+  String get _requiredRoomType {
+    final types = _selectedServices
+        .map((service) => service.roomType)
+        .where((type) => type.isNotEmpty)
+        .toSet();
+    return types.length == 1 ? types.first : '';
   }
 
   void _onDateChanged(int days) {
@@ -495,14 +547,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   bool get _canConfirm =>
       _selectedCustomer != null &&
-      _selectedService != null &&
+      _selectedServices.isNotEmpty &&
       _selectedTherapist != null &&
       _selectedRoom != null &&
       _selectedSlot != null;
 
   List<String> get _missingSlotRequirements {
     final missing = <String>[];
-    if (_selectedService == null) missing.add('service');
+    if (_selectedServices.isEmpty) missing.add('service');
     if (_selectedTherapist == null) missing.add('therapist');
     if (_selectedRoom == null) missing.add('room');
     return missing;
@@ -515,7 +567,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     try {
       final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
       final endTime = _minutesToTime(
-        _timeToMinutes(_selectedSlot!.start) + _selectedService!.duration,
+        _timeToMinutes(_selectedSlot!.start) + _serviceDuration,
       );
 
       final slotStart = _timeToMinutes(_selectedSlot!.start);
@@ -537,12 +589,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         'customerId': _selectedCustomer!.id,
         'therapistId': _selectedTherapist!.id,
         'roomId': _selectedRoom!.id,
-        'serviceId': _selectedService!.id,
+        'serviceId': _primaryService!.id,
+        'serviceName': _serviceNameSummary,
+        'serviceItems': _serviceItems,
+        'itemCount': _selectedServices.length,
         'date': dateStr,
         'startTime': _selectedSlot!.start,
         'endTime': endTime,
         'status': 'pending',
-        'totalPrice': _selectedService!.price,
+        'totalPrice': _servicePrice,
         'type': 'appointment',
         'createdAt': DateTime.now().toIso8601String(),
       });
@@ -704,7 +759,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
           // Sticky bottom bar
           _PhoneBottomBar(
-            service: _selectedService,
+            serviceName: _selectedServices.isEmpty ? null : _serviceNameSummary,
+            serviceDuration: _serviceDuration,
+            servicePrice: _servicePrice,
             isExpanded: _summaryExpanded,
             onToggle: () =>
                 setState(() => _summaryExpanded = !_summaryExpanded),
@@ -885,9 +942,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         // Service grid
         LayoutBuilder(
           builder: (context, constraints) {
-            final columns = constraints.maxWidth >= 820
+            final columns = constraints.maxWidth >= 600
                 ? 3
-                : constraints.maxWidth >= 520
+                : constraints.maxWidth >= 430
                 ? 2
                 : 1;
             return GridView.builder(
@@ -897,12 +954,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                 crossAxisCount: columns,
                 crossAxisSpacing: 10,
                 mainAxisSpacing: 10,
-                childAspectRatio: columns == 1 ? 3.4 : 2.2,
+                childAspectRatio: columns == 1 ? 4.2 : 2.6,
               ),
               itemCount: filtered.length,
               itemBuilder: (_, i) => _ServiceCard(
                 service: filtered[i],
-                isSelected: _selectedService?.id == filtered[i].id,
+                isSelected: _selectedServices.any(
+                  (service) => service.id == filtered[i].id,
+                ),
                 onTap: () => _onServiceSelected(filtered[i]),
               ),
             );
@@ -915,10 +974,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   Widget _buildTherapistRoomSection({required bool isTablet}) {
     final compatibleRooms = _rooms
         .where(
-          (r) =>
-              _selectedService == null ||
-              _selectedService!.roomType.isEmpty ||
-              r.type == _selectedService!.roomType,
+          (r) => _requiredRoomType.isEmpty || r.type == _requiredRoomType,
         )
         .toList();
 
@@ -1129,8 +1185,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           _SummaryRow(label: 'Customer', value: _selectedCustomer?.name ?? '—'),
           _SummaryRow(
             label: 'Service',
-            value: _selectedService != null
-                ? '${_selectedService!.name}\n${_selectedService!.duration} min · RM ${_selectedService!.price.toStringAsFixed(0)}'
+            value: _selectedServices.isNotEmpty
+                ? '$_serviceNameSummary\n$_serviceDuration min - RM ${_servicePrice.toStringAsFixed(0)}'
                 : '—',
           ),
           _SummaryRow(
@@ -1140,7 +1196,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           _SummaryRow(label: 'Room / Zone', value: _selectedRoom?.name ?? '—'),
           _SummaryRow(label: 'Time Slot', value: _selectedSlot?.label ?? '—'),
 
-          if (_selectedService != null) ...[
+          if (_selectedServices.isNotEmpty) ...[
             const Divider(height: 28, color: Color(0xFFEEEEEE)),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1150,7 +1206,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
                 ),
                 Text(
-                  'RM ${_selectedService!.price.toStringAsFixed(2)}',
+                  'RM ${_servicePrice.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -1161,7 +1217,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              '${_selectedService!.name} · ${_selectedService!.duration} min',
+              '$_serviceNameSummary - $_serviceDuration min',
               style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
           ],
@@ -2195,31 +2251,13 @@ class _ServiceCard extends StatelessWidget {
     required this.onTap,
   });
 
-  Color get _chipColor => service.roomType == 'body_room'
-      ? const Color(0xFFEDE7F6)
-      : service.roomType.isEmpty
-      ? const Color(0xFFE8F5F5)
-      : const Color(0xFFFFF9E6);
-
-  Color get _chipTextColor => service.roomType == 'body_room'
-      ? const Color(0xFF7C3AED)
-      : service.roomType.isEmpty
-      ? const Color(0xFF1B6B72)
-      : const Color(0xFFC8963E);
-
-  String get _chipLabel => service.roomType == 'body_room'
-      ? 'Body Room'
-      : service.roomType.isEmpty
-      ? 'Any Room'
-      : 'Foot Chair';
-
   @override
   Widget build(BuildContext context) {
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
           borderRadius: BorderRadius.circular(12),
@@ -2242,8 +2280,8 @@ class _ServiceCard extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                _ServiceImage(imageUrl: service.imageUrl, size: 58),
-                const SizedBox(width: 12),
+                _ServiceImage(imageUrl: service.imageUrl, size: 44),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -2259,7 +2297,7 @@ class _ServiceCard extends StatelessWidget {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
-                      const SizedBox(height: 8),
+                      const SizedBox(height: 6),
                       Wrap(
                         spacing: 6,
                         runSpacing: 6,
@@ -2273,11 +2311,6 @@ class _ServiceCard extends StatelessWidget {
                             label: 'RM ${service.price.toStringAsFixed(0)}',
                             bg: const Color(0xFFF5F5F5),
                             color: const Color(0xFF6B6B6B),
-                          ),
-                          _SmallBadge(
-                            label: _chipLabel,
-                            bg: _chipColor,
-                            color: _chipTextColor,
                           ),
                         ],
                       ),
@@ -3083,7 +3116,9 @@ class _SmallBadge extends StatelessWidget {
 // ── Phone Bottom Bar ──────────────────────────────────────────────
 
 class _PhoneBottomBar extends StatelessWidget {
-  final _Service? service;
+  final String? serviceName;
+  final int serviceDuration;
+  final double servicePrice;
   final bool isExpanded;
   final VoidCallback onToggle;
   final bool canConfirm;
@@ -3096,7 +3131,9 @@ class _PhoneBottomBar extends StatelessWidget {
   final _TimeSlot? selectedSlot;
 
   const _PhoneBottomBar({
-    required this.service,
+    required this.serviceName,
+    required this.serviceDuration,
+    required this.servicePrice,
     required this.isExpanded,
     required this.onToggle,
     required this.canConfirm,
@@ -3112,6 +3149,7 @@ class _PhoneBottomBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dateStr = DateFormat('EEE, d MMM yyyy').format(selectedDate);
+    final hasServices = serviceName?.trim().isNotEmpty == true;
 
     return Container(
       decoration: BoxDecoration(
@@ -3149,14 +3187,14 @@ class _PhoneBottomBar extends StatelessWidget {
                   _MiniRow('Customer', selectedCustomer?.name ?? '—'),
                   _MiniRow(
                     'Service',
-                    service != null
-                        ? '${service!.name} · ${service!.duration} min'
+                    hasServices
+                        ? '$serviceName - $serviceDuration min'
                         : '—',
                   ),
                   _MiniRow('Therapist', selectedTherapist?.name ?? '—'),
                   _MiniRow('Zone', selectedRoom?.name ?? '—'),
                   _MiniRow('Time', selectedSlot?.label ?? '—'),
-                  if (service != null) ...[
+                  if (hasServices) ...[
                     const Divider(height: 14),
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -3169,7 +3207,7 @@ class _PhoneBottomBar extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          'RM ${(service!.price * 0.06).toStringAsFixed(2)}',
+                          'RM ${(servicePrice * 0.06).toStringAsFixed(2)}',
                           style: const TextStyle(
                             fontSize: 12,
                             color: Color(0xFF9E9E9E),
@@ -3190,7 +3228,7 @@ class _PhoneBottomBar extends StatelessWidget {
                           ),
                         ),
                         Text(
-                          'RM ${(service!.price * 1.06).toStringAsFixed(2)}',
+                          'RM ${(servicePrice * 1.06).toStringAsFixed(2)}',
                           style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.bold,
@@ -3223,8 +3261,8 @@ class _PhoneBottomBar extends StatelessWidget {
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          service != null
-                              ? '${service!.name} · ${service!.duration} min'
+                          hasServices
+                              ? '$serviceName - $serviceDuration min'
                               : 'Select a service',
                           style: const TextStyle(
                             fontSize: 13,
@@ -3234,8 +3272,8 @@ class _PhoneBottomBar extends StatelessWidget {
                         ),
                       ),
                       Text(
-                        service != null
-                            ? 'RM ${service!.price.toStringAsFixed(2)}'
+                        hasServices
+                            ? 'RM ${servicePrice.toStringAsFixed(2)}'
                             : '',
                         style: const TextStyle(
                           fontSize: 14,

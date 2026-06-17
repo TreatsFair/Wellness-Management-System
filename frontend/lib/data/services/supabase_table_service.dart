@@ -8,9 +8,16 @@ const Map<String, String> _snakeToCamelAliases = {
   'busy_until': 'busyUntil',
   'created_at': 'createdAt',
   'created_by': 'createdBy',
+  'cashier_id': 'cashierId',
+  'cashier_name': 'cashierName',
+  'counter_id': 'counterId',
   'customer_id': 'customerId',
   'customer_name': 'customerName',
   'customer_phone': 'customerPhone',
+  'counter_commission': 'counterCommission',
+  'counter_commission_amount': 'counterCommissionAmount',
+  'counter_staff_id': 'counterStaffId',
+  'counter_staff_name': 'counterStaffName',
   'date_of_birth': 'dateOfBirth',
   'employment_type': 'employmentType',
   'end_time': 'endTime',
@@ -29,8 +36,10 @@ const Map<String, String> _snakeToCamelAliases = {
   'room_type': 'roomType',
   'service_description': 'serviceDescription',
   'service_id': 'serviceId',
+  'service_items': 'serviceItems',
   'service_name': 'serviceName',
   'service_price': 'servicePrice',
+  'service_commissions': 'serviceCommissions',
   'sst_amount': 'sstAmount',
   'start_time': 'startTime',
   'therapist_id': 'therapistId',
@@ -38,6 +47,8 @@ const Map<String, String> _snakeToCamelAliases = {
   'total_amount': 'totalAmount',
   'total_price': 'totalPrice',
   'total_slots': 'totalSlots',
+  'therapist_commission': 'therapistCommission',
+  'therapist_commission_amount': 'therapistCommissionAmount',
   'updated_at': 'updatedAt',
   'updated_by': 'updatedBy',
 };
@@ -166,13 +177,10 @@ class SupabaseTableService {
     String id,
     Map<String, dynamic> values,
   ) async {
-    final row = await _client
-        .from(tableName)
-        .update(toSupabaseValues(values))
-        .eq('id', id)
-        .select()
-        .single();
-    return _toMap(row);
+    await _client.from(tableName).update(toSupabaseValues(values)).eq('id', id);
+    final row = await getById(id);
+    if (row != null) return row;
+    return {'id': id, ...values};
   }
 
   Future<void> delete(String id) async {
@@ -194,6 +202,9 @@ class SupabaseTableService {
   bool _isSyntheticUuidValue(String key, Object? value) {
     final uuidKeys = {
       'appointmentId',
+      'cashierId',
+      'counterId',
+      'counterStaffId',
       'createdBy',
       'customerId',
       'roomId',

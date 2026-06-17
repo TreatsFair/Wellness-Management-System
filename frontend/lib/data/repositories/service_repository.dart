@@ -31,8 +31,11 @@ class ServiceRepository {
   Future<Map<String, dynamic>> updateService(
     String id,
     Map<String, dynamic> values,
-  ) {
-    return _table.update(id, values);
+  ) async {
+    final row = await _table.update(id, values);
+    _verifySavedDouble(row, values, 'therapistCommission');
+    _verifySavedDouble(row, values, 'counterCommission');
+    return row;
   }
 
   Future<void> deleteService(String id) => _table.delete(id);
@@ -43,5 +46,20 @@ class ServiceRepository {
 
   Future<Map<String, dynamic>> toggleServiceActive(String id, bool active) {
     return _table.update(id, {'isActive': active});
+  }
+}
+
+void _verifySavedDouble(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  final expected = asDouble(values[key]);
+  final actual = asDouble(row[key]);
+  if ((actual - expected).abs() > 0.001) {
+    throw StateError(
+      'Service update was not saved. Please run supabase/sql/008_services_update_staff_admin.sql and try again.',
+    );
   }
 }

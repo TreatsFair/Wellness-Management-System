@@ -36,6 +36,12 @@ bool _asBool(Object? value, [bool fallback = true]) {
   return fallback;
 }
 
+String _normalizeStaffRole(Object? value) {
+  final raw = value?.toString().trim().toLowerCase() ?? '';
+  if (raw.contains('counter') || raw.contains('cashier')) return 'Counter';
+  return 'Therapist';
+}
+
 String _normalizeRoomType(Object? value) {
   final raw = value?.toString().trim().toLowerCase() ?? '';
   if (raw.isEmpty || raw == '-') return '';
@@ -62,6 +68,10 @@ int _timeToMinutes(String value) {
   final parts = value.split(':');
   if (parts.length < 2) return 0;
   return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
+}
+
+bool _isPendingAppointmentStatus(String status) {
+  return status == 'pending' || status == 'confirmed' || status == 'in_progress';
 }
 
 String _initials(String name) {
@@ -124,8 +134,8 @@ class ManagementScreen extends StatelessWidget {
                   _ManagementOption(
                     icon: Icons.group_outlined,
                     color: const Color(0xFFD19A33),
-                    title: 'Therapists',
-                    subtitle: 'Manage therapist schedules and availability',
+                    title: 'Staff',
+                    subtitle: 'Manage staff roles, schedules, and availability',
                     onTap: () => Navigator.push(
                       context,
                       MaterialPageRoute(
@@ -313,13 +323,15 @@ class _ResourceItem {
     final name = _asString(d['name']);
     final duration = _asInt(d['duration'], 60);
     final price = _asDouble(d['price']);
+    final therapistCommission = _asDouble(d['therapistCommission']);
+    final counterCommission = _asDouble(d['counterCommission']);
     final active = _asBool(d['active'] ?? d['isActive'], true);
     return _ResourceItem(
       id: _asString(d['id']),
       name: name,
       subtitle: _asString(d['category'], 'Services'),
       detail:
-          '$duration min | RM ${price.toStringAsFixed(0)} | ${_roomTypeLabel(_asString(d['roomType']))}',
+          '$duration min | RM ${price.toStringAsFixed(0)} | Comm RM ${therapistCommission.toStringAsFixed(0)}/${counterCommission.toStringAsFixed(0)}',
       statusText: active ? 'Active' : 'Inactive',
       active: active,
       color: _teal,
@@ -838,6 +850,14 @@ class _ResourceDetailCard extends StatelessWidget {
                   'RM ${_asDouble(item.raw['price']).toStringAsFixed(2)}',
                 ),
                 _InfoRow(
+                  'Therapist Commission',
+                  'RM ${_asDouble(item.raw['therapistCommission']).toStringAsFixed(2)}',
+                ),
+                _InfoRow(
+                  'Counter Commission',
+                  'RM ${_asDouble(item.raw['counterCommission']).toStringAsFixed(2)}',
+                ),
+                _InfoRow(
                   'Room Type',
                   _roomTypeLabel(_asString(item.raw['roomType'])),
                 ),
@@ -897,6 +917,8 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   late final TextEditingController _category;
   late final TextEditingController _duration;
   late final TextEditingController _price;
+  late final TextEditingController _therapistCommission;
+  late final TextEditingController _counterCommission;
   late final TextEditingController _roomType;
   late final TextEditingController _floor;
   late final TextEditingController _slots;
@@ -922,6 +944,12 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     _price = TextEditingController(
       text: _asDouble(raw['price']).toStringAsFixed(0),
     );
+    _therapistCommission = TextEditingController(
+      text: _asDouble(raw['therapistCommission']).toStringAsFixed(0),
+    );
+    _counterCommission = TextEditingController(
+      text: _asDouble(raw['counterCommission']).toStringAsFixed(0),
+    );
     _roomType = TextEditingController(
       text: _asString(
         raw['roomType'] ?? raw['type'],
@@ -942,6 +970,8 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     _category.dispose();
     _duration.dispose();
     _price.dispose();
+    _therapistCommission.dispose();
+    _counterCommission.dispose();
     _roomType.dispose();
     _floor.dispose();
     _slots.dispose();
@@ -961,6 +991,10 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                 : _category.text.trim(),
             'duration': int.tryParse(_duration.text.trim()) ?? 60,
             'price': double.tryParse(_price.text.trim()) ?? 0,
+            'therapistCommission':
+                double.tryParse(_therapistCommission.text.trim()) ?? 0,
+            'counterCommission':
+                double.tryParse(_counterCommission.text.trim()) ?? 0,
             'roomType': _normalizeRoomType(_roomType.text),
             'isActive': _active,
           }
@@ -1078,6 +1112,28 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                     ],
                   ),
                   const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: _FormField(
+                          label: 'Therapist Commission',
+                          controller: _therapistCommission,
+                          hint: 'RM per service',
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _FormField(
+                          label: 'Counter Commission',
+                          controller: _counterCommission,
+                          hint: 'RM per service',
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
                   _FormField(
                     label: 'Room Type',
                     controller: _roomType,
@@ -1143,6 +1199,7 @@ class _ManagedTherapist {
   final String id;
   final String name;
   final String phone;
+  final String role;
   final bool available;
   final String busyUntil;
   final int doneToday;
@@ -1152,6 +1209,7 @@ class _ManagedTherapist {
     required this.id,
     required this.name,
     required this.phone,
+    required this.role,
     required this.available,
     required this.busyUntil,
     required this.doneToday,
@@ -1163,6 +1221,7 @@ class _ManagedTherapist {
       id: _asString(d['id']),
       name: _asString(d['name']),
       phone: _asString(d['phone']),
+      role: _normalizeStaffRole(d['role'] ?? d['staffRole'] ?? d['employmentType']),
       available: _asBool(d['availabilityStatus'], true),
       busyUntil: _asString(d['busyUntil']),
       doneToday: 0,
@@ -1179,6 +1238,7 @@ class _ManagedTherapist {
       id: id,
       name: name,
       phone: phone,
+      role: role,
       available: available ?? this.available,
       busyUntil: busyUntil ?? this.busyUntil,
       doneToday: doneToday ?? this.doneToday,
@@ -1252,7 +1312,7 @@ class _TherapistAvailabilityScreenState
     for (final d in appointments) {
       final status = _asString(d['status']).toLowerCase();
       if (status == 'completed') done++;
-      if (status == 'confirmed' || status == 'in_progress') {
+      if (_isPendingAppointmentStatus(status)) {
         final start = _timeToMinutes(_asString(d['startTime'], '00:00'));
         final end = _timeToMinutes(_asString(d['endTime'], '00:00'));
         if (start <= nowMinutes && end > nowMinutes) {
@@ -1269,7 +1329,8 @@ class _TherapistAvailabilityScreenState
     setState(() {
       _filtered = _therapists.where((therapist) {
         return therapist.name.toLowerCase().contains(query) ||
-            therapist.phone.toLowerCase().contains(query);
+            therapist.phone.toLowerCase().contains(query) ||
+            therapist.role.toLowerCase().contains(query);
       }).toList();
     });
   }
@@ -1310,8 +1371,8 @@ class _TherapistAvailabilityScreenState
         child: Column(
           children: [
             _ManagementHeader(
-              title: 'Therapists',
-              subtitle: 'Manage therapist availability and daily activity',
+              title: 'Staff',
+              subtitle: 'Manage staff roles, availability, and daily activity',
             ),
             Padding(
               padding: EdgeInsets.fromLTRB(
@@ -1322,7 +1383,7 @@ class _TherapistAvailabilityScreenState
               ),
               child: _SearchBar(
                 controller: _searchController,
-                hint: 'Search therapists...',
+                hint: 'Search staff...',
               ),
             ),
             Expanded(
@@ -1441,6 +1502,7 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                       spacing: 6,
                       runSpacing: 6,
                       children: [
+                        _TherapistMiniPill(therapist.role),
                         _TherapistMiniPill(
                           '${therapist.doneToday} appts today',
                         ),
@@ -1455,7 +1517,7 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                 height: 34,
                 child: IconButton(
                   onPressed: onEdit,
-                  tooltip: 'Edit therapist',
+                  tooltip: 'Edit staff',
                   padding: EdgeInsets.zero,
                   icon: const Icon(Icons.edit_outlined, size: 18),
                   color: _teal,
@@ -1551,6 +1613,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _phone;
+  late final TextEditingController _role;
   late final TextEditingController _busyUntil;
   bool _available = true;
   bool _saving = false;
@@ -1564,6 +1627,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     final therapist = widget.therapist;
     _name = TextEditingController(text: therapist?.name ?? '');
     _phone = TextEditingController(text: therapist?.phone ?? '');
+    _role = TextEditingController(text: therapist?.role ?? 'Therapist');
     _busyUntil = TextEditingController(text: therapist?.busyUntil ?? '');
     _available = therapist?.available ?? true;
   }
@@ -1572,6 +1636,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   void dispose() {
     _name.dispose();
     _phone.dispose();
+    _role.dispose();
     _busyUntil.dispose();
     super.dispose();
   }
@@ -1583,6 +1648,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     final data = {
       'name': _name.text.trim(),
       'phone': _phone.text.trim(),
+      'role': _normalizeStaffRole(_role.text),
       'availabilityStatus': _available,
       'busyUntil': _busyUntil.text.trim(),
     };
@@ -1597,12 +1663,12 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
       }
       _close(true);
     } catch (e) {
-      debugPrint('Unable to save therapist: $e');
+      debugPrint('Unable to save staff: $e');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(
         context,
-      ).showSnackBar(SnackBar(content: Text('Unable to save therapist: $e')));
+      ).showSnackBar(SnackBar(content: Text('Unable to save staff: $e')));
     }
   }
 
@@ -1633,7 +1699,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                   children: [
                     Expanded(
                       child: Text(
-                        _isEditing ? 'Edit Therapist' : 'Add Therapist',
+                        _isEditing ? 'Edit Staff' : 'Add Staff',
                         style: const TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.w800,
@@ -1660,6 +1726,8 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                   keyboardType: TextInputType.phone,
                 ),
                 const SizedBox(height: 12),
+                _StaffRoleDropdown(label: 'Role', controller: _role),
+                const SizedBox(height: 12),
                 _FormField(
                   label: 'Free At',
                   controller: _busyUntil,
@@ -1679,7 +1747,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                 const SizedBox(height: 20),
                 _DialogActions(
                   saving: _saving,
-                  saveLabel: _isEditing ? 'Save Changes' : 'Add Therapist',
+                  saveLabel: _isEditing ? 'Save Changes' : 'Add Staff',
                   onCancel: () => _close(),
                   onSave: _save,
                 ),
@@ -1913,6 +1981,38 @@ class _FormField extends StatelessWidget {
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: _teal, width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffRoleDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _StaffRoleDropdown({required this.label, required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _normalizeStaffRole(controller.text),
+      items: const [
+        DropdownMenuItem(value: 'Therapist', child: Text('Therapist')),
+        DropdownMenuItem(value: 'Counter', child: Text('Counter')),
+      ],
+      onChanged: (value) => controller.text = value ?? 'Therapist',
+      decoration: InputDecoration(
+        labelText: label,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(

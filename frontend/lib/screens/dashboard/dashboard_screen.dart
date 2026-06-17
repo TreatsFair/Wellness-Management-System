@@ -11,6 +11,7 @@ import '../customers/customer_screen.dart';
 import '../history/sales_history_screen.dart';
 import '../orders/order_screen.dart';
 import '../management/management_screen.dart';
+import '../reports/reports_screen.dart';
 
 class _DashboardStats {
   final int todayAppointments;
@@ -186,6 +187,10 @@ bool _isCancelled(Map<String, dynamic> data) {
   return status == 'cancelled' || status == 'canceled';
 }
 
+bool _isPendingAppointmentStatus(String status) {
+  return status == 'pending' || status == 'confirmed' || status == 'in_progress';
+}
+
 bool _isPaid(Map<String, dynamic> data) {
   final status = _asString(data['paymentStatus']).toLowerCase().trim();
   return status.isEmpty || status == 'paid';
@@ -277,7 +282,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
           )
           .length;
       final pendingAppointments = todayAppointments
-          .where((data) => _asString(data['status']).toLowerCase() == 'pending')
+          .where(
+            (data) => _isPendingAppointmentStatus(
+              _asString(data['status']).toLowerCase(),
+            ),
+          )
           .length;
 
       final todayPaidTransactions = todayTransactionRows
@@ -325,17 +334,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
         Map<String, dynamic>? currentAppointment;
         for (final appointment in therapistAppointments) {
           final status = _asString(appointment['status']).toLowerCase();
-          if (status != 'confirmed' && status != 'in_progress') continue;
+          if (!_isPendingAppointmentStatus(status)) continue;
           final start = _timeToMinutes(_asString(appointment['startTime']));
           final end = _timeToMinutes(_asString(appointment['endTime']));
-          if (status == 'in_progress' ||
-              (start <= nowMinutes && end > nowMinutes)) {
+          if (start <= nowMinutes && end > nowMinutes) {
             currentAppointment = appointment;
             break;
           }
         }
 
-        final name = _asString(data['name'], 'Therapist');
+        final name = _asString(data['name'], 'Staff');
         final availability = data['availabilityStatus'];
         final busyUntil = _asString(data['busyUntil']);
         final isAvailable = availability is bool ? availability : true;
@@ -760,6 +768,12 @@ class _TabletLayout extends StatelessWidget {
                         label: 'Reports',
                         iconBg: const Color(0xFFEDE7F6),
                         iconColor: const Color(0xFF7C3AED),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => ReportsScreen(userRole: role),
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -1126,7 +1140,7 @@ class _TabletTherapistsCard extends StatelessWidget {
                 ),
                 const SizedBox(width: 12),
                 const Text(
-                  'Therapists',
+                  'Staff',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
@@ -1148,7 +1162,7 @@ class _TabletTherapistsCard extends StatelessWidget {
               )
             else if (visibleTherapists.isEmpty)
               const Text(
-                'No therapists yet',
+                'No staff yet',
                 style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
               )
             else
@@ -1388,6 +1402,12 @@ class _PhoneLayout extends StatelessWidget {
                       label: 'Reports',
                       iconBg: const Color(0xFFEDE7F6),
                       iconColor: const Color(0xFF7C3AED),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ReportsScreen(userRole: role),
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1883,7 +1903,7 @@ class _PhoneStaffStatusCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
-                'Therapists Today',
+                'Staff Today',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
@@ -1916,7 +1936,7 @@ class _PhoneStaffStatusCard extends StatelessWidget {
             )
           else if (therapists.isEmpty)
             const Text(
-              'No therapists yet',
+              'No staff yet',
               style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             )
           else

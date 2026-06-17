@@ -70,6 +70,8 @@ class DashboardRepository {
     DateTime start,
     DateTime end,
   ) async {
+    final startKey = dateKey(start);
+    final endKey = dateKey(end);
     final rows = await _transactions.list(
       orderBy: 'created_at',
       ascending: false,
@@ -77,7 +79,8 @@ class DashboardRepository {
     return rows.where((row) {
       final createdAt = asDateTime(row['createdAt']);
       if (createdAt == null) return false;
-      return !createdAt.isBefore(start) && createdAt.isBefore(end);
+      final key = dateKey(createdAt);
+      return key.compareTo(startKey) >= 0 && key.compareTo(endKey) < 0;
     }).toList();
   }
 

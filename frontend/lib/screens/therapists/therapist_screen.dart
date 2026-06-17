@@ -1,6 +1,13 @@
-import 'package:flutter/material.dart';
+﻿import 'package:flutter/material.dart';
 
+import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+
+String _normalizeStaffRole(Object? value) {
+  final raw = value?.toString().trim().toLowerCase() ?? '';
+  if (raw.contains('counter') || raw.contains('cashier')) return 'Counter';
+  return 'Therapist';
+}
 
 // ── Data model ────────────────────────────────────────────────────
 class TherapistModel {
@@ -8,10 +15,11 @@ class TherapistModel {
   final String name;
   final String phone;
   final String gender;
-  final String employmentType;
+  final String role;
   final String joinDate;
   final bool availabilityStatus;
   final String notes;
+  final Map<String, double> serviceCommissions;
 
   // Calculated
   final int totalAppointments;
@@ -21,10 +29,11 @@ class TherapistModel {
     required this.name,
     required this.phone,
     required this.gender,
-    required this.employmentType,
+    required this.role,
     required this.joinDate,
     required this.availabilityStatus,
     required this.notes,
+    required this.serviceCommissions,
     this.totalAppointments = 0,
   });
 
@@ -39,16 +48,29 @@ class TherapistModel {
     return true;
   }
 
+  static Map<String, double> _commissionMap(dynamic value) {
+    if (value is! Map) return {};
+    return value.map((key, item) {
+      final amount = item is num
+          ? item.toDouble()
+          : double.tryParse(item?.toString() ?? '') ?? 0;
+      return MapEntry(key.toString(), amount);
+    });
+  }
+
   factory TherapistModel.fromMap(Map<String, dynamic> d) {
     return TherapistModel(
       id: _stringValue(d['id']),
       name: _stringValue(d['name']),
       phone: _stringValue(d['phone']),
       gender: _stringValue(d['gender']),
-      employmentType: _stringValue(d['employmentType']),
+      role: _normalizeStaffRole(
+        d['role'] ?? d['staffRole'] ?? d['employmentType'],
+      ),
       joinDate: _stringValue(d['joinDate']),
       availabilityStatus: _boolValue(d['availabilityStatus']),
       notes: _stringValue(d['notes']),
+      serviceCommissions: _commissionMap(d['serviceCommissions']),
     );
   }
 
@@ -72,16 +94,20 @@ class TherapistModel {
     return colors[name.length % colors.length];
   }
 
-  TherapistModel copyWith({int? totalAppointments}) {
+  TherapistModel copyWith({
+    int? totalAppointments,
+    Map<String, double>? serviceCommissions,
+  }) {
     return TherapistModel(
       id: id,
       name: name,
       phone: phone,
       gender: gender,
-      employmentType: employmentType,
+      role: role,
       joinDate: joinDate,
       availabilityStatus: availabilityStatus,
       notes: notes,
+      serviceCommissions: serviceCommissions ?? this.serviceCommissions,
       totalAppointments: totalAppointments ?? this.totalAppointments,
     );
   }
@@ -197,7 +223,8 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
       final query = _searchController.text.toLowerCase();
       _filtered = _therapists.where((t) {
         return t.name.toLowerCase().contains(query) ||
-            t.phone.toLowerCase().contains(query);
+            t.phone.toLowerCase().contains(query) ||
+            t.role.toLowerCase().contains(query);
       }).toList();
       _selected = savedTherapist;
     });
@@ -207,8 +234,8 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
 
   Future<bool> _deleteTherapist(TherapistModel therapist) async {
     final firstConfirm = await _confirmDeleteTherapist(
-      title: 'Remove Therapist',
-      message: 'This will remove ${therapist.name} from the therapist list.',
+      title: 'Remove Staff',
+      message: 'This will remove ${therapist.name} from the staff list.',
       buttonLabel: 'Continue',
     );
     if (firstConfirm != true) return false;
@@ -243,7 +270,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Unable to remove therapist'),
+          content: Text('Unable to remove staff'),
           backgroundColor: Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -285,7 +312,8 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     setState(() {
       _filtered = _therapists.where((t) {
         return t.name.toLowerCase().contains(query) ||
-            t.phone.toLowerCase().contains(query);
+            t.phone.toLowerCase().contains(query) ||
+            t.role.toLowerCase().contains(query);
       }).toList();
     });
   }
@@ -373,7 +401,7 @@ class _TabletLayout extends StatelessWidget {
                     const BackButton(),
                     const Expanded(
                       child: Text(
-                        'Therapists',
+                        'Staff',
                         textAlign: TextAlign.center,
                         style: TextStyle(
                           fontSize: 18,
@@ -417,15 +445,15 @@ class _TabletLayout extends StatelessWidget {
           child: Column(
             children: [
               _TabletDetailHeader(
-                title: 'Therapist Details',
-                addLabel: 'Add Therapist',
+                title: 'Staff Details',
+                addLabel: 'Add Staff',
                 onAdd: onAdd,
               ),
               Expanded(
                 child: selected == null
                     ? const Center(
                         child: Text(
-                          'Select a therapist to view details',
+                          'Select a staff member to view details',
                           style: TextStyle(color: Color(0xFF9E9E9E)),
                         ),
                       )
@@ -486,6 +514,15 @@ class _TabletListItem extends StatelessWidget {
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
                       color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    therapist.role,
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFF9E9E9E),
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
                   Row(
@@ -568,7 +605,7 @@ class _PhoneLayout extends StatelessWidget {
               const BackButton(),
               const Expanded(
                 child: Text(
-                  'Therapists',
+                  'Staff',
                   textAlign: TextAlign.start,
                   style: TextStyle(
                     fontSize: 18,
@@ -683,6 +720,15 @@ class _PhoneListCard extends StatelessWidget {
                           color: Color(0xFF1A1A2E),
                         ),
                       ),
+                      const SizedBox(height: 2),
+                      Text(
+                        therapist.role,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF9E9E9E),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -785,7 +831,7 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         leading: const BackButton(color: Color(0xFF1A1A2E)),
         centerTitle: true,
         title: const Text(
-          'Therapist Details',
+          'Staff Details',
           style: TextStyle(
             fontSize: 18,
             fontWeight: FontWeight.w700,
@@ -795,7 +841,7 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         actions: [
           _CircleIconButton(
             icon: Icons.edit_outlined,
-            tooltip: 'Edit therapist',
+            tooltip: 'Edit staff',
             onPressed: _editAndReturn,
           ),
           const SizedBox(width: 12),
@@ -854,7 +900,7 @@ class _DetailPanel extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   const Text(
-                    'Therapist Details',
+                    'Staff Details',
                     style: TextStyle(
                       fontSize: 22,
                       fontWeight: FontWeight.bold,
@@ -1039,7 +1085,7 @@ class _DetailPanel extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Therapist Information',
+                  'Staff Information',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -1048,7 +1094,7 @@ class _DetailPanel extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 _InfoRow(label: 'Join Date', value: therapist.joinDate),
-                _InfoRow(label: 'Employment', value: therapist.employmentType),
+                _InfoRow(label: 'Role', value: therapist.role),
                 _InfoRow(label: 'Phone Number', value: therapist.phone),
                 _InfoRow(
                   label: 'Gender',
@@ -1062,6 +1108,10 @@ class _DetailPanel extends StatelessWidget {
           const SizedBox(height: 12),
 
           // ── Notes ──────────────────────────────────────────
+          _StaffCommissionSection(staff: therapist),
+
+          const SizedBox(height: 12),
+
           _Card(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1110,7 +1160,7 @@ class _DetailPanel extends StatelessWidget {
                   size: 18,
                 ),
                 label: const Text(
-                  'Remove Therapist',
+                  'Remove Staff',
                   style: TextStyle(
                     color: Color(0xFFE53935),
                     fontWeight: FontWeight.w500,
@@ -1137,6 +1187,592 @@ class _DetailPanel extends StatelessWidget {
 // ─────────────────────────────────────────────────────────────────
 // SHARED SMALL WIDGETS
 // ─────────────────────────────────────────────────────────────────
+class _StaffServiceCommission {
+  final String id;
+  final String name;
+  final String category;
+  final int duration;
+  final double price;
+  final double therapistCommission;
+  final double counterCommission;
+
+  const _StaffServiceCommission({
+    required this.id,
+    required this.name,
+    required this.category,
+    required this.duration,
+    required this.price,
+    required this.therapistCommission,
+    required this.counterCommission,
+  });
+
+  factory _StaffServiceCommission.fromMap(Map<String, dynamic> data) {
+    return _StaffServiceCommission(
+      id: data['id']?.toString() ?? '',
+      name: data['name']?.toString() ?? 'Service',
+      category: _normalizeServiceCategory(data['category']?.toString() ?? ''),
+      duration: _intValue(data['duration'], 60),
+      price: _doubleValue(data['price']),
+      therapistCommission: _doubleValue(data['therapistCommission']),
+      counterCommission: _doubleValue(data['counterCommission']),
+    );
+  }
+
+  double defaultCommissionFor(String staffRole) {
+    return _normalizeStaffRole(staffRole) == 'Counter'
+        ? counterCommission
+        : therapistCommission;
+  }
+}
+
+int _intValue(Object? value, [int fallback = 0]) {
+  if (value is int) return value;
+  if (value is num) return value.round();
+  if (value is String) return int.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+double _doubleValue(Object? value, [double fallback = 0]) {
+  if (value is num) return value.toDouble();
+  if (value is String) return double.tryParse(value) ?? fallback;
+  return fallback;
+}
+
+String _normalizeServiceCategory(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized.contains('package')) return 'Packages';
+  if (normalized.contains('add')) return 'Add-ons';
+  return 'Services';
+}
+
+class _StaffCommissionSection extends StatefulWidget {
+  final TherapistModel staff;
+
+  const _StaffCommissionSection({required this.staff});
+
+  @override
+  State<_StaffCommissionSection> createState() =>
+      _StaffCommissionSectionState();
+}
+
+class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
+  final _serviceRepository = ServiceRepository();
+  final _therapistRepository = TherapistRepository();
+  final _tabs = const ['Services', 'Packages', 'Add-ons'];
+  var _selectedTab = 'Services';
+  var _services = <_StaffServiceCommission>[];
+  late Map<String, double> _overrides;
+  bool _loading = true;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _overrides = {...widget.staff.serviceCommissions};
+    _loadServices();
+  }
+
+  @override
+  void didUpdateWidget(covariant _StaffCommissionSection oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.staff.id != widget.staff.id) {
+      _overrides = {...widget.staff.serviceCommissions};
+      _selectedTab = 'Services';
+      _loadServices();
+    }
+  }
+
+  Future<void> _loadServices() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final rows = await _serviceRepository.getServices();
+      final staffRow = await _therapistRepository.getTherapist(widget.staff.id);
+      final services = rows
+          .map(_StaffServiceCommission.fromMap)
+          .where((service) => service.id.isNotEmpty)
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
+      if (!mounted) return;
+      setState(() {
+        _services = services;
+        _overrides = staffRow == null
+            ? {...widget.staff.serviceCommissions}
+            : TherapistModel._commissionMap(staffRow['serviceCommissions']);
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  double _commissionFor(_StaffServiceCommission service) {
+    return _overrides[service.id] ??
+        service.defaultCommissionFor(widget.staff.role);
+  }
+
+  Future<void> _openCommissionEditor(_StaffServiceCommission service) async {
+    final result = await showDialog<_CommissionEditResult>(
+      context: context,
+      builder: (context) => _CommissionEditorDialog(
+        service: service,
+        staff: widget.staff,
+        currentCommission: _commissionFor(service),
+        hasOverride: _overrides.containsKey(service.id),
+      ),
+    );
+    if (result == null) return;
+
+    final updated = {..._overrides};
+    if (result.useDefault) {
+      updated.remove(service.id);
+    } else {
+      updated[service.id] = result.commission;
+    }
+
+    await _therapistRepository.updateTherapist(widget.staff.id, {
+      'serviceCommissions': updated,
+    });
+    if (!mounted) return;
+    setState(() => _overrides = updated);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final filtered = _services
+        .where((service) => service.category == _selectedTab)
+        .toList();
+
+    return _Card(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            'Commission',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: _tabs
+                .map(
+                  (tab) => _CommissionTabButton(
+                    label: tab,
+                    selected: _selectedTab == tab,
+                    onTap: () => setState(() => _selectedTab = tab),
+                  ),
+                )
+                .toList(),
+          ),
+          const SizedBox(height: 10),
+          if (_loading)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 18),
+              child: Center(
+                child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
+              ),
+            )
+          else if (_error != null)
+            Text(
+              'Unable to load services',
+              style: TextStyle(
+                color: Colors.red.shade600,
+                fontWeight: FontWeight.w600,
+              ),
+            )
+          else if (filtered.isEmpty)
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 14),
+              child: Text(
+                'No services in this category.',
+                style: TextStyle(color: Color(0xFF9E9E9E)),
+              ),
+            )
+          else
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final columns = constraints.maxWidth >= 540
+                    ? 3
+                    : constraints.maxWidth >= 360
+                    ? 2
+                    : 1;
+                return GridView.builder(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                    crossAxisCount: columns,
+                    crossAxisSpacing: 8,
+                    mainAxisSpacing: 8,
+                    childAspectRatio: columns == 1 ? 4.8 : 3.25,
+                  ),
+                  itemCount: filtered.length,
+                  itemBuilder: (_, index) {
+                    final service = filtered[index];
+                    return _StaffCommissionServiceCard(
+                      service: service,
+                      commission: _commissionFor(service),
+                      hasOverride: _overrides.containsKey(service.id),
+                      onTap: () => _openCommissionEditor(service),
+                    );
+                  },
+                );
+              },
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CommissionTabButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _CommissionTabButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(right: 18),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(6),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 6),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: selected
+                      ? const Color(0xFF1B6B72)
+                      : const Color(0xFF9E9E9E),
+                ),
+              ),
+              const SizedBox(height: 4),
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 150),
+                height: 2,
+                width: selected ? 36 : 0,
+                color: const Color(0xFF1B6B72),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffCommissionServiceCard extends StatelessWidget {
+  final _StaffServiceCommission service;
+  final double commission;
+  final bool hasOverride;
+  final VoidCallback onTap;
+
+  const _StaffCommissionServiceCard({
+    required this.service,
+    required this.commission,
+    required this.hasOverride,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(8),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 32,
+                height: 32,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5F5),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.spa_outlined,
+                  color: Color(0xFF1B6B72),
+                  size: 16,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      service.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${service.duration}m - RM ${service.price.toStringAsFixed(0)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF9E9E9E),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    'RM ${commission.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                  if (hasOverride)
+                    const Text(
+                      'Custom',
+                      style: TextStyle(
+                        fontSize: 10,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFFD19A33),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CommissionEditResult {
+  final double commission;
+  final bool useDefault;
+
+  const _CommissionEditResult({
+    required this.commission,
+    this.useDefault = false,
+  });
+}
+
+class _CommissionEditorDialog extends StatefulWidget {
+  final _StaffServiceCommission service;
+  final TherapistModel staff;
+  final double currentCommission;
+  final bool hasOverride;
+
+  const _CommissionEditorDialog({
+    required this.service,
+    required this.staff,
+    required this.currentCommission,
+    required this.hasOverride,
+  });
+
+  @override
+  State<_CommissionEditorDialog> createState() =>
+      _CommissionEditorDialogState();
+}
+
+class _CommissionEditorDialogState extends State<_CommissionEditorDialog> {
+  late final TextEditingController _commission;
+
+  @override
+  void initState() {
+    super.initState();
+    _commission = TextEditingController(
+      text: widget.currentCommission.toStringAsFixed(0),
+    );
+  }
+
+  @override
+  void dispose() {
+    _commission.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final value = double.tryParse(_commission.text.trim()) ?? 0;
+    Navigator.of(context).pop(_CommissionEditResult(commission: value));
+  }
+
+  void _useDefault() {
+    Navigator.of(context).pop(
+      _CommissionEditResult(
+        commission: widget.service.defaultCommissionFor(widget.staff.role),
+        useDefault: true,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final defaultCommission = widget.service.defaultCommissionFor(
+      widget.staff.role,
+    );
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 430),
+        child: Padding(
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      widget.service.name,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              _InfoRow(
+                label: 'Price',
+                value: 'RM ${widget.service.price.toStringAsFixed(2)}',
+              ),
+              _InfoRow(
+                label: 'Time',
+                value: '${widget.service.duration} minutes',
+              ),
+              _InfoRow(
+                label: 'Service Default',
+                value: 'RM ${defaultCommission.toStringAsFixed(2)}',
+              ),
+              _InfoRow(
+                label: 'Staff',
+                value: '${widget.staff.name} - ${widget.staff.role}',
+                isLast: true,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: _commission,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: InputDecoration(
+                  labelText: 'Staff Commission',
+                  prefixText: 'RM ',
+                  filled: true,
+                  fillColor: const Color(0xFFF7F8FA),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide.none,
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: const BorderSide(
+                      color: Color(0xFF1B6B72),
+                      width: 1.4,
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 20),
+              if (widget.hasOverride) ...[
+                SizedBox(
+                  width: double.infinity,
+                  child: TextButton(
+                    onPressed: _useDefault,
+                    child: const Text('Use Service Default'),
+                  ),
+                ),
+                const SizedBox(height: 8),
+              ],
+              Row(
+                children: [
+                  Expanded(
+                    child: TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                        backgroundColor: const Color(0xFFF1F3F6),
+                        foregroundColor: const Color(0xFF1A1A2E),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('Cancel'),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _save,
+                      style: ElevatedButton.styleFrom(
+                        minimumSize: const Size.fromHeight(48),
+                        backgroundColor: const Color(0xFF1B6B72),
+                        foregroundColor: Colors.white,
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                      child: const Text('Save'),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _TherapistFormDialog extends StatefulWidget {
   final TherapistModel? therapist;
   final String defaultJoinDate;
@@ -1235,7 +1871,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   late final TextEditingController _nameController;
   late final TextEditingController _phoneController;
   late final TextEditingController _genderController;
-  late final TextEditingController _employmentTypeController;
+  late final TextEditingController _roleController;
   late final TextEditingController _joinDateController;
   late final TextEditingController _notesController;
   late bool _availabilityStatus;
@@ -1251,9 +1887,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     _nameController = TextEditingController(text: therapist?.name ?? '');
     _phoneController = TextEditingController(text: therapist?.phone ?? '');
     _genderController = TextEditingController(text: therapist?.gender ?? '');
-    _employmentTypeController = TextEditingController(
-      text: therapist?.employmentType ?? '',
-    );
+    _roleController = TextEditingController(text: therapist?.role ?? 'Therapist');
     _joinDateController = TextEditingController(
       text: therapist?.joinDate ?? widget.defaultJoinDate,
     );
@@ -1266,7 +1900,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     _nameController.dispose();
     _phoneController.dispose();
     _genderController.dispose();
-    _employmentTypeController.dispose();
+    _roleController.dispose();
     _joinDateController.dispose();
     _notesController.dispose();
     super.dispose();
@@ -1281,7 +1915,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
       'gender': _genderController.text.trim(),
-      'employmentType': _employmentTypeController.text.trim(),
+      'role': _normalizeStaffRole(_roleController.text),
       'joinDate': _joinDateController.text.trim(),
       'availabilityStatus': _availabilityStatus,
       'notes': _notesController.text.trim(),
@@ -1301,29 +1935,32 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
         therapistId = savedRow['id']?.toString() ?? '';
       }
 
+      final savedCommissions = savedRow.containsKey('serviceCommissions')
+          ? TherapistModel._commissionMap(savedRow['serviceCommissions'])
+          : widget.therapist?.serviceCommissions ?? {};
       final savedTherapist = TherapistModel(
         id: therapistId,
         name: (savedRow['name'] ?? data['name'])!.toString(),
         phone: (savedRow['phone'] ?? data['phone'])!.toString(),
         gender: (savedRow['gender'] ?? data['gender'])!.toString(),
-        employmentType: (savedRow['employmentType'] ?? data['employmentType'])!
-            .toString(),
+        role: _normalizeStaffRole(savedRow['role'] ?? data['role']),
         joinDate: (savedRow['joinDate'] ?? data['joinDate'])!.toString(),
         availabilityStatus: TherapistModel._boolValue(
           savedRow['availabilityStatus'] ?? data['availabilityStatus'],
         ),
         notes: (savedRow['notes'] ?? data['notes'])!.toString(),
+        serviceCommissions: savedCommissions,
         totalAppointments: widget.therapist?.totalAppointments ?? 0,
       );
 
       _close(savedTherapist);
     } catch (e) {
-      debugPrint('Unable to save therapist: $e');
+      debugPrint('Unable to save staff: $e');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to save therapist: $e'),
+          content: Text('Unable to save staff: $e'),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -1359,7 +1996,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     children: [
                       Expanded(
                         child: Text(
-                          _isEditing ? 'Edit Therapist' : 'Add Therapist',
+                          _isEditing ? 'Edit Staff' : 'Add Staff',
                           style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.bold,
@@ -1392,11 +2029,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     controller: _genderController,
                   ),
                   const SizedBox(height: 14),
-                  _TherapistFormField(
-                    label: 'Employment Type',
-                    controller: _employmentTypeController,
-                    hint: 'Full Time / Part Time',
-                  ),
+                  _StaffRoleDropdown(label: 'Role', controller: _roleController),
                   const SizedBox(height: 14),
                   _TherapistFormField(
                     label: 'Join Date',
@@ -1463,7 +2096,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                                   ),
                                 )
                               : Text(
-                                  _isEditing ? 'Save Changes' : 'Add Therapist',
+                                  _isEditing ? 'Save Changes' : 'Add Staff',
                                 ),
                         ),
                       ),
@@ -1567,6 +2200,38 @@ class _TherapistGenderDropdown extends StatelessWidget {
   }
 }
 
+class _StaffRoleDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+
+  const _StaffRoleDropdown({required this.label, required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return DropdownButtonFormField<String>(
+      initialValue: _normalizeStaffRole(controller.text),
+      items: const [
+        DropdownMenuItem(value: 'Therapist', child: Text('Therapist')),
+        DropdownMenuItem(value: 'Counter', child: Text('Counter')),
+      ],
+      onChanged: (value) => controller.text = value ?? 'Therapist',
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: Color(0xFF1B6B72), width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
 class _SearchBar extends StatelessWidget {
   final TextEditingController controller;
   const _SearchBar({required this.controller});
@@ -1577,7 +2242,7 @@ class _SearchBar extends StatelessWidget {
       controller: controller,
       style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
       decoration: InputDecoration(
-        hintText: 'Search therapists...',
+        hintText: 'Search staff...',
         hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
         prefixIcon: const Icon(
           Icons.search,
