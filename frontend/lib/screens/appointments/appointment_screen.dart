@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/services/csp_service.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
@@ -73,6 +74,7 @@ class _ScheduleAppointment {
   final String serviceDescription;
   final String therapistId;
   final String therapistName;
+  final String roomId;
   final String roomName;
   final String notes;
   final double price;
@@ -94,6 +96,7 @@ class _ScheduleAppointment {
     required this.serviceDescription,
     required this.therapistId,
     required this.therapistName,
+    required this.roomId,
     required this.roomName,
     required this.notes,
     required this.price,
@@ -112,9 +115,10 @@ class _ScheduleAppointment {
     final customer = customers[customerId];
     final serviceId = data['serviceId']?.toString() ?? '';
     final therapistId = data['therapistId']?.toString() ?? '';
+    final roomId = data['roomId']?.toString() ?? '';
     final service = services[serviceId];
     final therapist = therapists[therapistId];
-    final room = rooms[data['roomId']?.toString() ?? ''];
+    final room = rooms[roomId];
     final dateKey = _readDateKey(data['date']);
     final isGuestCustomer =
         customerId.trim().isEmpty || customerId == 'walk_in_guest';
@@ -152,6 +156,7 @@ class _ScheduleAppointment {
           data['therapistName']?.toString() ??
           therapist?['name']?.toString() ??
           'Unassigned',
+      roomId: roomId,
       roomName:
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
       notes: data['notes']?.toString() ?? '',
@@ -395,7 +400,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           appointmentRows
               .where((data) {
                 final type = data['type']?.toString().trim().toLowerCase();
-                return type == null || type.isEmpty || type == 'appointment';
+                return type == null ||
+                    type.isEmpty ||
+                    type == 'appointment' ||
+                    type == 'online';
               })
               .map(
                 (data) => _ScheduleAppointment.fromMap(
@@ -3341,9 +3349,40 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
 
     setState(() => _saving = true);
     try {
+      if (widget.appointment.therapistId.isEmpty ||
+          widget.appointment.roomId.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Appointment needs staff and room before saving.'),
+            backgroundColor: Color(0xFFE53935),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+
+      final result = await CspService.updateAppointment(
+        appointmentId: widget.appointment.id,
+        therapistId: widget.appointment.therapistId,
+        roomId: widget.appointment.roomId,
+        date: widget.appointment.dateKey,
+        startTime: startTime,
+        endTime: endTime,
+      );
+
+      if (!mounted) return;
+      if (!result.success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(result.message),
+            backgroundColor: const Color(0xFFE53935),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+        return;
+      }
+
       await _appointmentRepository.updateAppointment(widget.appointment.id, {
-        'startTime': startTime,
-        'endTime': endTime,
         'notes': _notes.text.trim(),
         'totalPrice': price,
       });

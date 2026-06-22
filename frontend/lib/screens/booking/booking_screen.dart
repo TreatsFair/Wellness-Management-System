@@ -1,7 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
-import '../../data/repositories/appointment_repository.dart';
+import '../../core/services/csp_service.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -183,7 +183,6 @@ class NewAppointmentScreen extends StatefulWidget {
 }
 
 class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
-  final _appointmentRepository = AppointmentRepository();
   final _customerRepository = CustomerRepository();
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
@@ -212,11 +211,6 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   String? _serviceLoadError;
 
   final _customerSearchController = TextEditingController();
-
-  // CSP — operating hours
-  static const int _openHour = 9;
-  static const int _closeHour = 21;
-  static const int _slotStep = 30; // minutes
 
   @override
   void initState() {
@@ -397,27 +391,35 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     final duration = _serviceDuration;
 
     try {
-      final open = _openHour * 60;
-      final close = _closeHour * 60;
-      final slots = <_TimeSlot>[];
-      var cursor = open;
-      var recommendedCount = 0;
-
-      while (cursor + duration <= close) {
-        final slotEnd = cursor + duration;
-        slots.add(
-          _TimeSlot(
-            start: _minutesToTime(cursor),
-            end: _minutesToTime(slotEnd),
-            isRecommended: recommendedCount < 3,
-            isAvailable: true,
-          ),
-        );
-        recommendedCount++;
-        cursor += _slotStep;
-      }
+      final cspSlots = await CspService.getAvailableSlots(
+        date: DateFormat('yyyy-MM-dd').format(_selectedDate),
+        therapistId: _selectedTherapist!.id,
+        roomId: _selectedRoom!.id,
+        duration: duration,
+      );
+      final slots = cspSlots
+          .map(
+            (slot) => _TimeSlot(
+              start: slot.startTime,
+              end: slot.endTime,
+              isRecommended: slot.isRecommended,
+              isAvailable: slot.isAvailable,
+            ),
+          )
+          .toList();
 
       if (mounted) setState(() => _slots = slots);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _slots = []);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Unable to load available slots: $e'),
+            backgroundColor: const Color(0xFFE53935),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } finally {
       if (mounted) setState(() => _loadingSlots = false);
     }
@@ -585,27 +587,39 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         return;
       }
 
-      await _appointmentRepository.createAppointment({
-        'customerId': _selectedCustomer!.id,
-        'therapistId': _selectedTherapist!.id,
-        'roomId': _selectedRoom!.id,
-        'serviceId': _primaryService!.id,
-        'serviceName': _serviceNameSummary,
-        'serviceItems': _serviceItems,
-        'itemCount': _selectedServices.length,
-        'date': dateStr,
-        'startTime': _selectedSlot!.start,
-        'endTime': endTime,
-        'status': 'pending',
-        'totalPrice': _servicePrice,
-        'type': 'appointment',
-        'createdAt': DateTime.now().toIso8601String(),
-      });
+      final result = await CspService.createAppointment(
+        customerId: _selectedCustomer!.id,
+        therapistId: _selectedTherapist!.id,
+        roomId: _selectedRoom!.id,
+        serviceId: _primaryService!.id,
+        serviceName: _serviceNameSummary,
+        serviceItems: _serviceItems,
+        itemCount: _selectedServices.length,
+        date: dateStr,
+        startTime: _selectedSlot!.start,
+        endTime: endTime,
+        totalPrice: _servicePrice,
+        type: 'appointment',
+      );
+
+      if (!result.success) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(result.message),
+              backgroundColor: const Color(0xFFE53935),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+          await _generateSlots();
+        }
+        return;
+      }
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('Appointment created as pending'),
+            content: Text('Appointment confirmed'),
             backgroundColor: Color(0xFF1B6B72),
             behavior: SnackBarBehavior.floating,
           ),

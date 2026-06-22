@@ -1361,6 +1361,7 @@ class _TherapistAvailabilityScreenState
 
   @override
   Widget build(BuildContext context) {
+    final isWide = MediaQuery.of(context).size.width >= 900;
     final horizontalPadding = MediaQuery.of(context).size.width < 360
         ? 12.0
         : 16.0;
@@ -1374,46 +1375,81 @@ class _TherapistAvailabilityScreenState
               title: 'Staff',
               subtitle: 'Manage staff roles, availability, and daily activity',
             ),
-            Padding(
-              padding: EdgeInsets.fromLTRB(
-                horizontalPadding,
-                16,
-                horizontalPadding,
-                8,
-              ),
-              child: _SearchBar(
-                controller: _searchController,
-                hint: 'Search staff...',
-              ),
-            ),
             Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator(color: _teal))
-                  : RefreshIndicator(
-                      onRefresh: _load,
-                      color: _teal,
-                      child: ListView.builder(
-                        padding: EdgeInsets.fromLTRB(
-                          horizontalPadding,
-                          0,
-                          horizontalPadding,
-                          20,
+              child: isWide
+                  ? Row(
+                      children: [
+                        SizedBox(
+                          width: 360,
+                          child: _staffListPane(
+                            horizontalPadding: 14,
+                            listPadding: 10,
+                            paneColor: Colors.white,
+                          ),
                         ),
-                        itemCount: _filtered.length,
-                        itemBuilder: (_, index) {
-                          final therapist = _filtered[index];
-                          return _TherapistAvailabilityCard(
-                            therapist: therapist,
-                            onChanged: (value) =>
-                                _setAvailability(therapist, value),
-                            onEdit: () => _openForm(therapist: therapist),
-                          );
-                        },
-                      ),
+                        const Expanded(child: SizedBox()),
+                      ],
+                    )
+                  : _staffListPane(
+                      horizontalPadding: horizontalPadding,
+                      listPadding: horizontalPadding,
+                      paneColor: _page,
                     ),
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _staffListPane({
+    required double horizontalPadding,
+    required double listPadding,
+    required Color paneColor,
+  }) {
+    return Container(
+      color: paneColor,
+      child: Column(
+        children: [
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              horizontalPadding,
+              14,
+              horizontalPadding,
+              14,
+            ),
+            child: _SearchBar(
+              controller: _searchController,
+              hint: 'Search staff...',
+            ),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator(color: _teal))
+                : RefreshIndicator(
+                    onRefresh: _load,
+                    color: _teal,
+                    child: ListView.builder(
+                      padding: EdgeInsets.fromLTRB(
+                        listPadding,
+                        0,
+                        listPadding,
+                        20,
+                      ),
+                      itemCount: _filtered.length,
+                      itemBuilder: (_, index) {
+                        final therapist = _filtered[index];
+                        return _TherapistAvailabilityCard(
+                          therapist: therapist,
+                          onChanged: (value) =>
+                              _setAvailability(therapist, value),
+                          onEdit: () => _openForm(therapist: therapist),
+                        );
+                      },
+                    ),
+                  ),
+          ),
+        ],
       ),
     );
   }
@@ -1833,24 +1869,35 @@ class _SearchBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      decoration: InputDecoration(
-        hintText: hint,
-        prefixIcon: const Icon(
-          Icons.search,
-          color: Color(0xFF9CA3AF),
-          size: 20,
+    return Container(
+      height: 48,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE8EEF3),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFD4DEE8)),
+      ),
+      child: TextField(
+        controller: controller,
+        style: const TextStyle(
+          color: _ink,
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
         ),
-        filled: true,
-        fillColor: Colors.white,
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(8),
-          borderSide: BorderSide.none,
-        ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 14,
-          vertical: 12,
+        decoration: InputDecoration(
+          hintText: hint,
+          hintStyle: const TextStyle(
+            color: Color(0xFF64748B),
+            fontWeight: FontWeight.w700,
+          ),
+          prefixIcon: const Icon(
+            Icons.search,
+            color: Color(0xFF475569),
+            size: 20,
+          ),
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(vertical: 14),
         ),
       ),
     );

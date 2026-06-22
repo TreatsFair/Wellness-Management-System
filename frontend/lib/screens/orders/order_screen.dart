@@ -1,6 +1,7 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/services/csp_service.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/customer_repository.dart';
@@ -18,6 +19,24 @@ String _normalizeRoomType(Object? value) {
   if (normalized.contains('body')) return 'body_room';
   if (normalized.contains('foot')) return 'foot_chair';
   return normalized;
+}
+
+int _orderTimeToMinutes(String time) {
+  final parts = time.split(':');
+  if (parts.length < 2) return 0;
+  return (int.tryParse(parts[0]) ?? 0) * 60 +
+      (int.tryParse(parts[1]) ?? 0);
+}
+
+String _orderMinutesToTime(int minutes) {
+  final hour = (minutes ~/ 60).toString().padLeft(2, '0');
+  final minute = (minutes % 60).toString().padLeft(2, '0');
+  return '$hour:$minute';
+}
+
+String _databaseTimeFromLabel(String label) {
+  final parsed = DateFormat('h:mm a').parse(label);
+  return DateFormat('HH:mm').format(parsed);
 }
 
 // ── Models (reuse same pattern as appointment) ────────────────────
@@ -625,8 +644,41 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               staff: counterStaff,
               role: 'Counter',
             );
+      final startTime = _databaseTimeFromLabel(_selectedStartTime!.timeLabel);
+      final endTime = _orderMinutesToTime(
+        _orderTimeToMinutes(startTime) + _serviceDuration,
+      );
+      final appointmentResult = await CspService.createAppointment(
+        customerId: _selectedCustomer!.id,
+        therapistId: _selectedTherapist!.id,
+        roomId: _selectedZone!.id,
+        serviceId: _primaryService!.id,
+        serviceName: _serviceNameSummary,
+        serviceItems: _serviceItems,
+        itemCount: _selectedServices.length,
+        date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
+        startTime: startTime,
+        endTime: endTime,
+        totalPrice: _servicePrice,
+        type: 'walkin',
+        notes: _transactionNotesController.text.trim(),
+      );
+
+      if (!appointmentResult.success) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(appointmentResult.message),
+              backgroundColor: const Color(0xFFE53935),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        return;
+      }
 
       await _transactionRepository.createTransaction({
+        'appointmentId': appointmentResult.appointmentId,
         'customerId': _selectedCustomer!.id,
         'customerName': _selectedCustomer!.name,
         'customerPhone': _selectedCustomer!.phone,

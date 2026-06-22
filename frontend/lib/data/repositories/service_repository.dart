@@ -33,8 +33,14 @@ class ServiceRepository {
     Map<String, dynamic> values,
   ) async {
     final row = await _table.update(id, values);
+    _verifySavedString(row, values, 'name');
+    _verifySavedString(row, values, 'category');
+    _verifySavedInt(row, values, 'duration');
+    _verifySavedDouble(row, values, 'price');
     _verifySavedDouble(row, values, 'therapistCommission');
     _verifySavedDouble(row, values, 'counterCommission');
+    _verifySavedString(row, values, 'roomType');
+    _verifySavedBool(row, values, 'isActive');
     return row;
   }
 
@@ -58,6 +64,47 @@ void _verifySavedDouble(
   final expected = asDouble(values[key]);
   final actual = asDouble(row[key]);
   if ((actual - expected).abs() > 0.001) {
+    throw StateError(
+      'Service update was not saved. Please run supabase/sql/008_services_update_staff_admin.sql and try again.',
+    );
+  }
+}
+
+void _verifySavedString(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  final expected = asString(values[key]).trim();
+  final actual = asString(row[key]).trim();
+  if (actual != expected) {
+    throw StateError(
+      'Service update was not saved. Please run supabase/sql/008_services_update_staff_admin.sql and try again.',
+    );
+  }
+}
+
+void _verifySavedInt(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  if (asInt(row[key]) != asInt(values[key])) {
+    throw StateError(
+      'Service update was not saved. Please run supabase/sql/008_services_update_staff_admin.sql and try again.',
+    );
+  }
+}
+
+void _verifySavedBool(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  if (asBool(row[key]) != asBool(values[key])) {
     throw StateError(
       'Service update was not saved. Please run supabase/sql/008_services_update_staff_admin.sql and try again.',
     );

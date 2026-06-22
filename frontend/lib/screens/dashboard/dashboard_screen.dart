@@ -12,6 +12,7 @@ import '../history/sales_history_screen.dart';
 import '../orders/order_screen.dart';
 import '../management/management_screen.dart';
 import '../reports/reports_screen.dart';
+import '../timetable/timetable_screen.dart';
 
 class _DashboardStats {
   final int todayAppointments;
@@ -776,6 +777,21 @@ class _TabletLayout extends StatelessWidget {
                         ),
                       ),
                     ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: _TabletOtherCard(
+                        icon: Icons.view_timeline_outlined,
+                        label: 'Timetable',
+                        iconBg: const Color(0xFFFFF7ED),
+                        iconColor: const Color(0xFFEA580C),
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => TimetableScreen(userRole: role),
+                          ),
+                        ),
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -1406,6 +1422,18 @@ class _PhoneLayout extends StatelessWidget {
                         context,
                         MaterialPageRoute(
                           builder: (_) => ReportsScreen(userRole: role),
+                        ),
+                      ),
+                    ),
+                    _PhoneOtherCard(
+                      icon: Icons.view_timeline_outlined,
+                      label: 'Timetable',
+                      iconBg: const Color(0xFFFFF7ED),
+                      iconColor: const Color(0xFFEA580C),
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => TimetableScreen(userRole: role),
                         ),
                       ),
                     ),

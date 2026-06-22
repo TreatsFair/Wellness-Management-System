@@ -182,7 +182,89 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (context) => _OrderDetailSheet(order: order),
+      builder: (context) => _OrderDetailSheet(
+        order: order,
+        isAdmin: _isAdmin,
+        onVoid: () => _voidOrder(order),
+      ),
+    );
+  }
+
+  Future<void> _voidOrder(_HistoryOrder order) async {
+    if (!_isAdmin) return;
+
+    final firstConfirm = await _confirmVoidOrder(
+      title: 'Void this order?',
+      message:
+          'This will remove ${order.receiptNumber} from order history and reports.',
+      actionLabel: 'Continue',
+    );
+    if (firstConfirm != true || !mounted) return;
+
+    final finalConfirm = await _confirmVoidOrder(
+      title: 'Confirm void order',
+      message:
+          'This action cannot be undone. Void ${order.receiptNumber} permanently?',
+      actionLabel: 'Void Order',
+      destructive: true,
+    );
+    if (finalConfirm != true || !mounted) return;
+
+    try {
+      await _transactionRepository.deleteTransaction(order.id);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      await _loadHistory();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${order.receiptNumber} voided'),
+          backgroundColor: _teal,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to void order: $e'),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<bool?> _confirmVoidOrder({
+    required String title,
+    required String message,
+    required String actionLabel,
+    bool destructive = false,
+  }) {
+    return showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: Text(title),
+          content: Text(message),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: destructive
+                    ? const Color(0xFFE53935)
+                    : _teal,
+                foregroundColor: Colors.white,
+              ),
+              child: Text(actionLabel),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -1430,8 +1512,14 @@ class _HistoryMessage extends StatelessWidget {
 
 class _OrderDetailSheet extends StatelessWidget {
   final _HistoryOrder order;
+  final bool isAdmin;
+  final VoidCallback onVoid;
 
-  const _OrderDetailSheet({required this.order});
+  const _OrderDetailSheet({
+    required this.order,
+    required this.isAdmin,
+    required this.onVoid,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1491,6 +1579,29 @@ class _OrderDetailSheet extends StatelessWidget {
             _DetailRow('Service Net', _money(order.servicePrice)),
             _DetailRow('SST', _money(order.sstAmount)),
             _DetailRow('Total', _money(order.totalAmount), strong: true),
+            if (isAdmin) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: onVoid,
+                  icon: const Icon(Icons.block_rounded, size: 18),
+                  label: const Text('Void Order'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: const Color(0xFFE53935),
+                    side: const BorderSide(color: Color(0xFFE53935)),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    textStyle: const TextStyle(
+                      fontWeight: FontWeight.w900,
+                      fontSize: 14,
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       ),

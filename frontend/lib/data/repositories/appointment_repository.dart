@@ -192,12 +192,10 @@ bool _canCreateCustomer(Map<String, dynamic>? values) {
 }
 
 bool _blocksSchedule(String status) {
-  return status == 'pending' ||
-      status == 'confirmed' ||
-      status == 'in_progress';
+  return status == 'confirmed' || status == 'in_progress';
 }
 
 bool _isScheduledAppointmentRow(Map<String, dynamic> row) {
   final type = asString(row['type']).toLowerCase();
-  return type.isEmpty || type == 'appointment';
+  return type.isEmpty || type == 'appointment' || type == 'walkin';
 }

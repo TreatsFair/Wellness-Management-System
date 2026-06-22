@@ -389,7 +389,7 @@ class _TabletLayout extends StatelessWidget {
       children: [
         // Left — therapist list
         Container(
-          width: 320,
+          width: 360,
           color: Colors.white,
           child: Column(
             children: [
@@ -417,7 +417,7 @@ class _TabletLayout extends StatelessWidget {
 
               // Search
               Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
                 child: _SearchBar(controller: searchController),
               ),
 
@@ -635,9 +635,9 @@ class _PhoneLayout extends StatelessWidget {
         Padding(
           padding: EdgeInsets.fromLTRB(
             horizontalPadding,
-            12,
+            14,
             horizontalPadding,
-            12,
+            14,
           ),
           child: _SearchBar(controller: searchController),
         ),
@@ -2238,26 +2238,35 @@ class _SearchBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return TextField(
-      controller: controller,
-      style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
-      decoration: InputDecoration(
-        hintText: 'Search staff...',
-        hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
-        prefixIcon: const Icon(
-          Icons.search,
-          color: Color(0xFF9E9E9E),
-          size: 20,
+    return Container(
+      height: 48,
+      decoration: BoxDecoration(
+        color: const Color(0xFFE8EEF3),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFD4DEE8)),
+      ),
+      child: TextField(
+        controller: controller,
+        style: const TextStyle(
+          color: Color(0xFF1A1A2E),
+          fontSize: 14,
+          fontWeight: FontWeight.w700,
         ),
-        filled: true,
-        fillColor: const Color(0xFFF5F5F5),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(12),
-          borderSide: BorderSide.none,
-        ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 16,
-          vertical: 12,
+        decoration: const InputDecoration(
+          hintText: 'Search staff...',
+          hintStyle: TextStyle(
+            color: Color(0xFF64748B),
+            fontWeight: FontWeight.w700,
+          ),
+          prefixIcon: Icon(
+            Icons.search,
+            color: Color(0xFF475569),
+            size: 20,
+          ),
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          contentPadding: EdgeInsets.symmetric(vertical: 14),
         ),
       ),
     );

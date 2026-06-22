@@ -708,6 +708,7 @@ class _ReportData {
   final List<_BreakdownSlice> paymentSales;
   final List<_ServicePerformance> topServices;
   final List<_StaffCommission> staffCommissions;
+  final double counterCommissionTotal;
   final double counterCommissionPool;
 
   const _ReportData({
@@ -718,6 +719,7 @@ class _ReportData {
     required this.paymentSales,
     required this.topServices,
     required this.staffCommissions,
+    required this.counterCommissionTotal,
     required this.counterCommissionPool,
   });
 
@@ -729,6 +731,7 @@ class _ReportData {
     paymentSales: [],
     topServices: [],
     staffCommissions: [],
+    counterCommissionTotal: 0,
     counterCommissionPool: 0,
   );
 
@@ -755,6 +758,7 @@ class _ReportData {
     var appointmentOrders = 0;
     var walkInOrders = 0;
     var staffCommission = 0.0;
+    var counterCommissionTotal = 0.0;
     var counterCommissionPool = 0.0;
     var counterPoolJobs = 0;
     var counterPoolSales = 0.0;
@@ -891,10 +895,12 @@ class _ReportData {
           ..jobs += 1
           ..sales += order.serviceNet;
         staffCommission += orderCounterCommission;
+        counterCommissionTotal += orderCounterCommission;
       }
 
       if (order.counterStaffId.isEmpty && order.counterCommissionAmount > 0) {
         counterCommissionPool += order.counterCommissionAmount;
+        counterCommissionTotal += order.counterCommissionAmount;
         counterPoolJobs += 1;
         counterPoolSales += order.serviceNet;
         staffCommission += order.counterCommissionAmount;
@@ -955,7 +961,7 @@ class _ReportData {
       if (counterCommissionPool > 0)
         _StaffCommission(
           id: _counterPoolId,
-          name: 'Counter Pool',
+          name: 'Counter Commission',
           role: 'Counter',
           jobs: counterPoolJobs,
           sales: counterPoolSales,
@@ -988,6 +994,7 @@ class _ReportData {
       paymentSales: paymentSales,
       topServices: topServices.take(3).toList(),
       staffCommissions: staffCommissions,
+      counterCommissionTotal: counterCommissionTotal,
       counterCommissionPool: counterCommissionPool,
     );
   }
@@ -1369,9 +1376,9 @@ class _MetricGrid extends StatelessWidget {
         color: _violet,
       ),
       _MetricCard(
-        title: 'Counter Pool',
-        value: loading ? '-' : _money(data.counterCommissionPool),
-        detail: 'Unassigned counter total',
+        title: 'Counter Commission',
+        value: loading ? '-' : _money(data.counterCommissionTotal),
+        detail: 'Counter staff earnings',
         icon: Icons.point_of_sale_outlined,
         color: _rose,
       ),
@@ -3751,7 +3758,7 @@ List<_StaffOrderRecord> _recordsForStaff({
 
     if (staff.id == _counterPoolId) {
       commission += _counterPoolCommissionForOrder(order, services);
-      if (commission > 0) roles.add('Counter Pool');
+      if (commission > 0) roles.add('Counter Commission');
     } else {
       if (therapistMatches) {
         commission += _therapistCommissionForOrder(

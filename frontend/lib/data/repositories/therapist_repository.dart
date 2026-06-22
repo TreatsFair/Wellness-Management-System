@@ -48,8 +48,14 @@ class TherapistRepository {
   Future<Map<String, dynamic>> updateTherapist(
     String id,
     Map<String, dynamic> values,
-  ) {
-    return _table.update(id, values);
+  ) async {
+    final row = await _table.update(id, values);
+    _verifySavedString(row, values, 'name');
+    _verifySavedString(row, values, 'phone');
+    _verifySavedString(row, values, 'role');
+    _verifySavedBool(row, values, 'availabilityStatus');
+    _verifySavedString(row, values, 'busyUntil');
+    return row;
   }
 
   Future<void> deleteTherapist(String id) => _table.delete(id);
@@ -81,4 +87,32 @@ bool _isTherapistRole(Map<String, dynamic> row) {
 bool _isCounterRole(Map<String, dynamic> row) {
   final role = asString(row['role'], asString(row['staffRole'])).toLowerCase();
   return role == 'counter' || role == 'cashier';
+}
+
+void _verifySavedString(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  final expected = asString(values[key]).trim();
+  final actual = asString(row[key]).trim();
+  if (actual != expected) {
+    throw StateError(
+      'Staff update was not saved. Please run supabase/sql/011_management_update_policies.sql and try again.',
+    );
+  }
+}
+
+void _verifySavedBool(
+  Map<String, dynamic> row,
+  Map<String, dynamic> values,
+  String key,
+) {
+  if (!values.containsKey(key)) return;
+  if (asBool(row[key]) != asBool(values[key])) {
+    throw StateError(
+      'Staff update was not saved. Please run supabase/sql/011_management_update_policies.sql and try again.',
+    );
+  }
 }

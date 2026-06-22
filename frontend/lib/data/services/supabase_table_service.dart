@@ -3,6 +3,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 const Map<String, String> _snakeToCamelAliases = {
   'appointment_id': 'appointmentId',
   'appointment_date': 'date',
+  'appointment_group_id': 'appointmentGroupId',
   'availability_status': 'availabilityStatus',
   'business_name': 'businessName',
   'busy_until': 'busyUntil',
