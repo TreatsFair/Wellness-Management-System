@@ -29,8 +29,9 @@ int _orderTimeToMinutes(String time) {
 }
 
 String _orderMinutesToTime(int minutes) {
-  final hour = (minutes ~/ 60).toString().padLeft(2, '0');
-  final minute = (minutes % 60).toString().padLeft(2, '0');
+  final normalized = minutes % (24 * 60);
+  final hour = (normalized ~/ 60).toString().padLeft(2, '0');
+  final minute = (normalized % 60).toString().padLeft(2, '0');
   return '$hour:$minute';
 }
 
@@ -217,6 +218,74 @@ class _StartTimeOption {
   });
 }
 
+class _WalkInAllocation {
+  final List<_WalkInService> services;
+  final _WalkInTherapist therapist;
+  final _WalkInZone zone;
+  final _StartTimeOption startTime;
+
+  const _WalkInAllocation({
+    required this.services,
+    required this.therapist,
+    required this.zone,
+    required this.startTime,
+  });
+
+  _WalkInService get primaryService => services.first;
+
+  double get servicePrice =>
+      services.fold(0, (total, service) => total + service.price);
+
+  int get duration =>
+      services.fold(0, (total, service) => total + service.duration);
+
+  String get serviceNameSummary {
+    if (services.length == 1) return services.first.name;
+    return services.map((service) => service.name).join(', ');
+  }
+
+  String get startTimeValue => _databaseTimeFromLabel(startTime.timeLabel);
+
+  String get endTimeValue => _orderMinutesToTime(
+    _orderTimeToMinutes(startTimeValue) + duration,
+  );
+
+  List<Map<String, dynamic>> get serviceItems => services
+      .map(
+        (service) => {
+          'id': service.id,
+          'name': service.name,
+          'category': service.category,
+          'duration': service.duration,
+          'price': service.price,
+          'therapistCommission': service.therapistCommission,
+          'counterCommission': service.counterCommission,
+          'assignedTherapistId': therapist.id,
+          'assignedTherapistName': therapist.name,
+          'assignedRoomId': zone.id,
+          'assignedRoomName': zone.name,
+          'startTime': startTimeValue,
+          'endTime': endTimeValue,
+        },
+      )
+      .toList();
+
+  Map<String, dynamic> toCspAllocation({required String notes}) {
+    return {
+      'therapist_id': therapist.id,
+      'room_id': zone.id,
+      'service_id': primaryService.id,
+      'start_time': startTimeValue,
+      'end_time': endTimeValue,
+      'total_price': servicePrice,
+      'service_name': serviceNameSummary,
+      'service_items': serviceItems,
+      'item_count': services.length,
+      'notes': notes,
+    };
+  }
+}
+
 // ── Main Screen ───────────────────────────────────────────────────
 
 class WalkInPosScreen extends StatefulWidget {
@@ -244,6 +313,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   _WalkInTherapist? _selectedTherapist;
   _WalkInZone? _selectedZone;
   _StartTimeOption? _selectedStartTime;
+  int _paxCount = 1;
+  int _activePaxIndex = 0;
+  final List<_WalkInAllocation?> _paxAllocations = [null];
   String _serviceTab = 'Services';
   String? _paymentMethod;
   bool _isConfirming = false;
@@ -557,26 +629,180 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       _selectedZone = null;
       _selectedStartTime = null;
       _startOptions = [];
+      _paxAllocations[_activePaxIndex] = null;
     });
   }
 
   void _onTherapistSelected(_WalkInTherapist t) {
-    setState(() => _selectedTherapist = t);
+    setState(() {
+      _selectedTherapist = t;
+      _paxAllocations[_activePaxIndex] = null;
+    });
     if (_selectedZone != null) _computeStartOptions();
   }
 
   void _onZoneSelected(_WalkInZone z) {
-    setState(() => _selectedZone = z);
+    setState(() {
+      _selectedZone = z;
+      _paxAllocations[_activePaxIndex] = null;
+    });
     if (_selectedTherapist != null) _computeStartOptions();
   }
 
+  bool get _hasCurrentAllocation =>
+      _selectedServices.isNotEmpty &&
+      _selectedTherapist != null &&
+      _selectedZone != null &&
+      _selectedStartTime != null;
+
+  _WalkInAllocation? get _currentAllocation {
+    if (!_hasCurrentAllocation) return null;
+    return _WalkInAllocation(
+      services: List<_WalkInService>.from(_selectedServices),
+      therapist: _selectedTherapist!,
+      zone: _selectedZone!,
+      startTime: _selectedStartTime!,
+    );
+  }
+
+  List<_WalkInAllocation?> get _allocationSlots {
+    final current = _currentAllocation;
+    final allocations = List<_WalkInAllocation?>.from(_paxAllocations);
+    if (current != null) allocations[_activePaxIndex] = current;
+    return allocations;
+  }
+
+  List<_WalkInAllocation> get _checkoutAllocations =>
+      _allocationSlots.whereType<_WalkInAllocation>().toList();
+
+  void _clearCurrentAllocationSelection() {
+    _selectedServices.clear();
+    _selectedTherapist = null;
+    _selectedZone = null;
+    _selectedStartTime = null;
+    _startOptions = [];
+  }
+
+  void _loadAllocationIntoSelection(_WalkInAllocation? allocation) {
+    if (allocation == null) {
+      _clearCurrentAllocationSelection();
+      return;
+    }
+    _selectedServices
+      ..clear()
+      ..addAll(allocation.services);
+    _selectedTherapist = allocation.therapist;
+    _selectedZone = allocation.zone;
+    _selectedStartTime = allocation.startTime;
+    _startOptions = [allocation.startTime];
+  }
+
+  bool _timesOverlap(_WalkInAllocation a, _WalkInAllocation b) {
+    final aStart = _orderTimeToMinutes(a.startTimeValue);
+    var aEnd = _orderTimeToMinutes(a.endTimeValue);
+    final bStart = _orderTimeToMinutes(b.startTimeValue);
+    var bEnd = _orderTimeToMinutes(b.endTimeValue);
+    if (aEnd <= aStart) aEnd += 24 * 60;
+    if (bEnd <= bStart) bEnd += 24 * 60;
+    return aStart < bEnd && aEnd > bStart;
+  }
+
+  String? _allocationConflictMessage(
+    _WalkInAllocation allocation, {
+    required int index,
+  }) {
+    for (var i = 0; i < _paxAllocations.length; i++) {
+      if (i == index) continue;
+      final other = _paxAllocations[i];
+      if (other == null) continue;
+      if (other.therapist.id == allocation.therapist.id &&
+          _timesOverlap(allocation, other)) {
+        return 'Pax ${index + 1} overlaps Pax ${i + 1}. ${allocation.therapist.name} is already assigned at that time.';
+      }
+    }
+    return null;
+  }
+
+  String? get _paxConflictMessage {
+    final allocations = _allocationSlots;
+    for (var i = 0; i < allocations.length; i++) {
+      final allocation = allocations[i];
+      if (allocation == null) continue;
+      for (var j = i + 1; j < allocations.length; j++) {
+        final other = allocations[j];
+        if (other == null) continue;
+        if (allocation.therapist.id == other.therapist.id &&
+            _timesOverlap(allocation, other)) {
+          return 'Pax ${i + 1} and Pax ${j + 1} use ${allocation.therapist.name} at overlapping times.';
+        }
+      }
+    }
+    return null;
+  }
+
+  bool _canStoreCurrentAllocation() {
+    final current = _currentAllocation;
+    if (current == null) return false;
+    return _allocationConflictMessage(current, index: _activePaxIndex) == null;
+  }
+
+  void _showPaxConflict(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: const Color(0xFFE53935),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _selectPax(int index) {
+    final current = _currentAllocation;
+    if (current != null) {
+      final conflict = _allocationConflictMessage(
+        current,
+        index: _activePaxIndex,
+      );
+      if (conflict != null) {
+        _showPaxConflict(conflict);
+        return;
+      }
+    }
+    setState(() {
+      if (current != null) _paxAllocations[_activePaxIndex] = current;
+      _activePaxIndex = index;
+      _loadAllocationIntoSelection(_paxAllocations[index]);
+    });
+  }
+
+  void _clearPax(int index) {
+    setState(() {
+      _paxAllocations[index] = null;
+      _activePaxIndex = index;
+      _loadAllocationIntoSelection(null);
+    });
+  }
+
+  void _setPaxCount(int count) {
+    if (count < 1) return;
+    setState(() {
+      final current = _currentAllocation;
+      if (current != null && _canStoreCurrentAllocation()) {
+        _paxAllocations[_activePaxIndex] = current;
+      }
+      _paxCount = count;
+      while (_paxAllocations.length < count) {
+        _paxAllocations.add(null);
+      }
+      while (_paxAllocations.length > count) {
+        _paxAllocations.removeLast();
+      }
+      if (_activePaxIndex >= count) _activePaxIndex = count - 1;
+      _loadAllocationIntoSelection(_paxAllocations[_activePaxIndex]);
+    });
+  }
+
   // ── Computed Values ────────────────────────────────────────────
-
-  _WalkInService? get _primaryService =>
-      _selectedServices.isEmpty ? null : _selectedServices.first;
-
-  double get _servicePrice =>
-      _selectedServices.fold(0, (total, service) => total + service.price);
 
   int get _serviceDuration => _selectedServices.fold(
     0,
@@ -589,20 +815,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     return _selectedServices.map((service) => service.name).join(', ');
   }
 
-  List<Map<String, dynamic>> get _serviceItems => _selectedServices
-      .map(
-        (service) => {
-          'id': service.id,
-          'name': service.name,
-          'category': service.category,
-          'duration': service.duration,
-          'price': service.price,
-          'therapistCommission': service.therapistCommission,
-          'counterCommission': service.counterCommission,
-        },
-      )
-      .toList();
-
   String get _requiredRoomType {
     final types = _selectedServices
         .map((service) => service.roomType)
@@ -611,15 +823,29 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     return types.length == 1 ? types.first : '';
   }
 
-  double get _sstAmount => _servicePrice * 0.06;
-  double get _totalAmount => _servicePrice + _sstAmount;
+  List<Map<String, dynamic>> get _orderServiceItems => _checkoutAllocations
+      .expand((allocation) => allocation.serviceItems)
+      .toList();
+
+  double get _orderServicePrice => _checkoutAllocations.fold(
+    0,
+    (total, allocation) => total + allocation.servicePrice,
+  );
+
+  double get _orderSstAmount => _orderServicePrice * 0.06;
+  double get _orderTotalAmount => _orderServicePrice + _orderSstAmount;
+
+  String get _orderServiceNameSummary {
+    final allocations = _checkoutAllocations;
+    if (allocations.isEmpty) return '';
+    if (allocations.length == 1) return allocations.first.serviceNameSummary;
+    return '${allocations.length} pax services';
+  }
 
   bool get _canCheckout =>
       _selectedCustomer != null &&
-      _selectedServices.isNotEmpty &&
-      _selectedTherapist != null &&
-      _selectedZone != null &&
-      _selectedStartTime != null;
+      _checkoutAllocations.length == _paxCount &&
+      _paxConflictMessage == null;
 
   bool get _canConfirmPayment => _paymentMethod != null;
 
@@ -630,39 +856,64 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     setState(() => _isConfirming = true);
 
     try {
+      final allocations = _checkoutAllocations;
+      final conflict = _paxConflictMessage;
+      if (conflict != null) {
+        if (mounted) _showPaxConflict(conflict);
+        return;
+      }
       final counterStaff = await _commissionRepository.getAvailableCounterStaff();
-      final therapistCommissionAmount =
-          CommissionRepository.commissionForServices(
-            _serviceItems,
-            staff: _selectedTherapist!.commissionData,
-            role: 'Therapist',
-          );
+      final therapistCommissionAmount = allocations.fold<double>(
+        0,
+        (total, allocation) =>
+            total +
+            CommissionRepository.commissionForServices(
+              allocation.serviceItems,
+              staff: allocation.therapist.commissionData,
+              role: 'Therapist',
+            ),
+      );
       final counterCommissionAmount = counterStaff == null
           ? 0.0
           : CommissionRepository.commissionForServices(
-              _serviceItems,
+              _orderServiceItems,
               staff: counterStaff,
               role: 'Counter',
             );
-      final startTime = _databaseTimeFromLabel(_selectedStartTime!.timeLabel);
-      final endTime = _orderMinutesToTime(
-        _orderTimeToMinutes(startTime) + _serviceDuration,
-      );
-      final appointmentResult = await CspService.createAppointment(
-        customerId: _selectedCustomer!.id,
-        therapistId: _selectedTherapist!.id,
-        roomId: _selectedZone!.id,
-        serviceId: _primaryService!.id,
-        serviceName: _serviceNameSummary,
-        serviceItems: _serviceItems,
-        itemCount: _selectedServices.length,
-        date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
-        startTime: startTime,
-        endTime: endTime,
-        totalPrice: _servicePrice,
-        type: 'walkin',
-        notes: _transactionNotesController.text.trim(),
-      );
+      final date = DateFormat('yyyy-MM-dd').format(DateTime.now());
+      final notes = _transactionNotesController.text.trim();
+      CspCreateResult appointmentResult;
+
+      if (allocations.length == 1) {
+        final allocation = allocations.first;
+        appointmentResult = await CspService.createAppointment(
+          customerId: _selectedCustomer!.id,
+          therapistId: allocation.therapist.id,
+          roomId: allocation.zone.id,
+          serviceId: allocation.primaryService.id,
+          serviceName: allocation.serviceNameSummary,
+          serviceItems: allocation.serviceItems,
+          itemCount: allocation.services.length,
+          date: date,
+          startTime: allocation.startTimeValue,
+          endTime: allocation.endTimeValue,
+          totalPrice: allocation.servicePrice,
+          type: 'walkin',
+          notes: notes,
+        );
+      } else {
+        appointmentResult = await CspService.createAppointmentGroup(
+          customerId: _selectedCustomer!.id,
+          groupName: _selectedCustomer!.name,
+          paxCount: allocations.length,
+          date: date,
+          allocations: allocations
+              .map((allocation) => allocation.toCspAllocation(notes: notes))
+              .toList(),
+          type: 'walkin',
+          notes: notes,
+        );
+      }
 
       if (!appointmentResult.success) {
         if (mounted) {
@@ -677,33 +928,48 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         return;
       }
 
-      await _transactionRepository.createTransaction({
-        'appointmentId': appointmentResult.appointmentId,
+      final primaryAllocation = allocations.first;
+      final transactionValues = <String, dynamic>{
         'customerId': _selectedCustomer!.id,
         'customerName': _selectedCustomer!.name,
         'customerPhone': _selectedCustomer!.phone,
-        'serviceId': _primaryService!.id,
-        'serviceName': _serviceNameSummary,
-        'serviceItems': _serviceItems,
-        'itemCount': _selectedServices.length,
-        'therapistId': _selectedTherapist!.id,
-        'therapistName': _selectedTherapist!.name,
+        'serviceId': primaryAllocation.primaryService.id,
+        'serviceName': _orderServiceNameSummary,
+        'serviceItems': _orderServiceItems,
+        'itemCount': _orderServiceItems.length,
+        'therapistId': primaryAllocation.therapist.id,
+        'therapistName': allocations.length == 1
+            ? primaryAllocation.therapist.name
+            : '${allocations.length} staff assigned',
         if (counterStaff != null) ...{
           'counterStaffId': counterStaff['id'],
           'counterStaffName': counterStaff['name'],
         },
-        'roomId': _selectedZone!.id,
-        'roomName': _selectedZone!.name,
-        'servicePrice': _servicePrice,
-        'sstAmount': _sstAmount,
-        'totalAmount': _totalAmount,
+        'roomId': primaryAllocation.zone.id,
+        'roomName': allocations.length == 1
+            ? primaryAllocation.zone.name
+            : '${allocations.length} resources',
+        'servicePrice': _orderServicePrice,
+        'sstAmount': _orderSstAmount,
+        'totalAmount': _orderTotalAmount,
         'therapistCommissionAmount': therapistCommissionAmount,
         'counterCommissionAmount': counterCommissionAmount,
+        'source': 'walkin',
         'paymentMethod': _paymentMethod,
         'paymentStatus': 'paid',
         'receiptNumber': _receiptNumber,
         'notes': _transactionNotesController.text.trim(),
-      });
+      };
+      final appointmentId = appointmentResult.appointmentId;
+      final appointmentGroupId = appointmentResult.appointmentGroupId;
+      if (appointmentId != null) {
+        transactionValues['appointmentId'] = appointmentId;
+      }
+      if (appointmentGroupId != null) {
+        transactionValues['appointmentGroupId'] = appointmentGroupId;
+      }
+
+      await _transactionRepository.createTransaction(transactionValues);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -878,10 +1144,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 bottom: 0,
                 child: _PhoneCheckoutBar(
                   customerName: _selectedCustomer?.name,
-                  serviceName: _selectedServices.isEmpty
+                  serviceName: _checkoutAllocations.isEmpty
                       ? null
-                      : _serviceNameSummary,
-                  totalAmount: _totalAmount,
+                      : _orderServiceNameSummary,
+                  totalAmount: _orderTotalAmount,
                   canCheckout: _canCheckout,
                   onCheckout: () => setState(() => _showPayment = true),
                 ),
@@ -1069,7 +1335,88 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             ),
           ),
         ),
+        const SizedBox(height: 16),
+        _buildPaxCountControl(),
       ],
+    );
+  }
+
+  Widget _buildPaxCountControl() {
+    final configuredCount = _checkoutAllocations.length;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5F5),
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                child: const Icon(
+                  Icons.groups_2_outlined,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Pax',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$configuredCount of $_paxCount configured',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              _PaxStepperButton(
+                icon: Icons.remove,
+                onTap: _paxCount <= 1 ? null : () => _setPaxCount(_paxCount - 1),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10),
+                child: Text(
+                  '$_paxCount',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ),
+              _PaxStepperButton(
+                icon: Icons.add,
+                onTap: () => _setPaxCount(_paxCount + 1),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 
@@ -1202,7 +1549,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         final cards = _startOptions.map((option) {
           final isSelected = _selectedStartTime?.timeLabel == option.timeLabel;
           return GestureDetector(
-            onTap: () => setState(() => _selectedStartTime = option),
+            onTap: () => setState(() {
+              _selectedStartTime = option;
+              _paxAllocations[_activePaxIndex] = null;
+            }),
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
               padding: const EdgeInsets.all(18),
@@ -1365,7 +1715,39 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           _WalkInSummaryRow(label: 'Zone', value: _selectedZone?.name ?? '—'),
           _WalkInSummaryRow(label: 'Start Time', value: startLabel),
 
-          if (_selectedServices.isNotEmpty) ...[
+          if (_paxCount > 1 || _checkoutAllocations.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            Text(
+              'Pax in this order (${_checkoutAllocations.length}/$_paxCount)',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+            const SizedBox(height: 10),
+            for (var i = 0; i < _allocationSlots.length; i++) ...[
+              _WalkInPaxSummaryCard(
+                index: i + 1,
+                allocation: _allocationSlots[i],
+                selected: i == _activePaxIndex,
+                onTap: () => _selectPax(i),
+                onClear: _allocationSlots[i] == null ? null : () => _clearPax(i),
+              ),
+              const SizedBox(height: 8),
+            ],
+            if (_paxConflictMessage != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                _paxConflictMessage!,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFFE53935),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             const SizedBox(height: 8),
             const Divider(color: Color(0xFFEEEEEE)),
             const SizedBox(height: 12),
@@ -1378,7 +1760,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF6B6B6B)),
                 ),
                 Text(
-                  'RM ${_servicePrice.toStringAsFixed(2)}',
+                  'RM ${_orderServicePrice.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 13,
                     color: Color(0xFF1A1A2E),
@@ -1395,7 +1777,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF6B6B6B)),
                 ),
                 Text(
-                  'RM ${_sstAmount.toStringAsFixed(2)}',
+                  'RM ${_orderSstAmount.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 13,
                     color: Color(0xFF1A1A2E),
@@ -1418,7 +1800,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   ),
                 ),
                 Text(
-                  'RM ${_totalAmount.toStringAsFixed(2)}',
+                  'RM ${_orderTotalAmount.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.bold,
@@ -1571,7 +1953,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                       children: [
                         Expanded(
                           child: Text(
-                            '${_selectedCustomer?.name ?? 'Guest'} - ${_selectedServices.isEmpty ? '-' : _serviceNameSummary}',
+                            '${_selectedCustomer?.name ?? 'Guest'} - ${_orderServiceNameSummary.isEmpty ? '-' : _orderServiceNameSummary}',
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -1592,7 +1974,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                             borderRadius: BorderRadius.circular(8),
                           ),
                           child: Text(
-                            '$_serviceDuration min',
+                            '${_checkoutAllocations.length} pax',
                             style: const TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.w600,
@@ -1604,7 +1986,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                     ),
                     const SizedBox(height: 6),
                     Text(
-                      '${_selectedTherapist?.name ?? ''} - ${_selectedZone?.name ?? ''}',
+                      _checkoutAllocations.length == 1
+                          ? '${_checkoutAllocations.first.therapist.name} - ${_checkoutAllocations.first.zone.name}'
+                          : '${_checkoutAllocations.length} staff - ${_checkoutAllocations.length} resources',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1613,7 +1997,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                       ),
                     ),
                     Text(
-                      'Start: ${_selectedStartTime?.isNow == true ? 'Now' : 'Next'} - ${_selectedStartTime?.timeLabel ?? ''}',
+                      _checkoutAllocations.length == 1
+                          ? 'Start: ${_checkoutAllocations.first.startTime.isNow ? 'Now' : 'Next'} - ${_checkoutAllocations.first.startTime.timeLabel}'
+                          : 'Group walk-in with ${_checkoutAllocations.length} allocations',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -1640,12 +2026,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   children: [
                     _PaymentRow(
                       'Service',
-                      'RM ${_servicePrice.toStringAsFixed(2)}',
+                      'RM ${_orderServicePrice.toStringAsFixed(2)}',
                     ),
                     const SizedBox(height: 8),
                     _PaymentRow(
                       'SST (6%)',
-                      'RM ${_sstAmount.toStringAsFixed(2)}',
+                      'RM ${_orderSstAmount.toStringAsFixed(2)}',
                     ),
                     const Padding(
                       padding: EdgeInsets.symmetric(vertical: 10),
@@ -1663,7 +2049,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                           ),
                         ),
                         Text(
-                          'RM ${_totalAmount.toStringAsFixed(2)}',
+                          'RM ${_orderTotalAmount.toStringAsFixed(2)}',
                           style: const TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.bold,
@@ -2446,6 +2832,40 @@ class _PaymentBackButton extends StatelessWidget {
   }
 }
 
+class _PaxStepperButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  const _PaxStepperButton({
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      child: Container(
+        width: 32,
+        height: 32,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: enabled ? Colors.white : const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: Icon(
+          icon,
+          size: 16,
+          color: enabled ? const Color(0xFF1B6B72) : const Color(0xFFCBD5E1),
+        ),
+      ),
+    );
+  }
+}
+
 class _StepPill extends StatelessWidget {
   final int number;
   final String label;
@@ -3223,6 +3643,113 @@ class _WalkInSummaryRow extends StatelessWidget {
           ),
           const Divider(height: 14, color: Color(0xFFF0F0F0)),
         ],
+      ),
+    );
+  }
+}
+
+class _WalkInPaxSummaryCard extends StatelessWidget {
+  final int index;
+  final _WalkInAllocation? allocation;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  const _WalkInPaxSummaryCard({
+    required this.index,
+    required this.allocation,
+    required this.selected,
+    required this.onTap,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final item = allocation;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFE8F5F5) : const Color(0xFFF8FAFC),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? const Color(0xFF1B6B72) : const Color(0xFFE2E8F0),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5F5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '$index',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1B6B72),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item?.serviceNameSummary ?? 'Pax $index',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  item == null
+                      ? 'Tap to configure service, staff, zone, and time'
+                      : '${item.therapist.name} - ${item.zone.name}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  item == null
+                      ? (selected ? 'Editing' : 'Not configured')
+                      : '${item.startTime.timeLabel} - RM ${item.servicePrice.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onClear != null)
+            IconButton(
+              onPressed: onClear,
+              icon: const Icon(Icons.close, size: 18),
+              color: const Color(0xFFE53935),
+              tooltip: 'Clear pax',
+            ),
+        ],
+      ),
       ),
     );
   }

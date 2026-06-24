@@ -613,6 +613,8 @@ class _ReportServiceItem {
   final double price;
   final double therapistCommission;
   final double counterCommission;
+  final String assignedTherapistId;
+  final String assignedTherapistName;
 
   const _ReportServiceItem({
     required this.id,
@@ -622,6 +624,8 @@ class _ReportServiceItem {
     required this.price,
     required this.therapistCommission,
     required this.counterCommission,
+    this.assignedTherapistId = '',
+    this.assignedTherapistName = '',
   });
 }
 
@@ -664,6 +668,14 @@ List<_ReportServiceItem> _resolveServiceItems(
       price: price,
       therapistCommission: _asDouble(service['therapistCommission']),
       counterCommission: _asDouble(service['counterCommission']),
+      assignedTherapistId: _asString(
+        transaction['therapistId'],
+        _asString(appointment['therapistId']),
+      ),
+      assignedTherapistName: _asString(
+        transaction['therapistName'],
+        _asString(appointment['therapistName']),
+      ),
     ),
   ];
 }
@@ -693,6 +705,14 @@ List<_ReportServiceItem> _parseServiceItems(
         counterCommission: _asDouble(
           data['counterCommission'],
           _asDouble(service['counterCommission']),
+        ),
+        assignedTherapistId: _asString(
+          data['assignedTherapistId'],
+          _asString(data['therapistId']),
+        ),
+        assignedTherapistName: _asString(
+          data['assignedTherapistName'],
+          _asString(data['therapistName']),
         ),
       ),
     );
@@ -806,6 +826,7 @@ class _ReportData {
       );
       var calculatedTherapistCommission = 0.0;
       var calculatedCounterCommission = 0.0;
+      var hasAssignedServiceStaff = false;
 
       for (final item in order.serviceItems) {
         final serviceKey = item.id.isNotEmpty
@@ -828,7 +849,40 @@ class _ReportData {
 
         final service = services[item.id] ?? <String, dynamic>{};
 
-        if (resolvedTherapistId.isNotEmpty) {
+        final itemStaffId = _resolvedOrderStaffId(
+          staff,
+          item.assignedTherapistId,
+          item.assignedTherapistName,
+        );
+        if (itemStaffId.isNotEmpty) {
+          hasAssignedServiceStaff = true;
+          final itemStaff = staff[itemStaffId] ?? <String, dynamic>{};
+          final itemStaffRole = _normalizeRole(
+            itemStaff['role'] ?? itemStaff['employmentType'],
+          );
+          final itemCommission = _commissionForItem(
+            item,
+            service: service,
+            staff: itemStaff,
+            staffRole: itemStaffRole,
+          );
+          final entry = staffTotals.putIfAbsent(
+            itemStaffId,
+            () => _MutableStaffCommission(
+              id: itemStaffId,
+              name: _asString(
+                itemStaff['name'],
+                _asString(item.assignedTherapistName, 'Staff'),
+              ),
+              role: itemStaffRole,
+            ),
+          );
+          entry
+            ..commission += itemCommission
+            ..jobs += 1
+            ..sales += item.price;
+          staffCommission += itemCommission;
+        } else if (resolvedTherapistId.isNotEmpty) {
           calculatedTherapistCommission += _commissionForItem(
             item,
             service: service,
@@ -855,7 +909,7 @@ class _ReportData {
           ? order.counterCommissionAmount
           : calculatedCounterCommission;
 
-      if (resolvedTherapistId.isNotEmpty) {
+      if (!hasAssignedServiceStaff && resolvedTherapistId.isNotEmpty) {
         final staffName = _asString(
           staffRow['name'],
           order.therapistName == '-' ? 'Staff' : order.therapistName,
@@ -3749,6 +3803,15 @@ List<_StaffOrderRecord> _recordsForStaff({
   for (final order in orders) {
     var commission = 0.0;
     final roles = <String>[];
+    final assignedItems = order.serviceItems.where((item) {
+      final itemStaffId = _resolvedOrderStaffId(
+        staffById,
+        item.assignedTherapistId,
+        item.assignedTherapistName,
+      );
+      return itemStaffId == staff.id ||
+          _sameLookupValue(item.assignedTherapistName, staff.name);
+    }).toList();
     final therapistMatches =
         order.therapistId == staff.id ||
         _sameLookupValue(order.therapistName, staff.name);
@@ -3760,7 +3823,17 @@ List<_StaffOrderRecord> _recordsForStaff({
       commission += _counterPoolCommissionForOrder(order, services);
       if (commission > 0) roles.add('Counter Commission');
     } else {
-      if (therapistMatches) {
+      if (assignedItems.isNotEmpty) {
+        for (final item in assignedItems) {
+          commission += _commissionForItem(
+            item,
+            service: services[item.id] ?? <String, dynamic>{},
+            staff: staffById[staff.id] ?? <String, dynamic>{},
+            staffRole: staff.role,
+          );
+        }
+        roles.add('Therapist');
+      } else if (therapistMatches) {
         commission += _therapistCommissionForOrder(
           order,
           services,

@@ -31,10 +31,39 @@ int _asInt(Object? value, [int fallback = 0]) {
   return fallback;
 }
 
+List<Map<String, dynamic>> _asMapList(Object? value) {
+  if (value is! List) return const [];
+  return value
+      .whereType<Map>()
+      .map((item) => item.map((key, value) => MapEntry(key.toString(), value)))
+      .toList();
+}
+
 DateTime _asDateTime(Object? value) {
   if (value is DateTime) return value;
   if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
   return DateTime.now();
+}
+
+String _normalizeOrderSource({
+  required Object? txSource,
+  required Object? appointmentType,
+  required String appointmentId,
+  required String appointmentGroupId,
+}) {
+  final source = _asString(txSource).trim().toLowerCase();
+  if (source == 'walkin' || source == 'walk-in') return 'walkin';
+  if (source == 'appointment' || source == 'booking') return 'appointment';
+  if (source == 'online') return 'online';
+
+  final type = _asString(appointmentType).trim().toLowerCase();
+  if (type == 'walkin' || type == 'walk-in') return 'walkin';
+  if (type == 'appointment' || type.isEmpty && appointmentId.isNotEmpty) {
+    return 'appointment';
+  }
+
+  if (appointmentGroupId.isNotEmpty && appointmentId.isEmpty) return 'walkin';
+  return 'walkin';
 }
 
 class SalesHistoryScreen extends StatefulWidget {
@@ -397,6 +426,8 @@ class _HistoryOrder {
   final String id;
   final String receiptNumber;
   final String appointmentId;
+  final String appointmentGroupId;
+  final String source;
   final String customerId;
   final String customerName;
   final String customerPhone;
@@ -405,6 +436,7 @@ class _HistoryOrder {
   final String roomName;
   final String paymentMethod;
   final int itemCount;
+  final List<_HistoryServiceGroup> serviceGroups;
   final double servicePrice;
   final double sstAmount;
   final double totalAmount;
@@ -414,6 +446,8 @@ class _HistoryOrder {
     required this.id,
     required this.receiptNumber,
     required this.appointmentId,
+    required this.appointmentGroupId,
+    required this.source,
     required this.customerId,
     required this.customerName,
     required this.customerPhone,
@@ -422,6 +456,7 @@ class _HistoryOrder {
     required this.roomName,
     required this.paymentMethod,
     required this.itemCount,
+    required this.serviceGroups,
     required this.servicePrice,
     required this.sstAmount,
     required this.totalAmount,
@@ -437,7 +472,14 @@ class _HistoryOrder {
     required Map<String, Map<String, dynamic>> rooms,
   }) {
     final appointmentId = _asString(tx['appointmentId']);
+    final appointmentGroupId = _asString(tx['appointmentGroupId']);
     final appointment = appointments[appointmentId] ?? {};
+    final source = _normalizeOrderSource(
+      txSource: tx['source'],
+      appointmentType: appointment['type'],
+      appointmentId: appointmentId,
+      appointmentGroupId: appointmentGroupId,
+    );
     final customerId = _asString(tx['customerId']).isNotEmpty
         ? _asString(tx['customerId'])
         : _asString(appointment['customerId']);
@@ -454,39 +496,58 @@ class _HistoryOrder {
     final service = services[serviceId] ?? {};
     final therapist = therapists[therapistId] ?? {};
     final room = rooms[roomId] ?? {};
-    final rawItems = tx['items'];
-    final itemCount = rawItems is List
+    final rawItems = _asMapList(
+      tx['serviceItems'] ?? tx['service_items'] ?? tx['items'],
+    );
+    final itemCount = rawItems.isNotEmpty
         ? rawItems.length
         : _asInt(tx['itemCount'], 1);
+    final servicePrice = _asDouble(
+      tx['servicePrice'],
+      _asDouble(appointment['totalPrice']),
+    );
+    final customerName = _asString(
+      tx['customerName'],
+      _asString(customer['name'], 'Guest'),
+    );
+    final customerPhone = _asString(
+      tx['customerPhone'],
+      _asString(customer['phone'], '-'),
+    );
+    final serviceName = _asString(
+      tx['serviceName'],
+      _asString(service['name'], 'Service'),
+    );
+    final therapistName = _asString(
+      tx['therapistName'],
+      _asString(therapist['name'], '-'),
+    );
+    final roomName = _asString(tx['roomName'], _asString(room['name'], '-'));
+    final serviceGroups = _HistoryServiceGroup.fromItems(
+      rawItems,
+      fallbackCustomerName: customerName,
+      fallbackServiceName: serviceName,
+      fallbackTherapistName: therapistName,
+      fallbackRoomName: roomName,
+      fallbackAmount: servicePrice,
+    );
 
     return _HistoryOrder(
       id: _asString(tx['id']),
       receiptNumber: _asString(tx['receiptNumber'], _asString(tx['id'])),
       appointmentId: appointmentId,
+      appointmentGroupId: appointmentGroupId,
+      source: source,
       customerId: customerId,
-      customerName: _asString(
-        tx['customerName'],
-        _asString(customer['name'], 'Guest'),
-      ),
-      customerPhone: _asString(
-        tx['customerPhone'],
-        _asString(customer['phone'], '-'),
-      ),
-      serviceName: _asString(
-        tx['serviceName'],
-        _asString(service['name'], 'Service'),
-      ),
-      therapistName: _asString(
-        tx['therapistName'],
-        _asString(therapist['name'], '-'),
-      ),
-      roomName: _asString(tx['roomName'], _asString(room['name'], '-')),
+      customerName: customerName,
+      customerPhone: customerPhone,
+      serviceName: serviceName,
+      therapistName: therapistName,
+      roomName: roomName,
       paymentMethod: _asString(tx['paymentMethod'], 'unknown'),
       itemCount: itemCount <= 0 ? 1 : itemCount,
-      servicePrice: _asDouble(
-        tx['servicePrice'],
-        _asDouble(appointment['totalPrice']),
-      ),
+      serviceGroups: serviceGroups,
+      servicePrice: servicePrice,
       sstAmount: _asDouble(tx['sstAmount']),
       totalAmount: _asDouble(
         tx['totalAmount'],
@@ -496,7 +557,35 @@ class _HistoryOrder {
     );
   }
 
-  bool get isAppointmentBooking => appointmentId.isNotEmpty;
+  bool get isAppointmentBooking => source == 'appointment' || source == 'online';
+  bool get isWalkIn => source == 'walkin';
+  String get sourceLabel {
+    if (isAppointmentBooking) return 'Appointment booking';
+    if (isWalkIn) return 'Walk-in';
+    return source.isEmpty ? 'Walk-in' : source;
+  }
+  int get paxCount => serviceGroups.isEmpty ? 1 : serviceGroups.length;
+
+  String get serviceSummaryLabel =>
+      '$itemCount service${itemCount == 1 ? '' : 's'}';
+
+  String get staffSummaryLabel {
+    final names = serviceGroups
+        .map((group) => group.therapistName)
+        .where((name) => name.trim().isNotEmpty && name != '-')
+        .toSet();
+    if (names.isEmpty) return therapistName;
+    return '${names.length} therapist${names.length == 1 ? '' : 's'}';
+  }
+
+  String get resourceSummaryLabel {
+    final names = serviceGroups
+        .map((group) => group.roomName)
+        .where((name) => name.trim().isNotEmpty && name != '-')
+        .toSet();
+    if (names.isEmpty) return roomName;
+    return '${names.length} room${names.length == 1 ? '' : 's'}/zone${names.length == 1 ? '' : 's'}';
+  }
 
   String get paymentLabel {
     switch (paymentMethod) {
@@ -522,6 +611,102 @@ class _HistoryOrder {
       default:
         return Icons.receipt_long_outlined;
     }
+  }
+}
+
+class _HistoryServiceGroup {
+  final int paxNumber;
+  final String customerName;
+  final List<String> services;
+  final String therapistName;
+  final String roomName;
+  final String startTime;
+  final String endTime;
+  final double amount;
+
+  const _HistoryServiceGroup({
+    required this.paxNumber,
+    required this.customerName,
+    required this.services,
+    required this.therapistName,
+    required this.roomName,
+    required this.startTime,
+    required this.endTime,
+    required this.amount,
+  });
+
+  String get serviceLabel =>
+      services.isEmpty ? 'Service' : services.join(', ');
+
+  String get timeLabel {
+    if (startTime.isEmpty && endTime.isEmpty) return '';
+    if (endTime.isEmpty) return startTime;
+    return '$startTime - $endTime';
+  }
+
+  static List<_HistoryServiceGroup> fromItems(
+    List<Map<String, dynamic>> items, {
+    required String fallbackCustomerName,
+    required String fallbackServiceName,
+    required String fallbackTherapistName,
+    required String fallbackRoomName,
+    required double fallbackAmount,
+  }) {
+    if (items.isEmpty) {
+      return [
+        _HistoryServiceGroup(
+          paxNumber: 1,
+          customerName: fallbackCustomerName,
+          services: [fallbackServiceName],
+          therapistName: fallbackTherapistName,
+          roomName: fallbackRoomName,
+          startTime: '',
+          endTime: '',
+          amount: fallbackAmount,
+        ),
+      ];
+    }
+
+    final grouped = <String, List<Map<String, dynamic>>>{};
+    for (final item in items) {
+      final key = [
+        _asString(item['assignedTherapistId']),
+        _asString(item['assignedTherapistName']),
+        _asString(item['assignedRoomId']),
+        _asString(item['assignedRoomName']),
+        _asString(item['startTime']),
+        _asString(item['endTime']),
+      ].join('|');
+      grouped.putIfAbsent(key, () => []).add(item);
+    }
+
+    var paxNumber = 0;
+    return grouped.values.map((groupItems) {
+      paxNumber += 1;
+      final first = groupItems.first;
+      final customerName = paxNumber == 1 ? fallbackCustomerName : 'Guest';
+      final services = groupItems
+          .map((item) => _asString(item['name'], 'Service'))
+          .where((name) => name.trim().isNotEmpty)
+          .toList();
+      final amount = groupItems.fold<double>(
+        0,
+        (total, item) => total + _asDouble(item['price']),
+      );
+      return _HistoryServiceGroup(
+        paxNumber: paxNumber,
+        customerName: customerName,
+        services: services.isEmpty ? [fallbackServiceName] : services,
+        therapistName: _asString(
+          first['assignedTherapistName'],
+          fallbackTherapistName,
+        ),
+        roomName: _asString(first['assignedRoomName'], fallbackRoomName),
+        startTime: _asString(first['startTime']),
+        endTime: _asString(first['endTime']),
+        amount: amount == 0 ? fallbackAmount : amount,
+      );
+    }).toList();
   }
 }
 
@@ -1567,14 +1752,25 @@ class _OrderDetailSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
-            if (order.isAppointmentBooking)
-              const _DetailRow('Source', 'Appointment booking'),
+            _DetailRow('Source', order.sourceLabel),
             _DetailRow('Customer', order.customerName),
             _DetailRow('Phone', order.customerPhone),
-            _DetailRow('Service', order.serviceName),
-            _DetailRow('Therapist', order.therapistName),
-            _DetailRow('Room / Zone', order.roomName),
+            _DetailRow('Pax', '${order.paxCount}'),
+            _DetailRow('Services', order.serviceSummaryLabel),
+            _DetailRow('Staff', order.staffSummaryLabel),
+            _DetailRow('Resources', order.resourceSummaryLabel),
             _DetailRow('Payment', order.paymentLabel),
+            const Divider(height: 28, color: _line),
+            const _DetailSectionTitle('Service Details'),
+            const SizedBox(height: 10),
+            for (var i = 0; i < order.serviceGroups.length; i++) ...[
+              _ServiceGroupCard(
+                group: order.serviceGroups[i],
+                expanded: order.serviceGroups.length == 1,
+              ),
+              if (i != order.serviceGroups.length - 1)
+                const SizedBox(height: 8),
+            ],
             const Divider(height: 28, color: _line),
             _DetailRow('Service Net', _money(order.servicePrice)),
             _DetailRow('SST', _money(order.sstAmount)),
@@ -1641,6 +1837,152 @@ class _DetailRow extends StatelessWidget {
               style: TextStyle(
                 color: strong ? _teal : _ink,
                 fontSize: strong ? 15 : 13,
+                fontWeight: strong ? FontWeight.w900 : FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailSectionTitle extends StatelessWidget {
+  final String label;
+
+  const _DetailSectionTitle(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        color: _ink,
+        fontSize: 14,
+        fontWeight: FontWeight.w900,
+      ),
+    );
+  }
+}
+
+class _ServiceGroupCard extends StatelessWidget {
+  final _HistoryServiceGroup group;
+  final bool expanded;
+
+  const _ServiceGroupCard({
+    required this.group,
+    required this.expanded,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _line),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: expanded,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          title: Text(
+            'Pax ${group.paxNumber} - ${group.customerName}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          subtitle: Text(
+            '${group.serviceLabel} - ${_money(group.amount)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          children: [
+            _ServiceDetailLine(
+              icon: Icons.spa_outlined,
+              label: 'Service',
+              value: group.serviceLabel,
+            ),
+            _ServiceDetailLine(
+              icon: Icons.person_outline,
+              label: 'Therapist',
+              value: group.therapistName,
+            ),
+            _ServiceDetailLine(
+              icon: Icons.meeting_room_outlined,
+              label: 'Room / Zone',
+              value: group.roomName,
+            ),
+            if (group.timeLabel.isNotEmpty)
+              _ServiceDetailLine(
+                icon: Icons.schedule_outlined,
+                label: 'Time',
+                value: group.timeLabel,
+              ),
+            _ServiceDetailLine(
+              icon: Icons.payments_outlined,
+              label: 'Amount',
+              value: _money(group.amount),
+              strong: true,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ServiceDetailLine extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool strong;
+
+  const _ServiceDetailLine({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.strong = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 15, color: _muted),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 82,
+            child: Text(
+              label,
+              style: const TextStyle(
+                color: _muted,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '-' : value,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                color: strong ? _teal : _ink,
+                fontSize: 12,
                 fontWeight: strong ? FontWeight.w900 : FontWeight.w800,
               ),
             ),

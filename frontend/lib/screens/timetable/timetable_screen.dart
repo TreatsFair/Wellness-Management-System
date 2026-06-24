@@ -5,6 +5,7 @@ import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/repository_utils.dart';
 import '../../data/repositories/transaction_repository.dart';
+import '../../data/services/supabase_table_service.dart';
 
 class TimetableScreen extends StatefulWidget {
   final String userRole;
@@ -19,6 +20,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _dashboardRepository = DashboardRepository();
   final _transactionRepository = TransactionRepository();
+  final _businessSettingsTable = SupabaseTableService('business_settings');
   final _search = TextEditingController();
 
   DateTime _selectedDate = _stripDate(DateTime.now());
@@ -26,9 +28,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
   bool _loading = true;
   String? _error;
   List<_TimetableEntry> _entries = [];
-
-  static const _openHour = 9;
-  static const _closeHour = 21;
+  int _openMinute = 9 * 60;
+  int _closeMinute = 21 * 60;
 
   @override
   void initState() {
@@ -51,6 +52,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
     try {
       final date = DateFormat('yyyy-MM-dd').format(_selectedDate);
+      final settings = await _loadBusinessSettings();
       final appointmentRows = await _appointmentRepository.getAppointmentsByDate(
         date,
       );
@@ -109,11 +111,27 @@ class _TimetableScreenState extends State<TimetableScreen> {
         ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
 
       if (!mounted) return;
-      setState(() => _entries = entries);
+      setState(() {
+        _entries = entries;
+        _openMinute = settings.$1;
+        _closeMinute = settings.$2;
+      });
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  Future<(int, int)> _loadBusinessSettings() async {
+    try {
+      final row = await _businessSettingsTable.getById('1');
+      final open = _timeToMinutes(asString(row?['openTime'], '09:00'));
+      var close = _timeToMinutes(asString(row?['closeTime'], '21:00'));
+      if (close <= open) close += 24 * 60;
+      return (open, close);
+    } catch (_) {
+      return (9 * 60, 21 * 60);
     }
   }
 
@@ -217,8 +235,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
                       _TimetableTimeline(
                         entries: entries,
                         selectedDate: _selectedDate,
-                        openHour: _openHour,
-                        closeHour: _closeHour,
+                        openMinute: _openMinute,
+                        closeMinute: _closeMinute,
                         isWide: isWide,
                         onTap: _showEntry,
                       ),
@@ -244,6 +262,8 @@ class _TimetableEntry {
   final String status;
   final String startTime;
   final String endTime;
+  final DateTime? startAt;
+  final DateTime? endAt;
   final double price;
   final String receiptNumber;
   final String paymentMethod;
@@ -261,6 +281,8 @@ class _TimetableEntry {
     required this.status,
     required this.startTime,
     required this.endTime,
+    required this.startAt,
+    required this.endAt,
     required this.price,
     required this.receiptNumber,
     required this.paymentMethod,
@@ -304,6 +326,8 @@ class _TimetableEntry {
       status: asString(row['status']).toLowerCase(),
       startTime: _cleanTime(asString(row['startTime'], '09:00')),
       endTime: _cleanTime(asString(row['endTime'], '10:00')),
+      startAt: asDateTime(row['startAt']),
+      endAt: asDateTime(row['endAt']),
       price: asDouble(row['totalPrice']),
       receiptNumber: asString(transaction?['receiptNumber']),
       paymentMethod: asString(transaction?['paymentMethod']),
@@ -312,8 +336,16 @@ class _TimetableEntry {
     );
   }
 
-  int get startMinutes => _timeToMinutes(startTime);
-  int get endMinutes => _timeToMinutes(endTime);
+  int get startMinutes =>
+      _minutesFromSelectedDate(startAt, selectedDate) ?? _timeToMinutes(startTime);
+  int get endMinutes {
+    final fromTimestamp = _minutesFromSelectedDate(endAt, selectedDate);
+    if (fromTimestamp != null) return fromTimestamp;
+    final start = _timeToMinutes(startTime);
+    var end = _timeToMinutes(endTime);
+    if (end <= start) end += 24 * 60;
+    return end;
+  }
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
   bool get isWalkIn => type == 'walkin' || type == 'walk_in' || type == 'walk-in';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
@@ -655,16 +687,16 @@ class _ModeButton extends StatelessWidget {
 class _TimetableTimeline extends StatelessWidget {
   final List<_TimetableEntry> entries;
   final DateTime selectedDate;
-  final int openHour;
-  final int closeHour;
+  final int openMinute;
+  final int closeMinute;
   final bool isWide;
   final ValueChanged<_TimetableEntry> onTap;
 
   const _TimetableTimeline({
     required this.entries,
     required this.selectedDate,
-    required this.openHour,
-    required this.closeHour,
+    required this.openMinute,
+    required this.closeMinute,
     required this.isWide,
     required this.onTap,
   });
@@ -673,7 +705,19 @@ class _TimetableTimeline extends StatelessWidget {
   Widget build(BuildContext context) {
     final hourHeight = isWide ? 82.0 : 76.0;
     final labelWidth = isWide ? 58.0 : 42.0;
-    final totalHeight = (closeHour - openHour) * hourHeight;
+    final earliestEntryStart = entries.fold<int>(
+      openMinute,
+      (earliest, entry) => entry.startMinutes < earliest ? entry.startMinutes : earliest,
+    );
+    final latestEntryEnd = entries.fold<int>(
+      closeMinute,
+      (latest, entry) => entry.endMinutes > latest ? entry.endMinutes : latest,
+    );
+    final canvasStartMinute = earliestEntryStart;
+    final canvasEndMinute = latestEntryEnd;
+    final totalHeight =
+        ((canvasEndMinute - canvasStartMinute) / 60 * hourHeight)
+            .clamp(120.0, 2600.0);
     final placements = _assignLanes(entries);
 
     return Container(
@@ -693,8 +737,9 @@ class _TimetableTimeline extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 _TimetableGrid(
-                  openHour: openHour,
-                  closeHour: closeHour,
+                  openMinute: openMinute,
+                  closeMinute: closeMinute,
+                  canvasStartMinute: canvasStartMinute,
                   hourHeight: hourHeight,
                   labelWidth: labelWidth,
                   showNowLine: _stripDate(selectedDate) == _stripDate(DateTime.now()),
@@ -702,7 +747,7 @@ class _TimetableTimeline extends StatelessWidget {
                 for (final placement in placements)
                   _PositionedTimetableCard(
                     placement: placement,
-                    openHour: openHour,
+                    canvasStartMinute: canvasStartMinute,
                     hourHeight: hourHeight,
                     canvasLeft: canvasLeft,
                     canvasWidth: canvasWidth,
@@ -719,15 +764,17 @@ class _TimetableTimeline extends StatelessWidget {
 }
 
 class _TimetableGrid extends StatelessWidget {
-  final int openHour;
-  final int closeHour;
+  final int openMinute;
+  final int closeMinute;
+  final int canvasStartMinute;
   final double hourHeight;
   final double labelWidth;
   final bool showNowLine;
 
   const _TimetableGrid({
-    required this.openHour,
-    required this.closeHour,
+    required this.openMinute,
+    required this.closeMinute,
+    required this.canvasStartMinute,
     required this.hourHeight,
     required this.labelWidth,
     required this.showNowLine,
@@ -739,14 +786,16 @@ class _TimetableGrid extends StatelessWidget {
     final nowMinutes = now.hour * 60 + now.minute;
     final showNow =
         showNowLine &&
-        nowMinutes >= openHour * 60 &&
-        nowMinutes <= closeHour * 60;
+        nowMinutes >= openMinute &&
+        nowMinutes <= closeMinute;
+    final firstHour = openMinute ~/ 60;
+    final lastHour = (closeMinute / 60).ceil();
 
     return Stack(
       children: [
-        for (var hour = openHour; hour <= closeHour; hour++) ...[
+        for (var hour = firstHour; hour <= lastHour; hour++) ...[
           Positioned(
-            top: (hour - openHour) * hourHeight,
+            top: ((hour * 60 - canvasStartMinute) / 60) * hourHeight,
             left: 0,
             width: labelWidth,
             child: Text(
@@ -760,7 +809,7 @@ class _TimetableGrid extends StatelessWidget {
             ),
           ),
           Positioned(
-            top: (hour - openHour) * hourHeight,
+            top: ((hour * 60 - canvasStartMinute) / 60) * hourHeight,
             left: labelWidth + 12,
             right: 0,
             child: const Divider(height: 1, color: Color(0xFFE5E7EB)),
@@ -768,7 +817,7 @@ class _TimetableGrid extends StatelessWidget {
         ],
         if (showNow)
           Positioned(
-            top: ((nowMinutes - openHour * 60) / 60) * hourHeight,
+            top: ((nowMinutes - canvasStartMinute) / 60) * hourHeight,
             left: labelWidth + 12,
             right: 0,
             child: Row(
@@ -794,7 +843,7 @@ class _TimetableGrid extends StatelessWidget {
 
 class _PositionedTimetableCard extends StatelessWidget {
   final _LanePlacement placement;
-  final int openHour;
+  final int canvasStartMinute;
   final double hourHeight;
   final double canvasLeft;
   final double canvasWidth;
@@ -803,7 +852,7 @@ class _PositionedTimetableCard extends StatelessWidget {
 
   const _PositionedTimetableCard({
     required this.placement,
-    required this.openHour,
+    required this.canvasStartMinute,
     required this.hourHeight,
     required this.canvasLeft,
     required this.canvasWidth,
@@ -818,7 +867,7 @@ class _PositionedTimetableCard extends StatelessWidget {
     final laneWidth =
         (canvasWidth - spacing * (placement.laneCount - 1)) / placement.laneCount;
     final left = canvasLeft + placement.lane * (laneWidth + spacing);
-    final top = ((entry.startMinutes - openHour * 60) / 60) * hourHeight;
+    final top = ((entry.startMinutes - canvasStartMinute) / 60) * hourHeight;
     final height =
         (((entry.endMinutes - entry.startMinutes) / 60) * hourHeight)
             .clamp(54.0, 240.0)
@@ -832,7 +881,8 @@ class _PositionedTimetableCard extends StatelessWidget {
       child: _TimetableCard(
         entry: entry,
         compact: compact || laneWidth < 230 || height < 76,
-        dotOnly: laneWidth < 150,
+        dotOnly: laneWidth < 150 || height < 72,
+        showDetails: height >= 96 && laneWidth >= 260,
         onTap: () => onTap(entry),
       ),
     );
@@ -843,25 +893,34 @@ class _TimetableCard extends StatelessWidget {
   final _TimetableEntry entry;
   final bool compact;
   final bool dotOnly;
+  final bool showDetails;
   final VoidCallback onTap;
 
   const _TimetableCard({
     required this.entry,
     required this.compact,
     required this.dotOnly,
+    required this.showDetails,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     final style = _statusStyle(entry);
+    final dense = compact || !showDetails;
+    final serviceLabel = dotOnly && dense
+        ? entry.priceLabel
+        : '${entry.serviceName} - ${entry.priceLabel}';
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
         borderRadius: BorderRadius.circular(12),
         child: Container(
-          padding: EdgeInsets.all(compact ? 10 : 12),
+          padding: EdgeInsets.symmetric(
+            horizontal: dense ? 8 : 12,
+            vertical: dense ? 6 : 10,
+          ),
           decoration: BoxDecoration(
             color: style.background,
             borderRadius: BorderRadius.circular(12),
@@ -885,10 +944,12 @@ class _TimetableCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(20),
                 ),
               ),
-              const SizedBox(width: 10),
+              SizedBox(width: dense ? 8 : 10),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment:
+                      dense ? MainAxisAlignment.center : MainAxisAlignment.start,
                   children: [
                     Row(
                       children: [
@@ -898,7 +959,7 @@ class _TimetableCard extends StatelessWidget {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: compact ? 13 : 15,
+                              fontSize: dense ? 13 : 15,
                               fontWeight: FontWeight.w900,
                               color: const Color(0xFF111827),
                             ),
@@ -910,18 +971,18 @@ class _TimetableCard extends StatelessWidget {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 5),
+                    SizedBox(height: dense ? 2 : 5),
                     Text(
-                      compact ? entry.priceLabel : '${entry.serviceName} - ${entry.priceLabel}',
+                      serviceLabel,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
+                      style: TextStyle(
+                        fontSize: dense ? 11 : 12,
                         fontWeight: FontWeight.w700,
-                        color: Color(0xFF4B5563),
+                        color: const Color(0xFF4B5563),
                       ),
                     ),
-                    if (!compact) ...[
+                    if (showDetails) ...[
                       const SizedBox(height: 6),
                       Text(
                         '${entry.timeRange} · ${entry.staffName} · ${entry.roomName}',
@@ -1270,6 +1331,12 @@ int _timeToMinutes(String time) {
   if (parts.length < 2) return 0;
   return (int.tryParse(parts[0]) ?? 0) * 60 +
       (int.tryParse(parts[1]) ?? 0);
+}
+
+int? _minutesFromSelectedDate(DateTime? value, DateTime selectedDate) {
+  if (value == null) return null;
+  final base = _stripDate(selectedDate);
+  return value.difference(base).inMinutes;
 }
 
 String _clockLabel(String time) {

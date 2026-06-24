@@ -1,96 +1,98 @@
--- CSP backend foundation for staff appointments, walk-ins, and group bookings.
--- Important: the real database column is appointments.appointment_date.
+-- Business hours plus overnight-safe CSP.
+-- Keeps start_time/end_time for display, and adds start_at/end_at for real
+-- cross-midnight scheduling.
 
-create extension if not exists pgcrypto;
-
-alter table public.appointments
-  add column if not exists appointment_group_id uuid;
-
-create table if not exists public.appointment_groups (
-  id uuid primary key default gen_random_uuid(),
-  customer_id uuid references public.customers(id) on delete set null,
-  group_name text not null default '',
-  pax_count integer not null default 1 check (pax_count > 0),
-  appointment_date date not null,
-  status text not null default 'confirmed',
-  notes text not null default '',
-  created_at timestamptz not null default now(),
-  created_by uuid
+create table if not exists public.business_settings (
+  id integer primary key default 1 check (id = 1),
+  open_time time not null default '09:00',
+  close_time time not null default '21:00',
+  updated_at timestamptz not null default now()
 );
 
-do $$
-begin
-  if not exists (
-    select 1
-    from pg_constraint
-    where conname = 'appointments_appointment_group_id_fkey'
-      and conrelid = 'public.appointments'::regclass
-  ) then
-    alter table public.appointments
-      add constraint appointments_appointment_group_id_fkey
-      foreign key (appointment_group_id)
-      references public.appointment_groups(id)
-      on delete set null;
-  end if;
-end $$;
+insert into public.business_settings (id, open_time, close_time)
+values (1, '09:00', '21:00')
+on conflict (id) do nothing;
 
-create index if not exists idx_appointments_csp_therapist
-  on public.appointments (appointment_date, therapist_id, status, start_time, end_time);
+grant select, insert, update on table public.business_settings to authenticated;
+alter table public.business_settings enable row level security;
 
-create index if not exists idx_appointments_csp_room
-  on public.appointments (appointment_date, room_id, status, start_time, end_time);
-
-create index if not exists idx_appointments_group_id
-  on public.appointments (appointment_group_id);
-
-create index if not exists idx_appointment_groups_date
-  on public.appointment_groups (appointment_date, status);
-
-grant select, insert, update, delete on table public.appointment_groups to authenticated;
-alter table public.appointment_groups enable row level security;
-
-drop policy if exists "appointment_groups_select_staff_admin" on public.appointment_groups;
-create policy "appointment_groups_select_staff_admin"
-on public.appointment_groups
+drop policy if exists "business_settings_select_staff_admin" on public.business_settings;
+create policy "business_settings_select_staff_admin"
+on public.business_settings
 for select
 to authenticated
 using (public.is_staff_or_admin());
 
-drop policy if exists "appointment_groups_insert_staff_admin" on public.appointment_groups;
-create policy "appointment_groups_insert_staff_admin"
-on public.appointment_groups
+drop policy if exists "business_settings_insert_admin" on public.business_settings;
+create policy "business_settings_insert_admin"
+on public.business_settings
 for insert
 to authenticated
-with check (public.is_staff_or_admin());
+with check (public.is_admin());
 
-drop policy if exists "appointment_groups_update_staff_admin" on public.appointment_groups;
-create policy "appointment_groups_update_staff_admin"
-on public.appointment_groups
+drop policy if exists "business_settings_update_admin" on public.business_settings;
+create policy "business_settings_update_admin"
+on public.business_settings
 for update
 to authenticated
-using (public.is_staff_or_admin())
-with check (public.is_staff_or_admin());
+using (public.is_admin())
+with check (public.is_admin());
 
-drop policy if exists "appointment_groups_delete_admin" on public.appointment_groups;
-create policy "appointment_groups_delete_admin"
-on public.appointment_groups
-for delete
-to authenticated
-using (public.is_admin());
+alter table public.appointments
+  add column if not exists start_at timestamp,
+  add column if not exists end_at timestamp;
 
--- Staff-created pending bookings should now block immediately as confirmed.
-update public.appointments
-set status = 'confirmed'
-where lower(coalesce(status::text, '')) = 'pending'
-  and appointment_date::date >= current_date;
-
-create or replace function public.csp_blocks_schedule(p_status text)
-returns boolean
+create or replace function public.csp_start_at(p_date date, p_start_time time)
+returns timestamp
 language sql
 immutable
 as $$
-  select lower(coalesce(p_status, '')) in ('confirmed', 'in_progress');
+  select p_date + p_start_time;
 $$;
+
+create or replace function public.csp_end_at(
+  p_date date,
+  p_start_time time,
+  p_end_time time
+)
+returns timestamp
+language sql
+immutable
+as $$
+  select p_date
+    + p_end_time
+    + case when p_end_time <= p_start_time then interval '1 day' else interval '0' end;
+$$;
+
+create or replace function public.csp_appointment_start_at(a public.appointments)
+returns timestamp
+language sql
+stable
+as $$
+  select coalesce(a.start_at, public.csp_start_at(a.appointment_date::date, a.start_time::time));
+$$;
+
+create or replace function public.csp_appointment_end_at(a public.appointments)
+returns timestamp
+language sql
+stable
+as $$
+  select coalesce(a.end_at, public.csp_end_at(a.appointment_date::date, a.start_time::time, a.end_time::time));
+$$;
+
+update public.appointments a
+set start_at = public.csp_start_at(a.appointment_date::date, a.start_time::time),
+    end_at = public.csp_end_at(a.appointment_date::date, a.start_time::time, a.end_time::time)
+where a.start_at is null
+   or a.end_at is null;
+
+create index if not exists idx_appointments_csp_therapist_at
+  on public.appointments (therapist_id, start_at, end_at)
+  where therapist_id is not null;
+
+create index if not exists idx_appointments_csp_room_at
+  on public.appointments (room_id, start_at, end_at)
+  where room_id is not null;
 
 create or replace function public.check_booking_availability(
   p_date date,
@@ -114,6 +116,8 @@ language plpgsql
 stable
 as $$
 declare
+  v_start_at timestamp := public.csp_start_at(p_date, p_start_time);
+  v_end_at timestamp := public.csp_end_at(p_date, p_start_time, p_end_time);
   v_therapist_conflicts integer := 0;
   v_room_conflicts integer := 0;
   v_room_total integer := 1;
@@ -127,28 +131,28 @@ begin
 
   v_room_total := coalesce(v_room_total, 1);
 
-  select count(*), max(a.end_time::time)
+  select count(*), max(public.csp_appointment_end_at(a)::time)
   into v_therapist_conflicts, v_therapist_busy_until
   from public.appointments a
-  where a.appointment_date::date = p_date
+  where a.appointment_date::date between p_date - 1 and p_date + 1
     and a.therapist_id = p_therapist_id
     and public.csp_blocks_schedule(a.status::text)
-    and a.start_time::time < p_end_time
-    and a.end_time::time > p_start_time
+    and public.csp_appointment_start_at(a) < v_end_at
+    and public.csp_appointment_end_at(a) > v_start_at
     and (p_exclude_appointment_id is null or a.id <> p_exclude_appointment_id)
     and (
       p_exclude_appointment_group_id is null
       or a.appointment_group_id is distinct from p_exclude_appointment_group_id
     );
 
-  select count(*), max(a.end_time::time)
+  select count(*), max(public.csp_appointment_end_at(a)::time)
   into v_room_conflicts, v_room_busy_until
   from public.appointments a
-  where a.appointment_date::date = p_date
+  where a.appointment_date::date between p_date - 1 and p_date + 1
     and a.room_id = p_room_id
     and public.csp_blocks_schedule(a.status::text)
-    and a.start_time::time < p_end_time
-    and a.end_time::time > p_start_time
+    and public.csp_appointment_start_at(a) < v_end_at
+    and public.csp_appointment_end_at(a) > v_start_at
     and (p_exclude_appointment_id is null or a.id <> p_exclude_appointment_id)
     and (
       p_exclude_appointment_group_id is null
@@ -184,8 +188,11 @@ language plpgsql
 stable
 as $$
 declare
-  v_start time := '09:00'::time;
-  v_end time;
+  v_open time := '09:00'::time;
+  v_close time := '21:00'::time;
+  v_start_at timestamp;
+  v_end_at timestamp;
+  v_close_at timestamp;
   v_check record;
   v_score integer;
   v_reason text;
@@ -196,10 +203,20 @@ begin
     return;
   end if;
 
+  select coalesce(open_time, '09:00'::time), coalesce(close_time, '21:00'::time)
+  into v_open, v_close
+  from public.business_settings
+  where id = 1;
+
+  v_start_at := p_date + v_open;
+  v_close_at := p_date
+    + v_close
+    + case when v_close <= v_open then interval '1 day' else interval '0' end;
+
   select count(*)
   into v_therapist_count
   from public.appointments a
-  where a.appointment_date::date = p_date
+  where a.appointment_date::date between p_date - 1 and p_date + 1
     and a.therapist_id = p_therapist_id
     and public.csp_blocks_schedule(a.status::text);
 
@@ -214,30 +231,30 @@ begin
     group by a.therapist_id
   ) counts;
 
-  while v_start + make_interval(mins => p_duration) <= '21:00'::time loop
-    v_end := v_start + make_interval(mins => p_duration);
+  while v_start_at + make_interval(mins => p_duration) <= v_close_at loop
+    v_end_at := v_start_at + make_interval(mins => p_duration);
 
     select *
     into v_check
     from public.check_booking_availability(
       p_date,
-      v_start,
-      v_end,
+      v_start_at::time,
+      v_end_at::time,
       p_therapist_id,
       p_room_id,
       p_exclude_id
     );
 
     if not coalesce(v_check.therapist_available, false) then
-      start_time := v_start;
-      end_time := v_end;
+      start_time := v_start_at::time;
+      end_time := v_end_at::time;
       classification := 'unavailable';
       score := 0;
       reason := 'therapist_conflict';
       return next;
     elsif coalesce(v_check.room_full, false) then
-      start_time := v_start;
-      end_time := v_end;
+      start_time := v_start_at::time;
+      end_time := v_end_at::time;
       classification := 'unavailable';
       score := 0;
       reason := 'room_full';
@@ -249,10 +266,10 @@ begin
       if exists (
         select 1
         from public.appointments a
-        where a.appointment_date::date = p_date
+        where a.appointment_date::date between p_date - 1 and p_date + 1
           and public.csp_blocks_schedule(a.status::text)
           and (a.therapist_id = p_therapist_id or a.room_id = p_room_id)
-          and a.end_time::time = v_start
+          and public.csp_appointment_end_at(a) = v_start_at
           and (p_exclude_id is null or a.id <> p_exclude_id)
       ) then
         v_score := v_score + 2;
@@ -262,10 +279,10 @@ begin
       if exists (
         select 1
         from public.appointments a
-        where a.appointment_date::date = p_date
+        where a.appointment_date::date between p_date - 1 and p_date + 1
           and public.csp_blocks_schedule(a.status::text)
           and (a.therapist_id = p_therapist_id or a.room_id = p_room_id)
-          and a.start_time::time = v_end
+          and public.csp_appointment_start_at(a) = v_end_at
           and (p_exclude_id is null or a.id <> p_exclude_id)
       ) then
         v_score := v_score + 1;
@@ -281,15 +298,15 @@ begin
         end if;
       end if;
 
-      start_time := v_start;
-      end_time := v_end;
+      start_time := v_start_at::time;
+      end_time := v_end_at::time;
       classification := case when v_score > 0 then 'recommended' else 'standard' end;
       score := v_score;
       reason := v_reason;
       return next;
     end if;
 
-    v_start := v_start + interval '30 minutes';
+    v_start_at := v_start_at + interval '30 minutes';
   end loop;
 end;
 $$;
@@ -323,8 +340,10 @@ set search_path = public
 as $$
 declare
   v_check record;
+  v_start_at timestamp;
+  v_end_at timestamp;
 begin
-  if p_start_time is null or p_end_time is null or p_end_time <= p_start_time then
+  if p_start_time is null or p_end_time is null or p_end_time = p_start_time then
     success := false;
     appointment_id := null;
     error_code := 'INVALID_DURATION';
@@ -333,14 +352,8 @@ begin
     return;
   end if;
 
-  if p_start_time < '09:00'::time or p_end_time > '21:00'::time then
-    success := false;
-    appointment_id := null;
-    error_code := 'OUTSIDE_OPERATING_HOURS';
-    error_message := 'Bookings must be between 09:00 and 21:00.';
-    return next;
-    return;
-  end if;
+  v_start_at := public.csp_start_at(p_date, p_start_time);
+  v_end_at := public.csp_end_at(p_date, p_start_time, p_end_time);
 
   select *
   into v_check
@@ -379,6 +392,8 @@ begin
     appointment_date,
     start_time,
     end_time,
+    start_at,
+    end_at,
     status,
     total_price,
     type,
@@ -398,6 +413,8 @@ begin
     p_date,
     p_start_time,
     p_end_time,
+    v_start_at,
+    v_end_at,
     'confirmed',
     p_total_price,
     coalesce(nullif(p_type, ''), 'appointment')::public.appointment_type,
@@ -447,20 +464,11 @@ begin
     return;
   end if;
 
-  if p_start_time is null or p_end_time is null or p_end_time <= p_start_time then
+  if p_start_time is null or p_end_time is null or p_end_time = p_start_time then
     success := false;
     appointment_id := null;
     error_code := 'INVALID_DURATION';
     error_message := 'End time must be after start time.';
-    return next;
-    return;
-  end if;
-
-  if p_start_time < '09:00'::time or p_end_time > '21:00'::time then
-    success := false;
-    appointment_id := null;
-    error_code := 'OUTSIDE_OPERATING_HOURS';
-    error_message := 'Bookings must be between 09:00 and 21:00.';
     return next;
     return;
   end if;
@@ -500,6 +508,8 @@ begin
       appointment_date = p_date,
       start_time = p_start_time,
       end_time = p_end_time,
+      start_at = public.csp_start_at(p_date, p_start_time),
+      end_at = public.csp_end_at(p_date, p_start_time, p_end_time),
       updated_at = now()
   where id = p_appointment_id
   returning id into appointment_id;
@@ -542,6 +552,8 @@ declare
   v_service_id uuid;
   v_start time;
   v_end time;
+  v_start_at timestamp;
+  v_end_at timestamp;
   v_group_conflicts integer;
   v_group_room_slots integer;
 begin
@@ -563,7 +575,7 @@ begin
     v_start := (v_allocation ->> 'start_time')::time;
     v_end := (v_allocation ->> 'end_time')::time;
 
-    if v_start is null or v_end is null or v_end <= v_start then
+    if v_start is null or v_end is null or v_end = v_start then
       success := false;
       appointment_group_id := null;
       error_code := 'INVALID_DURATION';
@@ -572,14 +584,8 @@ begin
       return;
     end if;
 
-    if v_start < '09:00'::time or v_end > '21:00'::time then
-      success := false;
-      appointment_group_id := null;
-      error_code := 'OUTSIDE_OPERATING_HOURS';
-      error_message := 'Group bookings must be between 09:00 and 21:00.';
-      return next;
-      return;
-    end if;
+    v_start_at := public.csp_start_at(p_appointment_date, v_start);
+    v_end_at := public.csp_end_at(p_appointment_date, v_start, v_end);
 
     select *
     into v_check
@@ -604,8 +610,12 @@ begin
     into v_group_conflicts
     from jsonb_array_elements(p_allocations) other
     where (other.value ->> 'therapist_id')::uuid = v_therapist_id
-      and (other.value ->> 'start_time')::time < v_end
-      and (other.value ->> 'end_time')::time > v_start;
+      and public.csp_start_at(p_appointment_date, (other.value ->> 'start_time')::time) < v_end_at
+      and public.csp_end_at(
+        p_appointment_date,
+        (other.value ->> 'start_time')::time,
+        (other.value ->> 'end_time')::time
+      ) > v_start_at;
 
     if v_group_conflicts > 1 then
       success := false;
@@ -620,8 +630,12 @@ begin
     into v_group_room_slots
     from jsonb_array_elements(p_allocations) other
     where (other.value ->> 'room_id')::uuid = v_room_id
-      and (other.value ->> 'start_time')::time < v_end
-      and (other.value ->> 'end_time')::time > v_start;
+      and public.csp_start_at(p_appointment_date, (other.value ->> 'start_time')::time) < v_end_at
+      and public.csp_end_at(
+        p_appointment_date,
+        (other.value ->> 'start_time')::time,
+        (other.value ->> 'end_time')::time
+      ) > v_start_at;
 
     if coalesce(v_check.room_booked_slots, 0) + v_group_room_slots > coalesce(v_check.room_total_slots, 1) then
       success := false;
@@ -671,6 +685,8 @@ begin
       appointment_date,
       start_time,
       end_time,
+      start_at,
+      end_at,
       status,
       total_price,
       type,
@@ -690,6 +706,8 @@ begin
       p_appointment_date,
       v_start,
       v_end,
+      public.csp_start_at(p_appointment_date, v_start),
+      public.csp_end_at(p_appointment_date, v_start, v_end),
       'confirmed',
       coalesce((v_allocation ->> 'total_price')::numeric, 0),
       coalesce(nullif(p_type, ''), 'appointment')::public.appointment_type,
@@ -744,6 +762,8 @@ declare
   v_service_id uuid;
   v_start time;
   v_end time;
+  v_start_at timestamp;
+  v_end_at timestamp;
   v_group_conflicts integer;
   v_group_room_slots integer;
 begin
@@ -775,7 +795,7 @@ begin
     v_start := (v_allocation ->> 'start_time')::time;
     v_end := (v_allocation ->> 'end_time')::time;
 
-    if v_start is null or v_end is null or v_end <= v_start then
+    if v_start is null or v_end is null or v_end = v_start then
       success := false;
       error_code := 'INVALID_DURATION';
       error_message := 'One pax allocation has an invalid time range.';
@@ -783,13 +803,8 @@ begin
       return;
     end if;
 
-    if v_start < '09:00'::time or v_end > '21:00'::time then
-      success := false;
-      error_code := 'OUTSIDE_OPERATING_HOURS';
-      error_message := 'Group bookings must be between 09:00 and 21:00.';
-      return next;
-      return;
-    end if;
+    v_start_at := public.csp_start_at(p_appointment_date, v_start);
+    v_end_at := public.csp_end_at(p_appointment_date, v_start, v_end);
 
     select *
     into v_check
@@ -815,8 +830,12 @@ begin
     into v_group_conflicts
     from jsonb_array_elements(p_allocations) other
     where (other.value ->> 'therapist_id')::uuid = v_therapist_id
-      and (other.value ->> 'start_time')::time < v_end
-      and (other.value ->> 'end_time')::time > v_start;
+      and public.csp_start_at(p_appointment_date, (other.value ->> 'start_time')::time) < v_end_at
+      and public.csp_end_at(
+        p_appointment_date,
+        (other.value ->> 'start_time')::time,
+        (other.value ->> 'end_time')::time
+      ) > v_start_at;
 
     if v_group_conflicts > 1 then
       success := false;
@@ -830,8 +849,12 @@ begin
     into v_group_room_slots
     from jsonb_array_elements(p_allocations) other
     where (other.value ->> 'room_id')::uuid = v_room_id
-      and (other.value ->> 'start_time')::time < v_end
-      and (other.value ->> 'end_time')::time > v_start;
+      and public.csp_start_at(p_appointment_date, (other.value ->> 'start_time')::time) < v_end_at
+      and public.csp_end_at(
+        p_appointment_date,
+        (other.value ->> 'start_time')::time,
+        (other.value ->> 'end_time')::time
+      ) > v_start_at;
 
     if coalesce(v_check.room_booked_slots, 0) + v_group_room_slots > coalesce(v_check.room_total_slots, 1) then
       success := false;
@@ -870,6 +893,8 @@ begin
       appointment_date,
       start_time,
       end_time,
+      start_at,
+      end_at,
       status,
       total_price,
       type,
@@ -889,6 +914,8 @@ begin
       p_appointment_date,
       v_start,
       v_end,
+      public.csp_start_at(p_appointment_date, v_start),
+      public.csp_end_at(p_appointment_date, v_start, v_end),
       'confirmed',
       coalesce((v_allocation ->> 'total_price')::numeric, 0),
       coalesce(nullif(p_type, ''), 'appointment')::public.appointment_type,
@@ -928,7 +955,8 @@ language plpgsql
 stable
 as $$
 declare
-  v_end time := p_now_time + make_interval(mins => p_duration);
+  v_start_at timestamp := public.csp_start_at(p_today, p_now_time);
+  v_end_at timestamp := v_start_at + make_interval(mins => p_duration);
   v_room_total integer := 1;
   v_room_booked integer := 0;
 begin
@@ -942,11 +970,11 @@ begin
   select count(*)
   into v_room_booked
   from public.appointments a
-  where a.appointment_date::date = p_today
+  where a.appointment_date::date between p_today - 1 and p_today + 1
     and a.room_id = p_room_id
     and public.csp_blocks_schedule(a.status::text)
-    and a.start_time::time < v_end
-    and a.end_time::time > p_now_time;
+    and public.csp_appointment_start_at(a) < v_end_at
+    and public.csp_appointment_end_at(a) > v_start_at;
 
   zone_free_slots := greatest(v_room_total - v_room_booked, 0);
   zone_available_now := zone_free_slots > 0;
@@ -956,10 +984,10 @@ begin
       'therapist_id', t.id,
       'name', t.name,
       'status', case when busy.free_at is null then 'free_now' else 'busy' end,
-      'free_at', busy.free_at,
+      'free_at', busy.free_at::time,
       'free_in_minutes', case
         when busy.free_at is null then 0
-        else greatest(floor(extract(epoch from (busy.free_at - p_now_time)) / 60)::integer, 0)
+        else greatest(floor(extract(epoch from (busy.free_at - v_start_at)) / 60)::integer, 0)
       end
     )
     order by case when busy.free_at is null then 0 else 1 end, busy.free_at nulls first, t.name
@@ -967,13 +995,13 @@ begin
   into therapists
   from public.therapists t
   left join lateral (
-    select max(a.end_time::time) as free_at
+    select max(public.csp_appointment_end_at(a)) as free_at
     from public.appointments a
-    where a.appointment_date::date = p_today
+    where a.appointment_date::date between p_today - 1 and p_today + 1
       and a.therapist_id = t.id
       and public.csp_blocks_schedule(a.status::text)
-      and a.start_time::time < v_end
-      and a.end_time::time > p_now_time
+      and public.csp_appointment_start_at(a) < v_end_at
+      and public.csp_appointment_end_at(a) > v_start_at
   ) busy on true
   where coalesce(t.is_active, true) = true
     and lower(coalesce(t.role, 'therapist')) = 'therapist';

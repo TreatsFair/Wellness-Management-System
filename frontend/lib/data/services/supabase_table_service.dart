@@ -7,6 +7,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'availability_status': 'availabilityStatus',
   'business_name': 'businessName',
   'busy_until': 'busyUntil',
+  'close_time': 'closeTime',
   'created_at': 'createdAt',
   'created_by': 'createdBy',
   'cashier_id': 'cashierId',
@@ -26,6 +27,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'is_active': 'isActive',
   'item_count': 'itemCount',
   'join_date': 'joinDate',
+  'open_time': 'openTime',
   'paid_at': 'paidAt',
   'payment_method': 'paymentMethod',
   'payment_status': 'paymentStatus',
@@ -42,7 +44,9 @@ const Map<String, String> _snakeToCamelAliases = {
   'service_price': 'servicePrice',
   'service_commissions': 'serviceCommissions',
   'sst_amount': 'sstAmount',
+  'start_at': 'startAt',
   'start_time': 'startTime',
+  'end_at': 'endAt',
   'therapist_id': 'therapistId',
   'therapist_name': 'therapistName',
   'total_amount': 'totalAmount',
@@ -203,6 +207,7 @@ class SupabaseTableService {
   bool _isSyntheticUuidValue(String key, Object? value) {
     final uuidKeys = {
       'appointmentId',
+      'appointmentGroupId',
       'cashierId',
       'counterId',
       'counterStaffId',

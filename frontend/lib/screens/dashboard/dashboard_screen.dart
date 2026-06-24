@@ -5,6 +5,7 @@ import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/profile_repository.dart';
 import '../../data/repositories/settings_repository.dart';
+import '../../data/services/supabase_table_service.dart';
 import '../appointments/appointment_screen.dart';
 import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
@@ -73,12 +74,16 @@ class _TherapistStatus {
 class _BusinessProfile {
   final String name;
   final String location;
+  final String openTime;
+  final String closeTime;
   final String logoInitial;
   final String? settingsDocumentId;
 
   const _BusinessProfile({
     required this.name,
     required this.location,
+    required this.openTime,
+    required this.closeTime,
     required this.logoInitial,
     this.settingsDocumentId,
   });
@@ -86,12 +91,16 @@ class _BusinessProfile {
   _BusinessProfile copyWith({
     String? name,
     String? location,
+    String? openTime,
+    String? closeTime,
     String? logoInitial,
     String? settingsDocumentId,
   }) {
     return _BusinessProfile(
       name: name ?? this.name,
       location: location ?? this.location,
+      openTime: openTime ?? this.openTime,
+      closeTime: closeTime ?? this.closeTime,
       logoInitial: logoInitial ?? this.logoInitial,
       settingsDocumentId: settingsDocumentId ?? this.settingsDocumentId,
     );
@@ -137,6 +146,8 @@ class _DashboardData {
 const _placeholderBusinessProfile = _BusinessProfile(
   name: 'The Best Family Wellness',
   location: 'Kuala Lumpur',
+  openTime: '09:00',
+  closeTime: '21:00',
   logoInitial: 'W',
 );
 
@@ -155,6 +166,11 @@ String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
   final text = value.toString();
   return text.trim().isEmpty ? fallback : text;
+}
+
+String _cleanTime(String value) {
+  final raw = value.trim();
+  return raw.length >= 5 ? raw.substring(0, 5) : raw;
 }
 
 double _asDouble(Object? value, [double fallback = 0]) {
@@ -209,6 +225,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _profileRepository = ProfileRepository();
   final _dashboardRepository = DashboardRepository();
   final _settingsRepository = SettingsRepository();
+  final _businessHoursTable = SupabaseTableService('business_settings');
   _BusinessProfile _businessProfile = _placeholderBusinessProfile;
   _DashboardData _dashboardData = _DashboardData.empty;
   bool _isCurrentUserAdmin = false;
@@ -486,12 +503,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
           location: (data['location'] as String?)?.trim().isNotEmpty == true
               ? (data['location'] as String).trim()
               : _placeholderBusinessProfile.location,
+          openTime: profile.openTime,
+          closeTime: profile.closeTime,
           logoInitial: _placeholderBusinessProfile.logoInitial,
           settingsDocumentId: _asString(data['id']),
         );
       }
     } catch (_) {
       // Keep the placeholder business profile when settings are unavailable.
+    }
+
+    try {
+      final hours = await _businessHoursTable.getById('1');
+      if (hours != null) {
+        profile = profile.copyWith(
+          openTime: _cleanTime(_asString(hours['openTime'], profile.openTime)),
+          closeTime: _cleanTime(_asString(hours['closeTime'], profile.closeTime)),
+        );
+      }
+    } catch (_) {
+      // Keep default business hours when the hours row is unavailable.
     }
 
     if (!mounted) return;
@@ -532,6 +563,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ? null
             : settingsDocumentId,
       );
+
+      await _businessHoursTable.update('1', {
+        'openTime': profile.openTime,
+        'closeTime': profile.closeTime,
+      });
 
       if (!mounted) return;
       setState(() {
@@ -2660,19 +2696,35 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
   final _authRepository = AuthRepository();
   late final TextEditingController _nameController;
   late final TextEditingController _locationController;
+  late final TextEditingController _openTimeController;
+  late final TextEditingController _closeTimeController;
 
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.profile.name);
     _locationController = TextEditingController(text: widget.profile.location);
+    _openTimeController = TextEditingController(text: widget.profile.openTime);
+    _closeTimeController = TextEditingController(text: widget.profile.closeTime);
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _locationController.dispose();
+    _openTimeController.dispose();
+    _closeTimeController.dispose();
     super.dispose();
+  }
+
+  String _normalizeSettingsTime(String value, String fallback) {
+    final raw = value.trim();
+    final match = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(raw);
+    if (match == null) return fallback;
+    final hour = int.tryParse(match.group(1) ?? '') ?? -1;
+    final minute = int.tryParse(match.group(2) ?? '') ?? -1;
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
+    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
   }
 
   void _save() {
@@ -2682,6 +2734,8 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
       widget.profile.copyWith(
         name: _nameController.text.trim(),
         location: _locationController.text.trim(),
+        openTime: _normalizeSettingsTime(_openTimeController.text, '09:00'),
+        closeTime: _normalizeSettingsTime(_closeTimeController.text, '21:00'),
       ),
     );
   }
@@ -2804,6 +2858,35 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                       label: 'Location',
                       controller: _locationController,
                       enabled: widget.isAdmin,
+                    ),
+                    const SizedBox(height: 24),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: _BusinessSettingsField(
+                            label: 'Opening Time',
+                            controller: _openTimeController,
+                            enabled: widget.isAdmin,
+                            hint: '09:00',
+                            keyboardType: TextInputType.datetime,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BusinessSettingsField(
+                            label: 'Closing Time',
+                            controller: _closeTimeController,
+                            enabled: widget.isAdmin,
+                            hint: '21:00',
+                            keyboardType: TextInputType.datetime,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'Timetable lines follow these hours. Orders and services can still run after closing.',
+                      style: TextStyle(fontSize: 13, color: Color(0xFF5F6B7A)),
                     ),
                     const SizedBox(height: 24),
                     const Text(
@@ -2943,11 +3026,15 @@ class _BusinessSettingsField extends StatelessWidget {
   final String label;
   final TextEditingController controller;
   final bool enabled;
+  final String? hint;
+  final TextInputType? keyboardType;
 
   const _BusinessSettingsField({
     required this.label,
     required this.controller,
     required this.enabled,
+    this.hint,
+    this.keyboardType,
   });
 
   @override
@@ -2967,8 +3054,10 @@ class _BusinessSettingsField extends StatelessWidget {
         TextField(
           controller: controller,
           enabled: enabled,
+          keyboardType: keyboardType,
           style: const TextStyle(fontSize: 16, color: Color(0xFF1A1A2E)),
           decoration: InputDecoration(
+            hintText: hint,
             filled: true,
             fillColor: enabled ? Colors.white : const Color(0xFFF6F7F8),
             disabledBorder: OutlineInputBorder(

@@ -175,6 +175,38 @@ class AppointmentRepository {
     });
   }
 
+  Future<Map<String, dynamic>> checkoutAppointmentGroup({
+    required String appointmentGroupId,
+    required List<String> appointmentIds,
+    required Map<String, dynamic> appointmentUpdates,
+    required Map<String, dynamic> transactionValues,
+    Map<String, dynamic>? newCustomerValues,
+  }) async {
+    String? customerId = asString(appointmentUpdates['customerId']);
+    if ((customerId.isEmpty || customerId == 'walk_in_guest') &&
+        _canCreateCustomer(newCustomerValues)) {
+      final customer = await CustomerRepository().addCustomer(
+        newCustomerValues!,
+      );
+      customerId = asString(customer['id']);
+      appointmentUpdates['customerId'] = customerId;
+      transactionValues['customerId'] = customerId;
+    }
+
+    for (final appointmentId in appointmentIds) {
+      await updateAppointment(appointmentId, {
+        ...appointmentUpdates,
+        'status': 'completed',
+      });
+    }
+
+    return TransactionRepository().createTransaction({
+      ...transactionValues,
+      'appointmentGroupId': appointmentGroupId,
+      'paymentStatus': transactionValues['paymentStatus'] ?? 'paid',
+    });
+  }
+
   Future<void> deleteAppointment(String id) => _table.delete(id);
 }
 

@@ -2,12 +2,40 @@
 import 'package:intl/intl.dart';
 
 import '../../core/services/csp_service.dart';
+import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
+
+int _bookingTimeToMinutes(String time) {
+  final parts = time.split(':');
+  if (parts.length < 2) return 0;
+  return (int.tryParse(parts[0]) ?? 0) * 60 +
+      (int.tryParse(parts[1]) ?? 0);
+}
+
+String _bookingMinutesToTime(int minutes) {
+  final normalized = minutes % (24 * 60);
+  final hour = (normalized ~/ 60).toString().padLeft(2, '0');
+  final minute = (normalized % 60).toString().padLeft(2, '0');
+  return '$hour:$minute';
+}
+
+String _bookingCleanTime(String value) {
+  final raw = value.trim();
+  if (raw.length >= 5) return raw.substring(0, 5);
+  return raw;
+}
+
+String _bookingTimeLabel(String value) {
+  final minutes = _bookingTimeToMinutes(value);
+  return DateFormat('h:mm a').format(
+    DateTime(2026, 1, 1, (minutes ~/ 60) % 24, minutes % 60),
+  );
+}
 
 String _normalizeRoomType(Object? value) {
   final raw = value?.toString().trim().toLowerCase() ?? '';
@@ -151,7 +179,7 @@ class _TimeSlot {
     required this.isAvailable,
   });
 
-  String get label => '$start–$end';
+  String get label => '${_bookingTimeLabel(start)} - ${_bookingTimeLabel(end)}';
 }
 
 class _Customer {
@@ -172,11 +200,122 @@ class _Customer {
   bool get isGuest => id == 'walk_in_guest';
 }
 
+class _BookingAllocation {
+  final List<_Service> services;
+  final _Therapist therapist;
+  final _RoomZone room;
+  final _TimeSlot slot;
+
+  const _BookingAllocation({
+    required this.services,
+    required this.therapist,
+    required this.room,
+    required this.slot,
+  });
+
+  _Service get primaryService => services.first;
+
+  int get duration =>
+      services.fold(0, (total, service) => total + service.duration);
+
+  double get price =>
+      services.fold(0, (total, service) => total + service.price);
+
+  String get serviceNameSummary {
+    if (services.length == 1) return services.first.name;
+    return services.map((service) => service.name).join(', ');
+  }
+
+  String get endTime =>
+      _bookingMinutesToTime(_bookingTimeToMinutes(slot.start) + duration);
+
+  List<Map<String, dynamic>> get serviceItems => services
+      .map(
+        (service) => {
+          'id': service.id,
+          'name': service.name,
+          'category': service.category,
+          'duration': service.duration,
+          'price': service.price,
+          'therapistCommission': service.therapistCommission,
+          'counterCommission': service.counterCommission,
+          'assignedTherapistId': therapist.id,
+          'assignedTherapistName': therapist.name,
+          'assignedRoomId': room.id,
+          'assignedRoomName': room.name,
+          'startTime': slot.start,
+          'endTime': endTime,
+        },
+      )
+      .toList();
+
+  Map<String, dynamic> toCspAllocation() {
+    return {
+      'therapist_id': therapist.id,
+      'room_id': room.id,
+      'service_id': primaryService.id,
+      'start_time': slot.start,
+      'end_time': endTime,
+      'total_price': price,
+      'service_name': serviceNameSummary,
+      'service_items': serviceItems,
+      'item_count': services.length,
+    };
+  }
+}
+
+class AppointmentEditAllocation {
+  final String appointmentId;
+  final List<String> serviceIds;
+  final String therapistId;
+  final String roomId;
+  final String startTime;
+  final String endTime;
+
+  const AppointmentEditAllocation({
+    required this.appointmentId,
+    required this.serviceIds,
+    required this.therapistId,
+    required this.roomId,
+    required this.startTime,
+    required this.endTime,
+  });
+}
+
+class AppointmentEditPayload {
+  final String? appointmentId;
+  final String? appointmentGroupId;
+  final DateTime date;
+  final String customerId;
+  final String customerName;
+  final String customerPhone;
+  final List<AppointmentEditAllocation> allocations;
+  final int activePaxIndex;
+
+  const AppointmentEditPayload({
+    this.appointmentId,
+    this.appointmentGroupId,
+    required this.date,
+    required this.customerId,
+    required this.customerName,
+    required this.customerPhone,
+    required this.allocations,
+    this.activePaxIndex = 0,
+  });
+
+  bool get isGroup => appointmentGroupId?.trim().isNotEmpty == true;
+}
+
 // ── Main Screen ───────────────────────────────────────────────────
 
 class NewAppointmentScreen extends StatefulWidget {
   final String userRole;
-  const NewAppointmentScreen({super.key, required this.userRole});
+  final AppointmentEditPayload? editPayload;
+  const NewAppointmentScreen({
+    super.key,
+    required this.userRole,
+    this.editPayload,
+  });
 
   @override
   State<NewAppointmentScreen> createState() => _NewAppointmentScreenState();
@@ -184,6 +323,7 @@ class NewAppointmentScreen extends StatefulWidget {
 
 class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   final _customerRepository = CustomerRepository();
+  final _appointmentRepository = AppointmentRepository();
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
@@ -195,10 +335,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   _Therapist? _selectedTherapist;
   _RoomZone? _selectedRoom;
   _TimeSlot? _selectedSlot;
+  _TimeSlot? _previousSlotReference;
+  int _paxCount = 1;
+  int _activePaxIndex = 0;
+  final List<_BookingAllocation?> _paxAllocations = [null];
   String _serviceTab = 'Services';
   bool _summaryExpanded = false;
   bool _isConfirming = false;
   bool _loadingSlots = false;
+  bool _didApplyEditPayload = false;
 
   // Data
   List<_Service> _services = [];
@@ -236,9 +381,72 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         _loadRooms(),
         _loadCustomers(),
       ]);
+      _applyEditPayloadIfNeeded();
     } finally {
       setState(() => _loadingData = false);
     }
+  }
+
+  bool get _isEditing => widget.editPayload != null;
+
+  void _applyEditPayloadIfNeeded() {
+    if (_didApplyEditPayload || widget.editPayload == null || !mounted) return;
+    final payload = widget.editPayload!;
+    final allocations = <_BookingAllocation?>[];
+
+    for (final editAllocation in payload.allocations) {
+      final services = editAllocation.serviceIds
+          .map((id) => _services.where((service) => service.id == id))
+          .where((matches) => matches.isNotEmpty)
+          .map((matches) => matches.first)
+          .toList();
+      final therapistMatches = _therapists.where(
+        (therapist) => therapist.id == editAllocation.therapistId,
+      );
+      final roomMatches = _rooms.where((room) => room.id == editAllocation.roomId);
+      if (services.isEmpty || therapistMatches.isEmpty || roomMatches.isEmpty) {
+        allocations.add(null);
+        continue;
+      }
+      allocations.add(
+        _BookingAllocation(
+          services: services,
+          therapist: therapistMatches.first,
+          room: roomMatches.first,
+          slot: _TimeSlot(
+            start: _bookingCleanTime(editAllocation.startTime),
+            end: _bookingCleanTime(editAllocation.endTime),
+            isRecommended: false,
+            isAvailable: true,
+          ),
+        ),
+      );
+    }
+
+    final matchedCustomers = _customers.where((c) => c.id == payload.customerId);
+    final customer = matchedCustomers.isNotEmpty
+        ? matchedCustomers.first
+        : payload.customerId.trim().isEmpty || payload.customerId == 'walk_in_guest'
+        ? _Customer.guest
+        : _Customer(
+            id: payload.customerId,
+            name: payload.customerName,
+            phone: payload.customerPhone,
+          );
+
+    setState(() {
+      _didApplyEditPayload = true;
+      _selectedDate = _stripDate(payload.date);
+      _selectedCustomer = customer;
+      _customerSearchController.text = customer.isGuest ? '' : customer.name;
+      _paxCount = allocations.isEmpty ? 1 : allocations.length;
+      _paxAllocations
+        ..clear()
+        ..addAll(allocations.isEmpty ? [null] : allocations);
+      _activePaxIndex = payload.activePaxIndex.clamp(0, _paxCount - 1);
+      _loadAllocationIntoSelection(_paxAllocations[_activePaxIndex]);
+    });
+    if (_hasCurrentAllocation) _generateSlots();
   }
 
   Future<void> _loadServices() async {
@@ -396,6 +604,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         therapistId: _selectedTherapist!.id,
         roomId: _selectedRoom!.id,
         duration: duration,
+        excludeId: _activeEditAppointmentId,
       );
       final slots = cspSlots
           .map(
@@ -407,7 +616,6 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             ),
           )
           .toList();
-
       if (mounted) setState(() => _slots = slots);
     } catch (e) {
       if (mounted) {
@@ -430,15 +638,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return int.parse(p[0]) * 60 + int.parse(p[1]);
   }
 
-  String _minutesToTime(int m) {
-    final h = (m ~/ 60).toString().padLeft(2, '0');
-    final min = (m % 60).toString().padLeft(2, '0');
-    return '$h:$min';
-  }
-
   // ── Selection Handlers ─────────────────────────────────────────
 
   void _onServiceSelected(_Service s) {
+    var shouldGenerateSlots = false;
     setState(() {
       final existingIndex = _selectedServices.indexWhere(
         (service) => service.id == s.id,
@@ -448,12 +651,45 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       } else {
         _selectedServices.removeAt(existingIndex);
       }
-      _selectedTherapist = null;
-      _selectedRoom = null;
-      _selectedSlot = null;
+      if (_selectedSlot != null) {
+        _previousSlotReference = _selectedSlot;
+        _selectedSlot = _slotWithCurrentDuration(_selectedSlot!);
+      }
+      final requiredRoomType = _requiredRoomType;
+      if (_selectedRoom != null &&
+          requiredRoomType.isNotEmpty &&
+          _selectedRoom!.type != requiredRoomType) {
+        _selectedRoom = null;
+        _selectedSlot = null;
+      }
       _slots = [];
       _loadingSlots = false;
+      _paxAllocations[_activePaxIndex] = null;
+      shouldGenerateSlots = _selectedServices.isNotEmpty &&
+          _selectedTherapist != null &&
+          _selectedRoom != null;
     });
+    if (shouldGenerateSlots) _generateSlots();
+  }
+
+  _TimeSlot _slotWithCurrentDuration(_TimeSlot slot) {
+    final start = _bookingCleanTime(slot.start);
+    return _TimeSlot(
+      start: start,
+      end: _bookingMinutesToTime(_bookingTimeToMinutes(start) + _serviceDuration),
+      isRecommended: slot.isRecommended,
+      isAvailable: slot.isAvailable,
+    );
+  }
+
+  String? get _activeEditAppointmentId {
+    final payload = widget.editPayload;
+    if (payload == null) return null;
+    if (_activePaxIndex < 0 || _activePaxIndex >= payload.allocations.length) {
+      return payload.appointmentId;
+    }
+    final id = payload.allocations[_activePaxIndex].appointmentId.trim();
+    return id.isEmpty ? payload.appointmentId : id;
   }
 
   void _onTherapistSelected(_Therapist t) {
@@ -462,6 +698,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _selectedSlot = null;
       _slots = [];
       _loadingSlots = false;
+      _paxAllocations[_activePaxIndex] = null;
     });
     if (_selectedServices.isNotEmpty && _selectedRoom != null) _generateSlots();
   }
@@ -472,6 +709,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _selectedSlot = null;
       _slots = [];
       _loadingSlots = false;
+      _paxAllocations[_activePaxIndex] = null;
     });
     if (_selectedServices.isNotEmpty && _selectedTherapist != null) {
       _generateSlots();
@@ -493,9 +731,6 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     }
   }
 
-  _Service? get _primaryService =>
-      _selectedServices.isEmpty ? null : _selectedServices.first;
-
   int get _serviceDuration => _selectedServices.fold(
     0,
     (total, service) => total + service.duration,
@@ -510,19 +745,184 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return _selectedServices.map((service) => service.name).join(', ');
   }
 
-  List<Map<String, dynamic>> get _serviceItems => _selectedServices
-      .map(
-        (service) => {
-          'id': service.id,
-          'name': service.name,
-          'category': service.category,
-          'duration': service.duration,
-          'price': service.price,
-          'therapistCommission': service.therapistCommission,
-          'counterCommission': service.counterCommission,
-        },
-      )
-      .toList();
+  bool get _hasCurrentAllocation =>
+      _selectedServices.isNotEmpty &&
+      _selectedTherapist != null &&
+      _selectedRoom != null &&
+      _selectedSlot != null;
+
+  _BookingAllocation? get _currentAllocation {
+    if (!_hasCurrentAllocation) return null;
+    return _BookingAllocation(
+      services: List<_Service>.from(_selectedServices),
+      therapist: _selectedTherapist!,
+      room: _selectedRoom!,
+      slot: _selectedSlot!,
+    );
+  }
+
+  List<_BookingAllocation?> get _allocationSlots {
+    final allocations = List<_BookingAllocation?>.from(_paxAllocations);
+    final current = _currentAllocation;
+    if (current != null) allocations[_activePaxIndex] = current;
+    return allocations;
+  }
+
+  List<_BookingAllocation> get _checkoutAllocations =>
+      _allocationSlots.whereType<_BookingAllocation>().toList();
+
+  double get _bookingTotalPrice => _checkoutAllocations.fold(
+    0,
+    (total, allocation) => total + allocation.price,
+  );
+
+  int get _bookingTotalDuration => _checkoutAllocations.fold(
+    0,
+    (total, allocation) => total + allocation.duration,
+  );
+
+  String get _bookingServiceNameSummary {
+    final allocations = _checkoutAllocations;
+    if (allocations.isEmpty) return '';
+    if (allocations.length == 1) return allocations.first.serviceNameSummary;
+    return '${allocations.length} pax booking';
+  }
+
+  void _clearCurrentAllocationSelection() {
+    _selectedServices.clear();
+    _selectedTherapist = null;
+    _selectedRoom = null;
+    _selectedSlot = null;
+    _previousSlotReference = null;
+    _slots = [];
+    _loadingSlots = false;
+  }
+
+  void _loadAllocationIntoSelection(_BookingAllocation? allocation) {
+    if (allocation == null) {
+      _clearCurrentAllocationSelection();
+      return;
+    }
+    _selectedServices
+      ..clear()
+      ..addAll(allocation.services);
+    _selectedTherapist = allocation.therapist;
+    _selectedRoom = allocation.room;
+    _selectedSlot = allocation.slot;
+    _previousSlotReference = allocation.slot;
+    _slots = [allocation.slot];
+    _loadingSlots = false;
+  }
+
+  bool _timesOverlap(_BookingAllocation a, _BookingAllocation b) {
+    final aStart = _bookingTimeToMinutes(a.slot.start);
+    var aEnd = _bookingTimeToMinutes(a.endTime);
+    final bStart = _bookingTimeToMinutes(b.slot.start);
+    var bEnd = _bookingTimeToMinutes(b.endTime);
+    if (aEnd <= aStart) aEnd += 24 * 60;
+    if (bEnd <= bStart) bEnd += 24 * 60;
+    return aStart < bEnd && aEnd > bStart;
+  }
+
+  String? _allocationConflictMessage(
+    _BookingAllocation allocation, {
+    required int index,
+  }) {
+    for (var i = 0; i < _paxAllocations.length; i++) {
+      if (i == index) continue;
+      final other = _paxAllocations[i];
+      if (other == null) continue;
+      if (other.therapist.id == allocation.therapist.id &&
+          _timesOverlap(allocation, other)) {
+        return 'Pax ${index + 1} overlaps Pax ${i + 1}. ${allocation.therapist.name} is already assigned at that time.';
+      }
+    }
+    return null;
+  }
+
+  String? get _paxConflictMessage {
+    final allocations = _allocationSlots;
+    for (var i = 0; i < allocations.length; i++) {
+      final allocation = allocations[i];
+      if (allocation == null) continue;
+      for (var j = i + 1; j < allocations.length; j++) {
+        final other = allocations[j];
+        if (other == null) continue;
+        if (allocation.therapist.id == other.therapist.id &&
+            _timesOverlap(allocation, other)) {
+          return 'Pax ${i + 1} and Pax ${j + 1} use ${allocation.therapist.name} at overlapping times.';
+        }
+      }
+    }
+    return null;
+  }
+
+  bool _canStoreCurrentAllocation() {
+    final current = _currentAllocation;
+    if (current == null) return false;
+    return _allocationConflictMessage(current, index: _activePaxIndex) == null;
+  }
+
+  void _showPaxConflict(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: const Color(0xFFE53935),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  void _selectPax(int index) {
+    final current = _currentAllocation;
+    if (current != null) {
+      final conflict = _allocationConflictMessage(
+        current,
+        index: _activePaxIndex,
+      );
+      if (conflict != null) {
+        _showPaxConflict(conflict);
+        return;
+      }
+    }
+    setState(() {
+      if (current != null) _paxAllocations[_activePaxIndex] = current;
+      _activePaxIndex = index;
+      _loadAllocationIntoSelection(_paxAllocations[index]);
+    });
+    if (_selectedServices.isNotEmpty &&
+        _selectedTherapist != null &&
+        _selectedRoom != null) {
+      _generateSlots();
+    }
+  }
+
+  void _clearPax(int index) {
+    setState(() {
+      _paxAllocations[index] = null;
+      _activePaxIndex = index;
+      _loadAllocationIntoSelection(null);
+    });
+  }
+
+  void _setPaxCount(int count) {
+    if (count < 1) return;
+    setState(() {
+      final current = _currentAllocation;
+      if (current != null && _canStoreCurrentAllocation()) {
+        _paxAllocations[_activePaxIndex] = current;
+      }
+      _paxCount = count;
+      while (_paxAllocations.length < count) {
+        _paxAllocations.add(null);
+      }
+      while (_paxAllocations.length > count) {
+        _paxAllocations.removeLast();
+      }
+      if (_activePaxIndex >= count) _activePaxIndex = count - 1;
+      _loadAllocationIntoSelection(_paxAllocations[_activePaxIndex]);
+    });
+  }
 
   String get _requiredRoomType {
     final types = _selectedServices
@@ -549,10 +949,16 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   bool get _canConfirm =>
       _selectedCustomer != null &&
-      _selectedServices.isNotEmpty &&
-      _selectedTherapist != null &&
-      _selectedRoom != null &&
-      _selectedSlot != null;
+      _checkoutAllocations.length == _paxCount &&
+      _selectedSlotIsAvailable &&
+      _paxConflictMessage == null;
+
+  bool get _selectedSlotIsAvailable {
+    final selected = _selectedSlot;
+    if (selected == null) return false;
+    if (_slots.isEmpty || _loadingSlots) return true;
+    return _slots.any((slot) => slot.isAvailable && slot.start == selected.start);
+  }
 
   List<String> get _missingSlotRequirements {
     final missing = <String>[];
@@ -562,45 +968,100 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return missing;
   }
 
-  Future<void> _confirmAppointment() async {
+  Future<void> _confirmAppointment({Object? popResult}) async {
     if (!_canConfirm) return;
     setState(() => _isConfirming = true);
 
     try {
       final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
-      final endTime = _minutesToTime(
-        _timeToMinutes(_selectedSlot!.start) + _serviceDuration,
-      );
-
-      final slotStart = _timeToMinutes(_selectedSlot!.start);
-      final slotEnd = _timeToMinutes(endTime);
-      if (slotStart >= slotEnd) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Invalid appointment time selected'),
-              backgroundColor: Color(0xFFE53935),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
-        }
+      final allocations = _checkoutAllocations;
+      final conflict = _paxConflictMessage;
+      if (conflict != null) {
+        if (mounted) _showPaxConflict(conflict);
         return;
       }
+      for (final allocation in allocations) {
+        final slotStart = _timeToMinutes(allocation.slot.start);
+        final slotEnd = _timeToMinutes(allocation.endTime);
+        if (slotStart == slotEnd) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Invalid appointment time selected'),
+                backgroundColor: Color(0xFFE53935),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          }
+          return;
+        }
+      }
 
-      final result = await CspService.createAppointment(
-        customerId: _selectedCustomer!.id,
-        therapistId: _selectedTherapist!.id,
-        roomId: _selectedRoom!.id,
-        serviceId: _primaryService!.id,
-        serviceName: _serviceNameSummary,
-        serviceItems: _serviceItems,
-        itemCount: _selectedServices.length,
-        date: dateStr,
-        startTime: _selectedSlot!.start,
-        endTime: endTime,
-        totalPrice: _servicePrice,
-        type: 'appointment',
-      );
+      final CspCreateResult result;
+      if (_isEditing && widget.editPayload!.isGroup) {
+        result = await CspService.updateAppointmentGroup(
+          appointmentGroupId: widget.editPayload!.appointmentGroupId!,
+          customerId: _selectedCustomer!.id,
+          groupName: _selectedCustomer!.name,
+          paxCount: allocations.length,
+          date: dateStr,
+          allocations: allocations
+              .map((allocation) => allocation.toCspAllocation())
+              .toList(),
+          type: 'appointment',
+        );
+      } else if (_isEditing && widget.editPayload!.appointmentId != null) {
+        final allocation = allocations.first;
+        result = await CspService.updateAppointment(
+          appointmentId: widget.editPayload!.appointmentId!,
+          therapistId: allocation.therapist.id,
+          roomId: allocation.room.id,
+          date: dateStr,
+          startTime: allocation.slot.start,
+          endTime: allocation.endTime,
+        );
+        if (result.success) {
+          await _appointmentRepository.updateAppointment(
+            widget.editPayload!.appointmentId!,
+            {
+              'customerId': _selectedCustomer!.id,
+              'serviceId': allocation.primaryService.id,
+              'serviceName': allocation.serviceNameSummary,
+              'serviceItems': allocation.serviceItems,
+              'itemCount': allocation.services.length,
+              'totalPrice': allocation.price,
+              'type': 'appointment',
+            },
+          );
+        }
+      } else if (allocations.length == 1) {
+        final allocation = allocations.first;
+        result = await CspService.createAppointment(
+          customerId: _selectedCustomer!.id,
+          therapistId: allocation.therapist.id,
+          roomId: allocation.room.id,
+          serviceId: allocation.primaryService.id,
+          serviceName: allocation.serviceNameSummary,
+          serviceItems: allocation.serviceItems,
+          itemCount: allocation.services.length,
+          date: dateStr,
+          startTime: allocation.slot.start,
+          endTime: allocation.endTime,
+          totalPrice: allocation.price,
+          type: 'appointment',
+        );
+      } else {
+        result = await CspService.createAppointmentGroup(
+          customerId: _selectedCustomer!.id,
+          groupName: _selectedCustomer!.name,
+          paxCount: allocations.length,
+          date: dateStr,
+          allocations: allocations
+              .map((allocation) => allocation.toCspAllocation())
+              .toList(),
+          type: 'appointment',
+        );
+      }
 
       if (!result.success) {
         if (mounted) {
@@ -618,13 +1079,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Appointment confirmed'),
-            backgroundColor: Color(0xFF1B6B72),
+          SnackBar(
+            content: Text(
+              _isEditing ? 'Appointment saved' : 'Appointment confirmed',
+            ),
+            backgroundColor: const Color(0xFF1B6B72),
             behavior: SnackBarBehavior.floating,
           ),
         );
-        Navigator.pop(context);
+        Navigator.pop(context, popResult ?? true);
       }
     } catch (e) {
       if (mounted) {
@@ -666,7 +1129,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return SafeArea(
       child: Column(
         children: [
-          _TabletHeader(onBack: () => Navigator.pop(context)),
+          _TabletHeader(
+            title: _isEditing ? 'Edit Appointment' : 'New Appointment',
+            onBack: () => Navigator.pop(context),
+          ),
           Expanded(
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -736,7 +1202,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return SafeArea(
       child: Column(
         children: [
-          _PhoneHeader(onBack: () => Navigator.pop(context)),
+          _PhoneHeader(
+            title: _isEditing ? 'Edit Appointment' : 'New Appointment',
+            onBack: () => Navigator.pop(context),
+          ),
           Expanded(
             child: SingleChildScrollView(
               padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
@@ -773,15 +1242,21 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
           // Sticky bottom bar
           _PhoneBottomBar(
-            serviceName: _selectedServices.isEmpty ? null : _serviceNameSummary,
-            serviceDuration: _serviceDuration,
-            servicePrice: _servicePrice,
+            serviceName: _checkoutAllocations.isEmpty
+                ? null
+                : _bookingServiceNameSummary,
+            serviceDuration: _bookingTotalDuration,
+            servicePrice: _bookingTotalPrice,
             isExpanded: _summaryExpanded,
             onToggle: () =>
                 setState(() => _summaryExpanded = !_summaryExpanded),
             canConfirm: _canConfirm,
             isConfirming: _isConfirming,
-            onConfirm: _confirmAppointment,
+            onConfirm: () => _confirmAppointment(),
+            confirmLabel: _isEditing ? 'Save Appointment' : 'Confirm Appointment',
+            onSecondaryConfirm: _isEditing && widget.editPayload!.isGroup
+                ? _saveAndConfirmGroupPayment
+                : null,
             selectedDate: _selectedDate,
             selectedCustomer: _selectedCustomer,
             selectedTherapist: _selectedTherapist,
@@ -904,7 +1379,87 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             ),
           ),
         ),
+        const SizedBox(height: 16),
+        _buildPaxCountControl(),
       ],
+    );
+  }
+
+  Future<void> _saveAndConfirmGroupPayment() {
+    return _confirmAppointment(popResult: 'confirmGroupPayment');
+  }
+
+  Widget _buildPaxCountControl() {
+    final configuredCount = _checkoutAllocations.length;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5F5),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: const Icon(
+              Icons.groups_2_outlined,
+              size: 18,
+              color: Color(0xFF1B6B72),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Pax',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$configuredCount of $_paxCount configured',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _PaxStepperButton(
+            icon: Icons.remove,
+            onTap: _paxCount <= 1 ? null : () => _setPaxCount(_paxCount - 1),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Text(
+              '$_paxCount',
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+          ),
+          _PaxStepperButton(
+            icon: Icons.add,
+            onTap: () => _setPaxCount(_paxCount + 1),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1098,6 +1653,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           'Slots filtered based on therapist and room availability',
           style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
         ),
+        if (_isEditing && _previousSlotReference != null) ...[
+          const SizedBox(height: 12),
+          _PreviousTimeReferenceCard(
+            previousSlot: _previousSlotReference!,
+            currentSlot: _selectedSlot,
+            canSaveCurrent: _selectedSlotIsAvailable,
+          ),
+        ],
         const SizedBox(height: 14),
 
         // Recommended
@@ -1124,7 +1687,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             slots: recommended,
             selectedSlot: _selectedSlot,
             recommended: true,
-            onSelect: (s) => setState(() => _selectedSlot = s),
+            onSelect: (s) => setState(() {
+              _selectedSlot = s;
+              _paxAllocations[_activePaxIndex] = null;
+            }),
           ),
           const SizedBox(height: 14),
         ],
@@ -1144,7 +1710,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             slots: standard,
             selectedSlot: _selectedSlot,
             recommended: false,
-            onSelect: (s) => setState(() => _selectedSlot = s),
+            onSelect: (s) => setState(() {
+              _selectedSlot = s;
+              _paxAllocations[_activePaxIndex] = null;
+            }),
           ),
           const SizedBox(height: 14),
         ],
@@ -1210,7 +1779,39 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           _SummaryRow(label: 'Room / Zone', value: _selectedRoom?.name ?? '—'),
           _SummaryRow(label: 'Time Slot', value: _selectedSlot?.label ?? '—'),
 
-          if (_selectedServices.isNotEmpty) ...[
+          if (_paxCount > 1 || _checkoutAllocations.isNotEmpty) ...[
+            const SizedBox(height: 18),
+            Text(
+              'Pax in this booking (${_checkoutAllocations.length}/$_paxCount)',
+              style: const TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF1A1A2E),
+              ),
+            ),
+            const SizedBox(height: 10),
+            for (var i = 0; i < _allocationSlots.length; i++) ...[
+              _BookingPaxSummaryCard(
+                index: i + 1,
+                allocation: _allocationSlots[i],
+                selected: i == _activePaxIndex,
+                onTap: () => _selectPax(i),
+                onClear: _allocationSlots[i] == null ? null : () => _clearPax(i),
+              ),
+              const SizedBox(height: 8),
+            ],
+            if (_paxConflictMessage != null) ...[
+              const SizedBox(height: 2),
+              Text(
+                _paxConflictMessage!,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFFE53935),
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             const Divider(height: 28, color: Color(0xFFEEEEEE)),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -1220,7 +1821,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
                 ),
                 Text(
-                  'RM ${_servicePrice.toStringAsFixed(2)}',
+                  'RM ${_bookingTotalPrice.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.bold,
@@ -1231,7 +1832,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             ),
             const SizedBox(height: 4),
             Text(
-              '$_serviceNameSummary - $_serviceDuration min',
+              '$_bookingServiceNameSummary - $_bookingTotalDuration min',
               style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             ),
           ],
@@ -1243,7 +1844,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             height: 52,
             child: ElevatedButton.icon(
               onPressed: _canConfirm && !_isConfirming
-                  ? _confirmAppointment
+                  ? () => _confirmAppointment()
                   : null,
               icon: _isConfirming
                   ? const SizedBox(
@@ -1255,9 +1856,12 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                       ),
                     )
                   : const Icon(Icons.check, size: 18),
-              label: const Text(
-                'Confirm Appointment',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              label: Text(
+                _isEditing ? 'Save Appointment' : 'Confirm Appointment',
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF1B6B72),
@@ -1270,6 +1874,31 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               ),
             ),
           ),
+
+          if (_isEditing && widget.editPayload!.isGroup) ...[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: OutlinedButton.icon(
+                onPressed: _canConfirm && !_isConfirming
+                    ? _saveAndConfirmGroupPayment
+                    : null,
+                icon: const Icon(Icons.point_of_sale_outlined, size: 18),
+                label: const Text(
+                  'Confirm Group Payment',
+                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+                ),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF15803D),
+                  side: const BorderSide(color: Color(0xFF15803D)),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ),
+          ],
 
           if (!_canConfirm) ...[
             const SizedBox(height: 8),
@@ -1291,8 +1920,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 // ─────────────────────────────────────────────────────────────────
 
 class _TabletHeader extends StatelessWidget {
+  final String title;
   final VoidCallback onBack;
-  const _TabletHeader({required this.onBack});
+  const _TabletHeader({required this.title, required this.onBack});
 
   @override
   Widget build(BuildContext context) {
@@ -1313,9 +1943,9 @@ class _TabletHeader extends StatelessWidget {
           Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              const Text(
-                'New Appointment',
-                style: TextStyle(
+              Text(
+                title,
+                style: const TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.bold,
                   color: Color(0xFF1A1A2E),
@@ -1330,8 +1960,9 @@ class _TabletHeader extends StatelessWidget {
 }
 
 class _PhoneHeader extends StatelessWidget {
+  final String title;
   final VoidCallback onBack;
-  const _PhoneHeader({required this.onBack});
+  const _PhoneHeader({required this.title, required this.onBack});
 
   @override
   Widget build(BuildContext context) {
@@ -1349,9 +1980,9 @@ class _PhoneHeader extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 12),
-          const Text(
-            'New Appointment',
-            style: TextStyle(
+          Text(
+            title,
+            style: const TextStyle(
               fontSize: 17,
               fontWeight: FontWeight.bold,
               color: Color(0xFF1A1A2E),
@@ -1747,6 +2378,40 @@ class _StepCard extends StatelessWidget {
           const SizedBox(height: 16),
           child,
         ],
+      ),
+    );
+  }
+}
+
+class _PaxStepperButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback? onTap;
+
+  const _PaxStepperButton({
+    required this.icon,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final enabled = onTap != null;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(9),
+      child: Container(
+        width: 32,
+        height: 32,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: enabled ? Colors.white : const Color(0xFFF1F5F9),
+          borderRadius: BorderRadius.circular(9),
+          border: Border.all(color: const Color(0xFFE2E8F0)),
+        ),
+        child: Icon(
+          icon,
+          size: 16,
+          color: enabled ? const Color(0xFF1B6B72) : const Color(0xFFCBD5E1),
+        ),
       ),
     );
   }
@@ -2881,6 +3546,90 @@ class _NoTimeSlotsPanel extends StatelessWidget {
   }
 }
 
+class _PreviousTimeReferenceCard extends StatelessWidget {
+  final _TimeSlot previousSlot;
+  final _TimeSlot? currentSlot;
+  final bool canSaveCurrent;
+
+  const _PreviousTimeReferenceCard({
+    required this.previousSlot,
+    required this.currentSlot,
+    required this.canSaveCurrent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final current = currentSlot;
+    final hasChanged =
+        current != null &&
+        (current.start != previousSlot.start || current.end != previousSlot.end);
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFDE68A)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFEF3C7),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: const Icon(
+              Icons.history_outlined,
+              color: Color(0xFFD97706),
+              size: 18,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Previous selected time',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF92400E),
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  hasChanged
+                      ? '${previousSlot.label} -> ${current.label}'
+                      : previousSlot.label,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF1A1A2E),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                if (!canSaveCurrent) ...[
+                  const SizedBox(height: 2),
+                  const Text(
+                    'Pick an available CSP slot below before saving.',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Color(0xFFB45309),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _SlotGrid extends StatelessWidget {
   final List<_TimeSlot> slots;
   final _TimeSlot? selectedSlot;
@@ -3127,6 +3876,113 @@ class _SmallBadge extends StatelessWidget {
   }
 }
 
+class _BookingPaxSummaryCard extends StatelessWidget {
+  final int index;
+  final _BookingAllocation? allocation;
+  final bool selected;
+  final VoidCallback onTap;
+  final VoidCallback? onClear;
+
+  const _BookingPaxSummaryCard({
+    required this.index,
+    required this.allocation,
+    required this.selected,
+    required this.onTap,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final item = allocation;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+          color: selected ? const Color(0xFFE8F5F5) : const Color(0xFFF8FAFC),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: selected ? const Color(0xFF1B6B72) : const Color(0xFFE2E8F0),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5F5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '$index',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF1B6B72),
+              ),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item?.serviceNameSummary ?? 'Pax $index',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  item == null
+                      ? 'Tap to configure service, therapist, room, and time'
+                      : '${item.therapist.name} - ${item.room.name}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  item == null
+                      ? (selected ? 'Editing' : 'Not configured')
+                      : '${item.slot.start} - ${item.endTime} - RM ${item.price.toStringAsFixed(2)}',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (onClear != null)
+            IconButton(
+              onPressed: onClear,
+              icon: const Icon(Icons.close, size: 18),
+              color: const Color(0xFFE53935),
+              tooltip: 'Clear pax',
+            ),
+        ],
+      ),
+      ),
+    );
+  }
+}
+
 // ── Phone Bottom Bar ──────────────────────────────────────────────
 
 class _PhoneBottomBar extends StatelessWidget {
@@ -3138,6 +3994,8 @@ class _PhoneBottomBar extends StatelessWidget {
   final bool canConfirm;
   final bool isConfirming;
   final VoidCallback onConfirm;
+  final String confirmLabel;
+  final VoidCallback? onSecondaryConfirm;
   final DateTime selectedDate;
   final _Customer? selectedCustomer;
   final _Therapist? selectedTherapist;
@@ -3153,6 +4011,8 @@ class _PhoneBottomBar extends StatelessWidget {
     required this.canConfirm,
     required this.isConfirming,
     required this.onConfirm,
+    required this.confirmLabel,
+    this.onSecondaryConfirm,
     required this.selectedDate,
     required this.selectedCustomer,
     required this.selectedTherapist,
@@ -3314,9 +4174,9 @@ class _PhoneBottomBar extends StatelessWidget {
                             ),
                           )
                         : const Icon(Icons.check, size: 16),
-                    label: const Text(
-                      'Confirm Appointment',
-                      style: TextStyle(
+                    label: Text(
+                      confirmLabel,
+                      style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
                       ),
@@ -3332,6 +4192,33 @@ class _PhoneBottomBar extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (onSecondaryConfirm != null) ...[
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 46,
+                    child: OutlinedButton.icon(
+                      onPressed: canConfirm && !isConfirming
+                          ? onSecondaryConfirm
+                          : null,
+                      icon: const Icon(Icons.point_of_sale_outlined, size: 16),
+                      label: const Text(
+                        'Confirm Group Payment',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFF15803D),
+                        side: const BorderSide(color: Color(0xFF15803D)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
                 if (!canConfirm) ...[
                   const SizedBox(height: 6),
                   const Text(
