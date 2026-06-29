@@ -42,6 +42,9 @@ alter table public.appointments
   add column if not exists start_at timestamp,
   add column if not exists end_at timestamp;
 
+alter table public.appointments
+  drop constraint if exists valid_appointment_time;
+
 create or replace function public.csp_start_at(p_date date, p_start_time time)
 returns timestamp
 language sql
@@ -80,11 +83,39 @@ as $$
   select coalesce(a.end_at, public.csp_end_at(a.appointment_date::date, a.start_time::time, a.end_time::time));
 $$;
 
+create or replace function public.set_appointment_schedule_at()
+returns trigger
+language plpgsql
+as $$
+begin
+  new.start_at := public.csp_start_at(new.appointment_date::date, new.start_time::time);
+  new.end_at := public.csp_end_at(new.appointment_date::date, new.start_time::time, new.end_time::time);
+  return new;
+end;
+$$;
+
+drop trigger if exists appointments_set_schedule_at on public.appointments;
+create trigger appointments_set_schedule_at
+before insert or update of appointment_date, start_time, end_time
+on public.appointments
+for each row
+execute function public.set_appointment_schedule_at();
+
 update public.appointments a
 set start_at = public.csp_start_at(a.appointment_date::date, a.start_time::time),
     end_at = public.csp_end_at(a.appointment_date::date, a.start_time::time, a.end_time::time)
 where a.start_at is null
    or a.end_at is null;
+
+alter table public.appointments
+  add constraint valid_appointment_time
+  check (
+    appointment_date is null
+    or start_time is null
+    or end_time is null
+    or public.csp_end_at(appointment_date::date, start_time::time, end_time::time)
+      > public.csp_start_at(appointment_date::date, start_time::time)
+  ) not valid;
 
 create index if not exists idx_appointments_csp_therapist_at
   on public.appointments (therapist_id, start_at, end_at)

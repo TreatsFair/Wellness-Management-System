@@ -713,8 +713,8 @@ class _TimetableTimeline extends StatelessWidget {
       closeMinute,
       (latest, entry) => entry.endMinutes > latest ? entry.endMinutes : latest,
     );
-    final canvasStartMinute = earliestEntryStart;
-    final canvasEndMinute = latestEntryEnd;
+    final canvasStartMinute = _floorToHour(earliestEntryStart);
+    final canvasEndMinute = _ceilToHour(latestEntryEnd);
     final totalHeight =
         ((canvasEndMinute - canvasStartMinute) / 60 * hourHeight)
             .clamp(120.0, 2600.0);
@@ -737,9 +737,8 @@ class _TimetableTimeline extends StatelessWidget {
               clipBehavior: Clip.none,
               children: [
                 _TimetableGrid(
-                  openMinute: openMinute,
-                  closeMinute: closeMinute,
                   canvasStartMinute: canvasStartMinute,
+                  canvasEndMinute: canvasEndMinute,
                   hourHeight: hourHeight,
                   labelWidth: labelWidth,
                   showNowLine: _stripDate(selectedDate) == _stripDate(DateTime.now()),
@@ -764,17 +763,15 @@ class _TimetableTimeline extends StatelessWidget {
 }
 
 class _TimetableGrid extends StatelessWidget {
-  final int openMinute;
-  final int closeMinute;
   final int canvasStartMinute;
+  final int canvasEndMinute;
   final double hourHeight;
   final double labelWidth;
   final bool showNowLine;
 
   const _TimetableGrid({
-    required this.openMinute,
-    required this.closeMinute,
     required this.canvasStartMinute,
+    required this.canvasEndMinute,
     required this.hourHeight,
     required this.labelWidth,
     required this.showNowLine,
@@ -786,10 +783,10 @@ class _TimetableGrid extends StatelessWidget {
     final nowMinutes = now.hour * 60 + now.minute;
     final showNow =
         showNowLine &&
-        nowMinutes >= openMinute &&
-        nowMinutes <= closeMinute;
-    final firstHour = openMinute ~/ 60;
-    final lastHour = (closeMinute / 60).ceil();
+        nowMinutes >= canvasStartMinute &&
+        nowMinutes <= canvasEndMinute;
+    final firstHour = canvasStartMinute ~/ 60;
+    final lastHour = (canvasEndMinute / 60).ceil();
 
     return Stack(
       children: [
@@ -1332,6 +1329,10 @@ int _timeToMinutes(String time) {
   return (int.tryParse(parts[0]) ?? 0) * 60 +
       (int.tryParse(parts[1]) ?? 0);
 }
+
+int _floorToHour(int minutes) => (minutes ~/ 60) * 60;
+
+int _ceilToHour(int minutes) => ((minutes + 59) ~/ 60) * 60;
 
 int? _minutesFromSelectedDate(DateTime? value, DateTime selectedDate) {
   if (value == null) return null;

@@ -1690,7 +1690,7 @@ class _SalesLineChart extends StatelessWidget {
         lineBarsData: [
           LineChartBarData(
             spots: spots,
-            isCurved: spots.length > 2,
+            isCurved: false,
             color: _blue,
             barWidth: 3,
             isStrokeCapRound: true,

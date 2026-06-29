@@ -1,14 +1,14 @@
 import '../services/supabase_table_service.dart';
-import 'appointment_repository.dart';
 import 'repository_utils.dart';
+import 'transaction_repository.dart';
 
 class CustomerRepository {
   CustomerRepository({SupabaseTableService? table})
     : _table = table ?? SupabaseTableService('customers'),
-      _appointments = AppointmentRepository();
+      _transactions = TransactionRepository();
 
   final SupabaseTableService _table;
-  final AppointmentRepository _appointments;
+  final TransactionRepository _transactions;
 
   Future<List<Map<String, dynamic>>> getCustomers() {
     return _table.list(orderBy: 'name');
@@ -46,25 +46,32 @@ class CustomerRepository {
   Future<void> deleteCustomer(String id) => _table.delete(id);
 
   Future<Map<String, dynamic>> getCustomerAppointmentStats(String id) async {
-    final appointments = await _appointments.getAppointmentsByCustomer(id);
+    final transactions = await _transactions.getTransactionsByCustomer(id);
     double totalSales = 0;
     String lastVisit = '-';
 
-    appointments.sort(
-      (a, b) => asString(b['date']).compareTo(asString(a['date'])),
+    transactions.sort(
+      (a, b) => asString(b['createdAt']).compareTo(asString(a['createdAt'])),
     );
 
-    for (final appointment in appointments) {
-      totalSales += asDouble(appointment['totalPrice']);
+    for (final transaction in transactions) {
+      totalSales += asDouble(transaction['totalAmount']);
     }
-    if (appointments.isNotEmpty) {
-      lastVisit = asString(appointments.first['date'], '-');
+    if (transactions.isNotEmpty) {
+      final createdAt = asDateTime(transactions.first['createdAt']);
+      lastVisit = createdAt == null
+          ? asString(transactions.first['createdAt'], '-')
+          : dateKey(createdAt);
     }
 
     return {
-      'appointmentCount': appointments.length,
+      'appointmentCount': transactions.length,
       'totalSales': totalSales,
       'lastVisit': lastVisit,
     };
+  }
+
+  Future<List<Map<String, dynamic>>> getCustomerOrders(String id) {
+    return _transactions.getTransactionsByCustomer(id);
   }
 }

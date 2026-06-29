@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 
 import '../../data/repositories/customer_repository.dart';
+import '../../data/repositories/dashboard_repository.dart';
+import '../../data/repositories/repository_utils.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -118,6 +121,235 @@ class CustomerModel {
       lastVisit: lastVisit ?? this.lastVisit,
     );
   }
+}
+
+class _CustomerOrder {
+  final String id;
+  final String receiptNumber;
+  final String customerName;
+  final String customerPhone;
+  final String paymentMethod;
+  final String serviceName;
+  final String therapistName;
+  final String roomName;
+  final int itemCount;
+  final double servicePrice;
+  final double sstAmount;
+  final double totalAmount;
+  final DateTime createdAt;
+  final List<_CustomerOrderServiceGroup> serviceGroups;
+
+  const _CustomerOrder({
+    required this.id,
+    required this.receiptNumber,
+    required this.customerName,
+    required this.customerPhone,
+    required this.paymentMethod,
+    required this.serviceName,
+    required this.therapistName,
+    required this.roomName,
+    required this.itemCount,
+    required this.servicePrice,
+    required this.sstAmount,
+    required this.totalAmount,
+    required this.createdAt,
+    required this.serviceGroups,
+  });
+
+  factory _CustomerOrder.fromTransaction(
+    Map<String, dynamic> tx, {
+    required Map<String, dynamic> customer,
+    required Map<String, dynamic> appointment,
+    required Map<String, dynamic> service,
+    required Map<String, dynamic> therapist,
+    required Map<String, dynamic> room,
+  }) {
+    final rawItems = _asMapList(
+      tx['serviceItems'] ?? tx['service_items'] ?? tx['items'],
+    );
+    final customerName = asString(
+      tx['customerName'],
+      asString(customer['name'], 'Guest'),
+    );
+    final customerPhone = asString(
+      tx['customerPhone'],
+      asString(customer['phone'], '-'),
+    );
+    final serviceName = asString(
+      tx['serviceName'],
+      asString(service['name'], 'Service'),
+    );
+    final therapistName = asString(
+      tx['therapistName'],
+      asString(therapist['name'], '-'),
+    );
+    final roomName = asString(tx['roomName'], asString(room['name'], '-'));
+    final servicePrice = asDouble(
+      tx['servicePrice'],
+      asDouble(appointment['totalPrice']),
+    );
+    final itemCount = rawItems.isNotEmpty
+        ? rawItems.length
+        : asInt(tx['itemCount'], 1);
+
+    return _CustomerOrder(
+      id: asString(tx['id']),
+      receiptNumber: asString(tx['receiptNumber'], asString(tx['id'])),
+      customerName: customerName,
+      customerPhone: customerPhone,
+      paymentMethod: asString(tx['paymentMethod'], 'unknown'),
+      serviceName: serviceName,
+      therapistName: therapistName,
+      roomName: roomName,
+      itemCount: itemCount <= 0 ? 1 : itemCount,
+      servicePrice: servicePrice,
+      sstAmount: asDouble(tx['sstAmount']),
+      totalAmount: asDouble(tx['totalAmount'], servicePrice),
+      createdAt: asDateTime(tx['createdAt']) ?? DateTime.now(),
+      serviceGroups: _CustomerOrderServiceGroup.fromItems(
+        rawItems,
+        fallbackCustomerName: customerName,
+        fallbackServiceName: serviceName,
+        fallbackTherapistName: therapistName,
+        fallbackRoomName: roomName,
+        fallbackAmount: servicePrice,
+      ),
+    );
+  }
+
+  String get serviceSummary =>
+      '$itemCount item${itemCount == 1 ? '' : 's'}';
+
+  String get paymentLabel {
+    switch (paymentMethod) {
+      case 'cash':
+        return 'Cash';
+      case 'qr_code':
+        return 'QR Code';
+      case 'card':
+        return 'Card';
+      default:
+        return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
+    }
+  }
+
+  IconData get paymentIcon {
+    switch (paymentMethod) {
+      case 'cash':
+        return Icons.payments_outlined;
+      case 'qr_code':
+        return Icons.qr_code_2_outlined;
+      case 'card':
+        return Icons.credit_card_outlined;
+      default:
+        return Icons.receipt_long_outlined;
+    }
+  }
+}
+
+class _CustomerOrderServiceGroup {
+  final int paxNumber;
+  final String customerName;
+  final List<String> services;
+  final String therapistName;
+  final String roomName;
+  final String startTime;
+  final String endTime;
+  final double amount;
+
+  const _CustomerOrderServiceGroup({
+    required this.paxNumber,
+    required this.customerName,
+    required this.services,
+    required this.therapistName,
+    required this.roomName,
+    required this.startTime,
+    required this.endTime,
+    required this.amount,
+  });
+
+  String get serviceLabel =>
+      services.isEmpty ? 'Service' : services.join(', ');
+
+  String get timeLabel {
+    if (startTime.isEmpty && endTime.isEmpty) return '';
+    if (endTime.isEmpty) return startTime;
+    return '$startTime - $endTime';
+  }
+
+  static List<_CustomerOrderServiceGroup> fromItems(
+    List<Map<String, dynamic>> items, {
+    required String fallbackCustomerName,
+    required String fallbackServiceName,
+    required String fallbackTherapistName,
+    required String fallbackRoomName,
+    required double fallbackAmount,
+  }) {
+    if (items.isEmpty) {
+      return [
+        _CustomerOrderServiceGroup(
+          paxNumber: 1,
+          customerName: fallbackCustomerName,
+          services: [fallbackServiceName],
+          therapistName: fallbackTherapistName,
+          roomName: fallbackRoomName,
+          startTime: '',
+          endTime: '',
+          amount: fallbackAmount,
+        ),
+      ];
+    }
+
+    final grouped = <String, List<Map<String, dynamic>>>{};
+    for (final item in items) {
+      final key = [
+        asString(item['assignedTherapistId']),
+        asString(item['assignedTherapistName']),
+        asString(item['assignedRoomId']),
+        asString(item['assignedRoomName']),
+        asString(item['startTime']),
+        asString(item['endTime']),
+      ].join('|');
+      grouped.putIfAbsent(key, () => []).add(item);
+    }
+
+    var paxNumber = 0;
+    return grouped.values.map((groupItems) {
+      paxNumber += 1;
+      final first = groupItems.first;
+      final services = groupItems
+          .map((item) => asString(item['name'], 'Service'))
+          .where((name) => name.trim().isNotEmpty)
+          .toList();
+      final amount = groupItems.fold<double>(
+        0,
+        (total, item) => total + asDouble(item['price']),
+      );
+      return _CustomerOrderServiceGroup(
+        paxNumber: paxNumber,
+        customerName: paxNumber == 1 ? fallbackCustomerName : 'Guest',
+        services: services.isEmpty ? [fallbackServiceName] : services,
+        therapistName: asString(
+          first['assignedTherapistName'],
+          fallbackTherapistName,
+        ),
+        roomName: asString(first['assignedRoomName'], fallbackRoomName),
+        startTime: asString(first['startTime']),
+        endTime: asString(first['endTime']),
+        amount: amount == 0 ? fallbackAmount : amount,
+      );
+    }).toList();
+  }
+}
+
+List<Map<String, dynamic>> _asMapList(Object? value) {
+  if (value is List) {
+    return value
+        .whereType<Map>()
+        .map((item) => Map<String, dynamic>.from(item))
+        .toList();
+  }
+  return const [];
 }
 
 // ── Main screen — decides tablet vs phone ─────────────────────────
@@ -762,6 +994,15 @@ class _DetailPanel extends StatelessWidget {
     this.showInlineEdit = true,
   });
 
+  void _openOrderHistory(BuildContext context) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _CustomerOrdersSheet(customer: customer),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final isTablet = MediaQuery.of(context).size.width >= 900;
@@ -904,11 +1145,12 @@ class _DetailPanel extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(
                       child: _StatCard(
-                        icon: Icons.calendar_today_outlined,
+                        icon: Icons.receipt_long_outlined,
                         iconBg: const Color(0xFFE8F5E9),
                         iconColor: const Color(0xFF1B6B72),
-                        label: 'Appointments',
+                        label: 'Orders',
                         value: '${customer.appointmentCount}',
+                        onTap: () => _openOrderHistory(context),
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -937,11 +1179,12 @@ class _DetailPanel extends StatelessWidget {
                     const SizedBox(width: 12),
                     Expanded(
                       child: _StatCard(
-                        icon: Icons.calendar_today_outlined,
+                        icon: Icons.receipt_long_outlined,
                         iconBg: const Color(0xFFE8F5E9),
                         iconColor: const Color(0xFF1B6B72),
-                        label: 'Appointments',
+                        label: 'Orders',
                         value: '${customer.appointmentCount}',
+                        onTap: () => _openOrderHistory(context),
                       ),
                     ),
                   ],
@@ -1603,6 +1846,7 @@ class _StatCard extends StatelessWidget {
   final Color iconColor;
   final String label;
   final String value;
+  final VoidCallback? onTap;
 
   const _StatCard({
     required this.icon,
@@ -1610,11 +1854,12 @@ class _StatCard extends StatelessWidget {
     required this.iconColor,
     required this.label,
     required this.value,
+    this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
+    final card = Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: Colors.white,
@@ -1646,6 +1891,14 @@ class _StatCard extends StatelessWidget {
                 label,
                 style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
               ),
+              if (onTap != null) ...[
+                const Spacer(),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  size: 20,
+                  color: Color(0xFF9CA3AF),
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 8),
@@ -1660,8 +1913,673 @@ class _StatCard extends StatelessWidget {
         ],
       ),
     );
+    if (onTap == null) return card;
+    return Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: card,
+      ),
+    );
   }
 }
+
+class _CustomerOrdersSheet extends StatefulWidget {
+  final CustomerModel customer;
+
+  const _CustomerOrdersSheet({required this.customer});
+
+  @override
+  State<_CustomerOrdersSheet> createState() => _CustomerOrdersSheetState();
+}
+
+class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
+  final _customerRepository = CustomerRepository();
+  final _dashboardRepository = DashboardRepository();
+  late final Future<List<_CustomerOrder>> _ordersFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _ordersFuture = _loadOrders();
+  }
+
+  Future<List<_CustomerOrder>> _loadOrders() async {
+    final rows = await _customerRepository.getCustomerOrders(widget.customer.id);
+    final appointmentIds = rows
+        .map((row) => asString(row['appointmentId']))
+        .where((id) => id.isNotEmpty);
+    final serviceIds = rows
+        .map((row) => asString(row['serviceId']))
+        .where((id) => id.isNotEmpty);
+    final therapistIds = rows
+        .map((row) => asString(row['therapistId']))
+        .where((id) => id.isNotEmpty);
+    final roomIds = rows
+        .map((row) => asString(row['roomId']))
+        .where((id) => id.isNotEmpty);
+
+    final appointments = await _dashboardRepository.loadByIds(
+      'appointments',
+      appointmentIds,
+    );
+    final appointmentRows = appointments.values;
+    final services = await _dashboardRepository.loadByIds('services', [
+      ...serviceIds,
+      ...appointmentRows.map((row) => asString(row['serviceId'])),
+    ]);
+    final therapists = await _dashboardRepository.loadByIds('therapists', [
+      ...therapistIds,
+      ...appointmentRows.map((row) => asString(row['therapistId'])),
+    ]);
+    final rooms = await _dashboardRepository.loadByIds('rooms', [
+      ...roomIds,
+      ...appointmentRows.map((row) => asString(row['roomId'])),
+    ]);
+
+    final orders = rows.map((row) {
+      final appointmentId = asString(row['appointmentId']);
+      final appointment = appointments[appointmentId] ?? {};
+      final serviceId = asString(row['serviceId']).isNotEmpty
+          ? asString(row['serviceId'])
+          : asString(appointment['serviceId']);
+      final therapistId = asString(row['therapistId']).isNotEmpty
+          ? asString(row['therapistId'])
+          : asString(appointment['therapistId']);
+      final roomId = asString(row['roomId']).isNotEmpty
+          ? asString(row['roomId'])
+          : asString(appointment['roomId']);
+      return _CustomerOrder.fromTransaction(
+        row,
+        customer: {
+          'name': widget.customer.name,
+          'phone': widget.customer.phone,
+        },
+        appointment: appointment,
+        service: services[serviceId] ?? {},
+        therapist: therapists[therapistId] ?? {},
+        room: rooms[roomId] ?? {},
+      );
+    }).toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return orders;
+  }
+
+  void _openOrder(_CustomerOrder order) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _CustomerOrderDetailSheet(order: order),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    return DraggableScrollableSheet(
+      initialChildSize: 0.82,
+      minChildSize: 0.45,
+      maxChildSize: 0.94,
+      builder: (context, controller) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Color(0xFFF7F8FA),
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: FutureBuilder<List<_CustomerOrder>>(
+            future: _ordersFuture,
+            builder: (context, snapshot) {
+              final orders = snapshot.data ?? const <_CustomerOrder>[];
+              final total = orders.fold<double>(
+                0,
+                (sum, order) => sum + order.totalAmount,
+              );
+              return ListView(
+                controller: controller,
+                padding: EdgeInsets.fromLTRB(18, 12, 18, bottomInset + 24),
+                children: [
+                  Center(
+                    child: Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFD1D5DB),
+                        borderRadius: BorderRadius.circular(99),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${widget.customer.name} Orders',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontWeight: FontWeight.w900,
+                                color: Color(0xFF1A1A2E),
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${orders.length} previous order${orders.length == 1 ? '' : 's'} · ${_money(total)}',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF6B7280),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  if (snapshot.connectionState == ConnectionState.waiting)
+                    const _OrdersLoadingCard()
+                  else if (snapshot.hasError)
+                    _OrdersEmptyCard(
+                      icon: Icons.error_outline,
+                      title: 'Unable to load orders',
+                      message: snapshot.error.toString(),
+                    )
+                  else if (orders.isEmpty)
+                    const _OrdersEmptyCard(
+                      icon: Icons.receipt_long_outlined,
+                      title: 'No previous orders',
+                      message: 'Paid orders for this member will appear here.',
+                    )
+                  else
+                    for (final order in orders) ...[
+                      _CustomerOrderCard(
+                        order: order,
+                        onTap: () => _openOrder(order),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _CustomerOrderCard extends StatelessWidget {
+  final _CustomerOrder order;
+  final VoidCallback onTap;
+
+  const _CustomerOrderCard({required this.order, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: const Color(0xFFE5E7EB)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.035),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 38,
+                height: 38,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5F5),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(
+                  order.paymentIcon,
+                  color: const Color(0xFF1B6B72),
+                  size: 20,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      order.receiptNumber,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      DateFormat('h:mm a, d MMM yyyy').format(order.createdAt),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Text(
+                      '${order.serviceName} · ${order.serviceSummary}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF374151),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 12),
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    _money(order.totalAmount),
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF2563EB),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Icon(
+                    Icons.chevron_right_rounded,
+                    color: Color(0xFFCBD5E1),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomerOrderDetailSheet extends StatelessWidget {
+  final _CustomerOrder order;
+
+  const _CustomerOrderDetailSheet({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.78,
+      minChildSize: 0.42,
+      maxChildSize: 0.94,
+      builder: (context, controller) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: ListView(
+            controller: controller,
+            padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
+            children: [
+              Center(
+                child: Container(
+                  width: 42,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFD1D5DB),
+                    borderRadius: BorderRadius.circular(99),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      order.receiptNumber,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 22,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                  ),
+                  Text(
+                    _money(order.totalAmount),
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                DateFormat('EEEE, d MMM yyyy · h:mm a').format(order.createdAt),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+              const SizedBox(height: 18),
+              _OrderDetailRow('Customer', order.customerName),
+              _OrderDetailRow('Phone', order.customerPhone),
+              _OrderDetailRow('Payment', order.paymentLabel),
+              _OrderDetailRow('Staff', order.therapistName),
+              _OrderDetailRow('Room / Zone', order.roomName),
+              const Divider(height: 28, color: Color(0xFFE5E7EB)),
+              const _OrderSectionTitle('Service Details'),
+              const SizedBox(height: 10),
+              for (var i = 0; i < order.serviceGroups.length; i++) ...[
+                _OrderServiceGroupCard(
+                  group: order.serviceGroups[i],
+                  expanded: order.serviceGroups.length == 1,
+                ),
+                if (i != order.serviceGroups.length - 1)
+                  const SizedBox(height: 8),
+              ],
+              const Divider(height: 28, color: Color(0xFFE5E7EB)),
+              _OrderDetailRow('Service Net', _money(order.servicePrice)),
+              _OrderDetailRow('SST', _money(order.sstAmount)),
+              _OrderDetailRow('Total', _money(order.totalAmount), strong: true),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _OrderServiceGroupCard extends StatelessWidget {
+  final _CustomerOrderServiceGroup group;
+  final bool expanded;
+
+  const _OrderServiceGroupCard({
+    required this.group,
+    required this.expanded,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          initiallyExpanded: expanded,
+          tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+          title: Text(
+            'Pax ${group.paxNumber} · ${group.customerName}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
+          subtitle: Text(
+            '${group.serviceLabel} · ${_money(group.amount)}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+          children: [
+            _OrderServiceLine(
+              icon: Icons.spa_outlined,
+              label: 'Service',
+              value: group.serviceLabel,
+            ),
+            _OrderServiceLine(
+              icon: Icons.person_outline,
+              label: 'Therapist',
+              value: group.therapistName,
+            ),
+            _OrderServiceLine(
+              icon: Icons.meeting_room_outlined,
+              label: 'Room / Zone',
+              value: group.roomName,
+            ),
+            if (group.timeLabel.isNotEmpty)
+              _OrderServiceLine(
+                icon: Icons.schedule_outlined,
+                label: 'Time',
+                value: group.timeLabel,
+              ),
+            _OrderServiceLine(
+              icon: Icons.payments_outlined,
+              label: 'Amount',
+              value: _money(group.amount),
+              strong: true,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OrderServiceLine extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool strong;
+
+  const _OrderServiceLine({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.strong = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 15, color: const Color(0xFF6B7280)),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 82,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '-' : value,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: strong ? FontWeight.w900 : FontWeight.w700,
+                color: strong
+                    ? const Color(0xFF1B6B72)
+                    : const Color(0xFF1A1A2E),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OrderDetailRow extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool strong;
+
+  const _OrderDetailRow(this.label, this.value, {this.strong = false});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 110,
+            child: Text(
+              label,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF6B7280),
+              ),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value.isEmpty ? '-' : value,
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: strong ? 15 : 13,
+                fontWeight: strong ? FontWeight.w900 : FontWeight.w800,
+                color: strong
+                    ? const Color(0xFF1B6B72)
+                    : const Color(0xFF1A1A2E),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _OrderSectionTitle extends StatelessWidget {
+  final String label;
+
+  const _OrderSectionTitle(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w900,
+        color: Color(0xFF1A1A2E),
+      ),
+    );
+  }
+}
+
+class _OrdersLoadingCard extends StatelessWidget {
+  const _OrdersLoadingCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: const Center(
+        child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
+      ),
+    );
+  }
+}
+
+class _OrdersEmptyCard extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String message;
+
+  const _OrdersEmptyCard({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(22),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: const Color(0xFF9CA3AF), size: 34),
+          const SizedBox(height: 10),
+          Text(
+            title,
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF1A1A2E),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _money(double value) => 'RM ${value.toStringAsFixed(2)}';
 
 class _InfoRow extends StatelessWidget {
   final String label;

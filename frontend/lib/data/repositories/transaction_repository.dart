@@ -13,6 +13,17 @@ class TransactionRepository {
 
   Future<List<Map<String, dynamic>>> getTransactions() => listTransactions();
 
+  Future<List<Map<String, dynamic>>> getTransactionsByCustomer(
+    String customerId,
+  ) {
+    return _table.findBy(
+      'customer_id',
+      customerId,
+      orderBy: 'created_at',
+      ascending: false,
+    );
+  }
+
   Future<List<Map<String, dynamic>>> getTransactionsByDate(
     DateTime date,
   ) async {

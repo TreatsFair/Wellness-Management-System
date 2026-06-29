@@ -2131,7 +2131,7 @@ class _TabletTimeline extends StatelessWidget {
       appointment.startMinutes,
       appointment.endMinutes,
       hourHeight,
-    ).clamp(48.0, 260.0).toDouble();
+    ).clamp(88.0, 260.0).toDouble();
 
     return Positioned(
       top: top,
