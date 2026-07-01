@@ -53,6 +53,7 @@ class TherapistRepository {
     _verifySavedString(row, values, 'name');
     _verifySavedString(row, values, 'phone');
     _verifySavedString(row, values, 'role');
+    _verifySavedString(row, values, 'profileImageUrl');
     _verifySavedBool(row, values, 'availabilityStatus');
     _verifySavedString(row, values, 'busyUntil');
     return row;

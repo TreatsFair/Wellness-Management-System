@@ -27,6 +27,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'is_active': 'isActive',
   'item_count': 'itemCount',
   'join_date': 'joinDate',
+  'logo_url': 'logoUrl',
   'open_time': 'openTime',
   'paid_at': 'paidAt',
   'payment_method': 'paymentMethod',

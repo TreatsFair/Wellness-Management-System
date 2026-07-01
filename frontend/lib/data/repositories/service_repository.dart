@@ -40,6 +40,7 @@ class ServiceRepository {
     _verifySavedDouble(row, values, 'therapistCommission');
     _verifySavedDouble(row, values, 'counterCommission');
     _verifySavedString(row, values, 'roomType');
+    _verifySavedString(row, values, 'imageUrl');
     _verifySavedBool(row, values, 'isActive');
     return row;
   }

@@ -28,6 +28,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   bool _loading = true;
   String? _error;
   List<_TimetableEntry> _entries = [];
+  _TimetableEntry? _selectedEntry;
   int _openMinute = 9 * 60;
   int _closeMinute = 21 * 60;
 
@@ -168,6 +169,11 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   void _showEntry(_TimetableEntry entry) {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _selectedEntry = entry);
+      return;
+    }
+
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -179,6 +185,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   @override
   Widget build(BuildContext context) {
     final isWide = MediaQuery.of(context).size.width >= 760;
+    final showSidePanel = MediaQuery.of(context).size.width >= 900;
     final entries = _filteredEntries;
 
     return Scaffold(
@@ -195,9 +202,11 @@ class _TimetableScreenState extends State<TimetableScreen> {
               onRefresh: _loadTimetable,
             ),
             Expanded(
-              child: RefreshIndicator(
-                onRefresh: _loadTimetable,
-                child: ListView(
+              child: Stack(
+                children: [
+                  RefreshIndicator(
+                    onRefresh: _loadTimetable,
+                    child: ListView(
                   padding: EdgeInsets.fromLTRB(
                     isWide ? 24 : 14,
                     12,
@@ -241,7 +250,32 @@ class _TimetableScreenState extends State<TimetableScreen> {
                         onTap: _showEntry,
                       ),
                   ],
-                ),
+                    ),
+                  ),
+                  if (showSidePanel)
+                    AnimatedPositioned(
+                      duration: const Duration(milliseconds: 180),
+                      curve: Curves.easeOutCubic,
+                      top: 18,
+                      right: _selectedEntry == null ? -390 : 18,
+                      bottom: 18,
+                      width: 360,
+                      child: IgnorePointer(
+                        ignoring: _selectedEntry == null,
+                        child: AnimatedOpacity(
+                          duration: const Duration(milliseconds: 140),
+                          opacity: _selectedEntry == null ? 0 : 1,
+                          child: _selectedEntry == null
+                              ? const SizedBox.shrink()
+                              : _TimetableDetailCard(
+                                  entry: _selectedEntry!,
+                                  onClose: () =>
+                                      setState(() => _selectedEntry = null),
+                                ),
+                        ),
+                      ),
+                    ),
+                ],
               ),
             ),
           ],
@@ -357,6 +391,7 @@ class _TimetableEntry {
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get paidLabel => 'RM ${paidAmount.toStringAsFixed(2)}';
   String get timeRange => '${_clockLabel(startTime)} - ${_clockLabel(endTime)}';
+  String get durationLabel => '$timeRange ($durationMinutes min)';
 
   String get operationalStatus {
     if (status == 'completed') return 'Completed';
@@ -1049,76 +1084,204 @@ class _TimetableDetailSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final height = MediaQuery.of(context).size.height;
+    final maxHeight = height * 0.82;
     final style = _statusStyle(entry);
-    return DraggableScrollableSheet(
-      initialChildSize: 0.72,
-      minChildSize: 0.45,
-      maxChildSize: 0.92,
-      builder: (context, controller) {
-        return Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          child: ListView(
-            controller: controller,
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 24),
-            children: [
-              Center(
-                child: Container(
-                  width: 38,
-                  height: 4,
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: maxHeight, maxWidth: 420),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 44,
+                  height: 5,
+                  margin: const EdgeInsets.only(bottom: 8),
                   decoration: BoxDecoration(
-                    color: const Color(0xFFD1D5DB),
+                    color: style.color.withValues(alpha: 0.22),
                     borderRadius: BorderRadius.circular(99),
                   ),
                 ),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  _TinyBadge(label: entry.operationalStatus, color: style.color),
-                  const Spacer(),
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close),
+                Flexible(
+                  child: _TimetableDetailCard(
+                    entry: entry,
+                    onClose: () => Navigator.pop(context),
+                    compact: true,
                   ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                entry.customerName,
-                style: const TextStyle(
-                  fontSize: 24,
-                  fontWeight: FontWeight.w900,
-                  color: Color(0xFF111827),
                 ),
-              ),
-              Text(
-                entry.customerPhone.isEmpty ? '-' : entry.customerPhone,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF6B7280),
-                ),
-              ),
-              const SizedBox(height: 24),
-              _DetailRow(Icons.spa_outlined, 'Service', entry.serviceName),
-              _DetailRow(Icons.person_outline, 'Staff', entry.staffName),
-              _DetailRow(Icons.meeting_room_outlined, 'Room / Zone', entry.roomName),
-              _DetailRow(Icons.schedule_outlined, 'Time', entry.timeRange),
-              _DetailRow(Icons.payments_outlined, 'Price', entry.priceLabel),
-              _DetailRow(Icons.category_outlined, 'Type', entry.typeLabel),
-              if (entry.hasPayment) ...[
-                const Divider(height: 30),
-                _DetailRow(Icons.receipt_long_outlined, 'Receipt', entry.receiptNumber),
-                _DetailRow(Icons.credit_card_outlined, 'Payment', entry.paymentMethod),
-                _DetailRow(Icons.account_balance_wallet_outlined, 'Paid', entry.paidLabel),
               ],
-            ],
+            ),
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+}
+
+class _TimetableDetailCard extends StatelessWidget {
+  final _TimetableEntry entry;
+  final VoidCallback onClose;
+  final bool compact;
+
+  const _TimetableDetailCard({
+    required this.entry,
+    required this.onClose,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style = _statusStyle(entry);
+    return Container(
+      padding: EdgeInsets.all(compact ? 20 : 22),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(compact ? 18 : 16),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x26000000),
+            blurRadius: 24,
+            offset: Offset(0, 10),
+          ),
+        ],
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                _PanelStatusBadge(label: entry.operationalStatus, color: style.color),
+                const Spacer(),
+                IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                CircleAvatar(
+                  radius: 28,
+                  backgroundColor: style.color.withValues(alpha: 0.78),
+                  child: Text(
+                    _initials(entry.customerName),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 20,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        entry.customerName,
+                        style: const TextStyle(
+                          fontSize: 19,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        entry.customerPhone.isEmpty ? '-' : entry.customerPhone,
+                        style: const TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF6B7280),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 22),
+            _DetailRow(
+              icon: Icons.spa_outlined,
+              label: 'Service',
+              title: entry.serviceName,
+              subtitle: entry.typeLabel,
+            ),
+            _DetailRow(
+              icon: Icons.person_outline,
+              label: 'Therapist',
+              title: entry.staffName,
+            ),
+            _DetailRow(
+              icon: Icons.meeting_room_outlined,
+              label: 'Room / Zone',
+              title: entry.roomName,
+            ),
+            _DetailRow(
+              icon: Icons.calendar_today_outlined,
+              label: 'Date',
+              title: DateFormat('EEEE, d MMMM yyyy').format(entry.selectedDate),
+            ),
+            _DetailRow(
+              icon: Icons.schedule_outlined,
+              label: 'Time',
+              title: entry.durationLabel,
+            ),
+            _DetailRow(
+              icon: Icons.payments_outlined,
+              label: 'Price',
+              title: entry.priceLabel,
+            ),
+            if (entry.hasPayment) ...[
+              const Divider(height: 26),
+              _DetailRow(
+                icon: Icons.receipt_long_outlined,
+                label: 'Receipt',
+                title: entry.receiptNumber,
+              ),
+              _DetailRow(
+                icon: Icons.credit_card_outlined,
+                label: 'Payment',
+                title: entry.paymentMethod,
+              ),
+              _DetailRow(
+                icon: Icons.account_balance_wallet_outlined,
+                label: 'Paid',
+                title: entry.paidLabel,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PanelStatusBadge extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _PanelStatusBadge({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 13,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
     );
   }
 }
@@ -1126,9 +1289,15 @@ class _TimetableDetailSheet extends StatelessWidget {
 class _DetailRow extends StatelessWidget {
   final IconData icon;
   final String label;
-  final String value;
+  final String title;
+  final String? subtitle;
 
-  const _DetailRow(this.icon, this.label, this.value);
+  const _DetailRow({
+    required this.icon,
+    required this.label,
+    required this.title,
+    this.subtitle,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -1137,7 +1306,7 @@ class _DetailRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, color: const Color(0xFF526071), size: 22),
+          Icon(icon, color: const Color(0xFF4B5563), size: 20),
           const SizedBox(width: 14),
           Expanded(
             child: Column(
@@ -1146,20 +1315,31 @@ class _DetailRow extends StatelessWidget {
                 Text(
                   label,
                   style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w800,
                     color: Color(0xFF6B7280),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  value.isEmpty ? '-' : value,
+                  title.isEmpty ? '-' : title,
                   style: const TextStyle(
-                    fontSize: 17,
-                    fontWeight: FontWeight.w900,
                     color: Color(0xFF111827),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle!,
+                    style: const TextStyle(
+                      color: Color(0xFF6B7280),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
               ],
             ),
           ),
@@ -1291,6 +1471,12 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
     background: Color(0xFFEFF6FF),
     border: Color(0xFF93C5FD),
   );
+}
+
+String _initials(String value) {
+  final parts = value.trim().split(RegExp(r'\s+')).where((part) => part.isNotEmpty);
+  final letters = parts.take(2).map((part) => part[0]).join();
+  return letters.isEmpty ? '?' : letters.toUpperCase();
 }
 
 class _StatusStyle {

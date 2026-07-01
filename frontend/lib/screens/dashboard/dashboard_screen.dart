@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
+import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/profile_repository.dart';
 import '../../data/repositories/settings_repository.dart';
 import '../../data/services/supabase_table_service.dart';
@@ -77,6 +79,8 @@ class _BusinessProfile {
   final String openTime;
   final String closeTime;
   final String logoInitial;
+  final String logoUrl;
+  final SelectedImage? logoUpload;
   final String? settingsDocumentId;
 
   const _BusinessProfile({
@@ -85,6 +89,8 @@ class _BusinessProfile {
     required this.openTime,
     required this.closeTime,
     required this.logoInitial,
+    this.logoUrl = '',
+    this.logoUpload,
     this.settingsDocumentId,
   });
 
@@ -94,6 +100,8 @@ class _BusinessProfile {
     String? openTime,
     String? closeTime,
     String? logoInitial,
+    String? logoUrl,
+    SelectedImage? logoUpload,
     String? settingsDocumentId,
   }) {
     return _BusinessProfile(
@@ -102,6 +110,8 @@ class _BusinessProfile {
       openTime: openTime ?? this.openTime,
       closeTime: closeTime ?? this.closeTime,
       logoInitial: logoInitial ?? this.logoInitial,
+      logoUrl: logoUrl ?? this.logoUrl,
+      logoUpload: logoUpload,
       settingsDocumentId: settingsDocumentId ?? this.settingsDocumentId,
     );
   }
@@ -506,6 +516,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           openTime: profile.openTime,
           closeTime: profile.closeTime,
           logoInitial: _placeholderBusinessProfile.logoInitial,
+          logoUrl: _asString(data['logoUrl']),
           settingsDocumentId: _asString(data['id']),
         );
       }
@@ -554,10 +565,24 @@ class _DashboardScreenState extends State<DashboardScreen> {
         profile.settingsDocumentId ?? _businessSettingsDocumentId;
 
     try {
+      var logoUrl = profile.logoUrl;
+      if (profile.logoUpload != null) {
+        logoUrl = await ImageUploadRepository().uploadImage(
+          image: profile.logoUpload!,
+          folder: 'business',
+          id: 'logo',
+          previousUrl: _businessProfile.logoUrl,
+        );
+      } else if (logoUrl.trim().isEmpty &&
+          _businessProfile.logoUrl.trim().isNotEmpty) {
+        await ImageUploadRepository().removePublicUrl(_businessProfile.logoUrl);
+      }
+
       final savedSettings = await _settingsRepository.updateBusinessSettings(
         {
           'businessName': profile.name,
           'location': profile.location,
+          'logoUrl': logoUrl,
         },
         id: settingsDocumentId == _businessSettingsDocumentId
             ? null
@@ -572,6 +597,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       if (!mounted) return;
       setState(() {
         _businessProfile = profile.copyWith(
+          logoUrl: logoUrl,
           settingsDocumentId: _asString(
             savedSettings['id'],
             settingsDocumentId,
@@ -839,6 +865,70 @@ class _TabletLayout extends StatelessWidget {
   }
 }
 
+class _BusinessLogoAvatar extends StatelessWidget {
+  final _BusinessProfile profile;
+  final double size;
+  final bool circular;
+  final SelectedImage? preview;
+
+  const _BusinessLogoAvatar({
+    required this.profile,
+    required this.size,
+    this.circular = false,
+    this.preview,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = profile.logoUrl.trim();
+    final hasImage = preview != null || imageUrl.isNotEmpty;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(circular ? size / 2 : 12),
+      child: Container(
+        width: size,
+        height: size,
+        color: hasImage ? Colors.transparent : const Color(0xFF1B6B72),
+        alignment: Alignment.center,
+        child: preview != null
+            ? Image.memory(
+                preview!.bytes,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+              )
+            : imageUrl.isNotEmpty
+            ? CachedNetworkImage(
+                imageUrl: imageUrl,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                errorWidget: (_, _, _) => _LogoInitial(profile: profile),
+                placeholder: (_, _) => _LogoInitial(profile: profile),
+              )
+            : _LogoInitial(profile: profile),
+      ),
+    );
+  }
+}
+
+class _LogoInitial extends StatelessWidget {
+  final _BusinessProfile profile;
+
+  const _LogoInitial({required this.profile});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      profile.logoInitial,
+      style: const TextStyle(
+        color: Colors.white,
+        fontWeight: FontWeight.bold,
+        fontSize: 16,
+      ),
+    );
+  }
+}
+
 class _TabletTopBar extends StatelessWidget {
   final _BusinessProfile profile;
   final String email;
@@ -878,23 +968,10 @@ class _TabletTopBar extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
               child: Row(
                 children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: const BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: Color(0xFF1B6B72),
-                    ),
-                    child: Center(
-                      child: Text(
-                        profile.logoInitial,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 16,
-                        ),
-                      ),
-                    ),
+                  _BusinessLogoAvatar(
+                    profile: profile,
+                    size: 40,
+                    circular: true,
                   ),
                   const SizedBox(width: 12),
                   Column(
@@ -1526,23 +1603,10 @@ class _PhoneTopBar extends StatelessWidget {
                 padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
                 child: Row(
                   children: [
-                    Container(
-                      width: 36,
-                      height: 36,
-                      decoration: const BoxDecoration(
-                        shape: BoxShape.circle,
-                        color: Color(0xFF1B6B72),
-                      ),
-                      child: Center(
-                        child: Text(
-                          profile.logoInitial,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
+                    _BusinessLogoAvatar(
+                      profile: profile,
+                      size: 36,
+                      circular: true,
                     ),
                     const SizedBox(width: 10),
                     Expanded(
@@ -2143,22 +2207,10 @@ class _BusinessProfileDialog extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 4),
-              Container(
-                width: 82,
-                height: 82,
-                alignment: Alignment.center,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color(0xFF1B6B72),
-                ),
-                child: Text(
-                  profile.logoInitial,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 32,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
+              _BusinessLogoAvatar(
+                profile: profile,
+                size: 82,
+                circular: true,
               ),
               const SizedBox(height: 18),
               Text(
@@ -2694,10 +2746,13 @@ class _BusinessSettingsDialog extends StatefulWidget {
 
 class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
   final _authRepository = AuthRepository();
+  final _imageUploadRepository = ImageUploadRepository();
   late final TextEditingController _nameController;
   late final TextEditingController _locationController;
   late final TextEditingController _openTimeController;
   late final TextEditingController _closeTimeController;
+  SelectedImage? _logoPreview;
+  bool _logoRemoved = false;
 
   @override
   void initState() {
@@ -2727,6 +2782,35 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
     return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
   }
 
+  Future<void> _pickLogo() async {
+    if (!widget.isAdmin) return;
+    try {
+      final image = await _imageUploadRepository.pickImage();
+      if (image == null || !mounted) return;
+      setState(() {
+        _logoPreview = image;
+        _logoRemoved = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString()),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  void _removeLogo() {
+    if (!widget.isAdmin) return;
+    setState(() {
+      _logoPreview = null;
+      _logoRemoved = true;
+    });
+  }
+
   void _save() {
     if (!widget.isAdmin) return;
 
@@ -2736,6 +2820,8 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
         location: _locationController.text.trim(),
         openTime: _normalizeSettingsTime(_openTimeController.text, '09:00'),
         closeTime: _normalizeSettingsTime(_closeTimeController.text, '21:00'),
+        logoUrl: _logoRemoved ? '' : widget.profile.logoUrl,
+        logoUpload: _logoPreview,
       ),
     );
   }
@@ -2900,41 +2986,57 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                     const SizedBox(height: 12),
                     Row(
                       children: [
-                        Container(
-                          width: 80,
-                          height: 80,
-                          alignment: Alignment.center,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF1B6B72),
-                            borderRadius: BorderRadius.circular(12),
+                        _BusinessLogoAvatar(
+                          profile: widget.profile.copyWith(
+                            logoUrl: _logoRemoved ? '' : widget.profile.logoUrl,
                           ),
-                          child: Text(
-                            widget.profile.logoInitial,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 26,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
+                          preview: _logoPreview,
+                          size: 80,
                         ),
                         const SizedBox(width: 20),
                         Expanded(
-                          child: OutlinedButton.icon(
-                            onPressed: widget.isAdmin ? () {} : null,
-                            icon: const Icon(Icons.upload_outlined),
-                            label: const Text('Upload Logo'),
-                            style: OutlinedButton.styleFrom(
-                              minimumSize: const Size.fromHeight(58),
-                              foregroundColor: const Color(0xFF5F6B7A),
-                              side: const BorderSide(color: Color(0xFFE0E0E0)),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(14),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              OutlinedButton.icon(
+                                onPressed: widget.isAdmin ? _pickLogo : null,
+                                icon: const Icon(Icons.upload_outlined),
+                                label: Text(
+                                  _logoPreview == null &&
+                                          widget.profile.logoUrl.trim().isEmpty
+                                      ? 'Upload Logo'
+                                      : 'Replace Logo',
+                                ),
+                                style: OutlinedButton.styleFrom(
+                                  minimumSize: const Size.fromHeight(58),
+                                  foregroundColor: const Color(0xFF5F6B7A),
+                                  side: const BorderSide(
+                                    color: Color(0xFFE0E0E0),
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(14),
+                                  ),
+                                  textStyle: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
                               ),
-                              textStyle: const TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
+                              const SizedBox(height: 8),
+                              TextButton.icon(
+                                onPressed:
+                                    widget.isAdmin &&
+                                        (_logoPreview != null ||
+                                            widget.profile.logoUrl
+                                                .trim()
+                                                .isNotEmpty) &&
+                                        !_logoRemoved
+                                    ? _removeLogo
+                                    : null,
+                                icon: const Icon(Icons.delete_outline),
+                                label: const Text('Remove Logo'),
                               ),
-                            ),
+                            ],
                           ),
                         ),
                       ],

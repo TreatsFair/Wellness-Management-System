@@ -41,6 +41,7 @@ dependencies:
   intl: ^0.19.0              # date formatting
   fl_chart: ^0.68.0          # charts for analytics
   cached_network_image: ^3.3.0
+  file_picker: ^10.3.3
   
   # Navigation
   go_router: ^13.0.0

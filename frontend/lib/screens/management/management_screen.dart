@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
@@ -448,7 +450,11 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   Future<void> _openForm({_ResourceItem? item}) async {
     final saved = await showDialog<bool>(
       context: context,
-      builder: (_) => _ResourceFormDialog(type: widget.type, item: item),
+      builder: (_) => _ResourceFormDialog(
+        type: widget.type,
+        item: item,
+        isAdmin: _isAdmin,
+      ),
     );
     if (saved == true) await _load();
   }
@@ -655,16 +661,7 @@ class _ResourceListCard extends StatelessWidget {
             ),
             child: Row(
               children: [
-                CircleAvatar(
-                  backgroundColor: item.color,
-                  child: Text(
-                    _initials(item.name),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ),
+                _ResourceAvatar(item: item, size: 40),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
@@ -698,6 +695,63 @@ class _ResourceListCard extends StatelessWidget {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _ResourceAvatar extends StatelessWidget {
+  final _ResourceItem item;
+  final double size;
+  final SelectedImage? preview;
+
+  const _ResourceAvatar({required this.item, required this.size, this.preview});
+
+  @override
+  Widget build(BuildContext context) {
+    final imageUrl = _asString(item.raw['imageUrl']).trim();
+    final hasImage = preview != null || imageUrl.isNotEmpty;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(size / 2),
+      child: Container(
+        width: size,
+        height: size,
+        color: hasImage ? Colors.transparent : item.color,
+        alignment: Alignment.center,
+        child: preview != null
+            ? Image.memory(
+                preview!.bytes,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+              )
+            : imageUrl.isNotEmpty
+            ? CachedNetworkImage(
+                imageUrl: imageUrl,
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                placeholder: (_, _) => _ResourceInitial(item: item),
+                errorWidget: (_, _, _) => _ResourceInitial(item: item),
+              )
+            : _ResourceInitial(item: item),
+      ),
+    );
+  }
+}
+
+class _ResourceInitial extends StatelessWidget {
+  final _ResourceItem item;
+
+  const _ResourceInitial({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      _initials(item.name),
+      style: const TextStyle(
+        color: Colors.white,
+        fontWeight: FontWeight.w800,
       ),
     );
   }
@@ -784,18 +838,7 @@ class _ResourceDetailCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: item.color,
-                    child: Text(
-                      _initials(item.name),
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
+                  _ResourceAvatar(item: item, size: 60),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
@@ -902,8 +945,13 @@ class _ResourceDetailCard extends StatelessWidget {
 class _ResourceFormDialog extends StatefulWidget {
   final _ResourceType type;
   final _ResourceItem? item;
+  final bool isAdmin;
 
-  const _ResourceFormDialog({required this.type, this.item});
+  const _ResourceFormDialog({
+    required this.type,
+    required this.isAdmin,
+    this.item,
+  });
 
   @override
   State<_ResourceFormDialog> createState() => _ResourceFormDialogState();
@@ -912,6 +960,7 @@ class _ResourceFormDialog extends StatefulWidget {
 class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   final _serviceRepository = ServiceRepository();
   final _roomRepository = RoomRepository();
+  final _imageUploadRepository = ImageUploadRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _category;
@@ -923,12 +972,15 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   late final TextEditingController _floor;
   late final TextEditingController _slots;
   late final TextEditingController _equipment;
+  SelectedImage? _imagePreview;
   bool _active = true;
+  bool _imageRemoved = false;
   bool _saving = false;
   bool _closing = false;
 
   bool get _isService => widget.type == _ResourceType.service;
   bool get _isEditing => widget.item != null;
+  bool get _canEditAdminFields => widget.isAdmin;
 
   @override
   void initState() {
@@ -991,10 +1043,13 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                 : _category.text.trim(),
             'duration': int.tryParse(_duration.text.trim()) ?? 60,
             'price': double.tryParse(_price.text.trim()) ?? 0,
-            'therapistCommission':
-                double.tryParse(_therapistCommission.text.trim()) ?? 0,
-            'counterCommission':
-                double.tryParse(_counterCommission.text.trim()) ?? 0,
+            if (_canEditAdminFields) ...{
+              'therapistCommission':
+                  double.tryParse(_therapistCommission.text.trim()) ?? 0,
+              'counterCommission':
+                  double.tryParse(_counterCommission.text.trim()) ?? 0,
+              if (_imageRemoved) 'imageUrl': '',
+            },
             'roomType': _normalizeRoomType(_roomType.text),
             'isActive': _active,
           }
@@ -1008,17 +1063,36 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
             'isActive': _active,
           };
     try {
+      Map<String, dynamic>? savedRow;
       if (_isEditing) {
         if (_isService) {
-          await _serviceRepository.updateService(widget.item!.id, data);
+          savedRow = await _serviceRepository.updateService(
+            widget.item!.id,
+            data,
+          );
         } else {
           await _roomRepository.updateRoom(widget.item!.id, data);
         }
       } else {
         if (_isService) {
-          await _serviceRepository.addService(data);
+          savedRow = await _serviceRepository.addService(data);
         } else {
           await _roomRepository.createRoom(data);
+        }
+      }
+      if (_isService && savedRow != null && _canEditAdminFields) {
+        final serviceId = _asString(savedRow['id'], widget.item?.id ?? '');
+        final previousUrl = _asString(widget.item?.raw['imageUrl']);
+        if (_imagePreview != null && serviceId.isNotEmpty) {
+          final imageUrl = await _imageUploadRepository.uploadImage(
+            image: _imagePreview!,
+            folder: 'services',
+            id: serviceId,
+            previousUrl: previousUrl,
+          );
+          await _serviceRepository.updateService(serviceId, {'imageUrl': imageUrl});
+        } else if (_imageRemoved && previousUrl.trim().isNotEmpty) {
+          await _imageUploadRepository.removePublicUrl(previousUrl);
         }
       }
       _close(true);
@@ -1036,6 +1110,35 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     }
   }
 
+  Future<void> _pickImage() async {
+    if (!_canEditAdminFields) return;
+    try {
+      final image = await _imageUploadRepository.pickImage();
+      if (image == null || !mounted) return;
+      setState(() {
+        _imagePreview = image;
+        _imageRemoved = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString()),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  void _removeImage() {
+    if (!_canEditAdminFields) return;
+    setState(() {
+      _imagePreview = null;
+      _imageRemoved = true;
+    });
+  }
+
   void _close([bool? result]) {
     if (_closing || !mounted) return;
     _closing = true;
@@ -1047,6 +1150,18 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   @override
   Widget build(BuildContext context) {
     final label = _isService ? 'Service' : 'Room';
+    final imageItem = _ResourceItem(
+      id: widget.item?.id ?? '',
+      name: _name.text.trim().isEmpty ? label : _name.text.trim(),
+      subtitle: '',
+      detail: '',
+      statusText: '',
+      active: true,
+      color: _teal,
+      raw: {
+        'imageUrl': _imageRemoved ? '' : _asString(widget.item?.raw['imageUrl']),
+      },
+    );
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 24),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1079,6 +1194,55 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                   ],
                 ),
                 const SizedBox(height: 16),
+                if (_isService) ...[
+                  Row(
+                    children: [
+                      _ResourceAvatar(
+                        item: imageItem,
+                        size: 72,
+                        preview: _imagePreview,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _saving || !_canEditAdminFields
+                                  ? null
+                                  : _pickImage,
+                              icon: const Icon(Icons.upload_outlined),
+                              label: Text(
+                                _imagePreview == null &&
+                                        _asString(widget.item?.raw['imageUrl'])
+                                            .trim()
+                                            .isEmpty
+                                    ? 'Upload Image'
+                                    : 'Replace Image',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            TextButton.icon(
+                              onPressed:
+                                  !_saving &&
+                                      _canEditAdminFields &&
+                                      !_imageRemoved &&
+                                      (_imagePreview != null ||
+                                          _asString(widget.item?.raw['imageUrl'])
+                                              .trim()
+                                              .isNotEmpty)
+                                  ? _removeImage
+                                  : null,
+                              icon: const Icon(Icons.delete_outline),
+                              label: const Text('Remove Image'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                ],
                 _FormField(
                   label: 'Name',
                   controller: _name,
@@ -1120,6 +1284,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                           controller: _therapistCommission,
                           hint: 'RM per service',
                           keyboardType: TextInputType.number,
+                          enabled: _canEditAdminFields,
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1129,6 +1294,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                           controller: _counterCommission,
                           hint: 'RM per service',
                           keyboardType: TextInputType.number,
+                          enabled: _canEditAdminFields,
                         ),
                       ),
                     ],
@@ -2003,6 +2169,7 @@ class _FormField extends StatelessWidget {
   final TextEditingController controller;
   final TextInputType? keyboardType;
   final bool requiredField;
+  final bool enabled;
   final int maxLines;
 
   const _FormField({
@@ -2011,6 +2178,7 @@ class _FormField extends StatelessWidget {
     this.hint,
     this.keyboardType,
     this.requiredField = false,
+    this.enabled = true,
     this.maxLines = 1,
   });
 
@@ -2018,6 +2186,7 @@ class _FormField extends StatelessWidget {
   Widget build(BuildContext context) {
     return TextFormField(
       controller: controller,
+      enabled: enabled,
       keyboardType: keyboardType,
       maxLines: maxLines,
       validator: requiredField
@@ -2029,7 +2198,7 @@ class _FormField extends StatelessWidget {
         labelText: label,
         hintText: hint,
         filled: true,
-        fillColor: const Color(0xFFF7F8FA),
+        fillColor: enabled ? const Color(0xFFF7F8FA) : const Color(0xFFEDEFF2),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide.none,

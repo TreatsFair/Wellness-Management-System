@@ -1,5 +1,7 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 
@@ -9,7 +11,7 @@ String _normalizeStaffRole(Object? value) {
   return 'Therapist';
 }
 
-// ── Data model ────────────────────────────────────────────────────
+// -- Data model ----------------------------------------------------
 class TherapistModel {
   final String id;
   final String name;
@@ -19,6 +21,7 @@ class TherapistModel {
   final String joinDate;
   final bool availabilityStatus;
   final String notes;
+  final String profileImageUrl;
   final Map<String, double> serviceCommissions;
 
   // Calculated
@@ -33,6 +36,7 @@ class TherapistModel {
     required this.joinDate,
     required this.availabilityStatus,
     required this.notes,
+    required this.profileImageUrl,
     required this.serviceCommissions,
     this.totalAppointments = 0,
   });
@@ -70,6 +74,7 @@ class TherapistModel {
       joinDate: _stringValue(d['joinDate']),
       availabilityStatus: _boolValue(d['availabilityStatus']),
       notes: _stringValue(d['notes']),
+      profileImageUrl: _stringValue(d['profileImageUrl']),
       serviceCommissions: _commissionMap(d['serviceCommissions']),
     );
   }
@@ -96,6 +101,7 @@ class TherapistModel {
 
   TherapistModel copyWith({
     int? totalAppointments,
+    String? profileImageUrl,
     Map<String, double>? serviceCommissions,
   }) {
     return TherapistModel(
@@ -107,13 +113,14 @@ class TherapistModel {
       joinDate: joinDate,
       availabilityStatus: availabilityStatus,
       notes: notes,
+      profileImageUrl: profileImageUrl ?? this.profileImageUrl,
       serviceCommissions: serviceCommissions ?? this.serviceCommissions,
       totalAppointments: totalAppointments ?? this.totalAppointments,
     );
   }
 }
 
-// ── Main screen ───────────────────────────────────────────────────
+// -- Main screen ---------------------------------------------------
 class TherapistsScreen extends StatefulWidget {
   final String userRole;
   const TherapistsScreen({super.key, required this.userRole});
@@ -356,9 +363,9 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 // TABLET LAYOUT
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 class _TabletLayout extends StatelessWidget {
   final List<TherapistModel> therapists;
   final TherapistModel? selected;
@@ -566,9 +573,9 @@ class _TabletListItem extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 // PHONE LAYOUT
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 class _PhoneLayout extends StatelessWidget {
   final List<TherapistModel> therapists;
   final TextEditingController searchController;
@@ -863,9 +870,9 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 // DETAIL PANEL — shared between tablet and phone
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 class _DetailPanel extends StatelessWidget {
   final TherapistModel therapist;
   final bool isAdmin;
@@ -929,7 +936,7 @@ class _DetailPanel extends StatelessWidget {
               ),
             ),
 
-          // ── Profile card ────────────────────────────────────
+          // -- Profile card ------------------------------------
           _Card(
             child: Row(
               children: [
@@ -1062,7 +1069,7 @@ class _DetailPanel extends StatelessWidget {
 
           const SizedBox(height: 12),
 
-          // ── Stats row ──────────────────────────────────────
+          // -- Stats row --------------------------------------
           Row(
             children: [
               Expanded(
@@ -1079,7 +1086,7 @@ class _DetailPanel extends StatelessWidget {
 
           const SizedBox(height: 12),
 
-          // ── Therapist info ─────────────────────────────────
+          // -- Therapist info ---------------------------------
           _Card(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1107,7 +1114,7 @@ class _DetailPanel extends StatelessWidget {
 
           const SizedBox(height: 12),
 
-          // ── Notes ──────────────────────────────────────────
+          // -- Notes ------------------------------------------
           _StaffCommissionSection(staff: therapist),
 
           const SizedBox(height: 12),
@@ -1184,9 +1191,9 @@ class _DetailPanel extends StatelessWidget {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 // SHARED SMALL WIDGETS
-// ─────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------
 class _StaffServiceCommission {
   final String id;
   final String name;
@@ -1867,6 +1874,7 @@ class _TabletDetailHeader extends StatelessWidget {
 
 class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   final _therapistRepository = TherapistRepository();
+  final _imageUploadRepository = ImageUploadRepository();
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _nameController;
   late final TextEditingController _phoneController;
@@ -1875,6 +1883,8 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   late final TextEditingController _joinDateController;
   late final TextEditingController _notesController;
   late bool _availabilityStatus;
+  SelectedImage? _imagePreview;
+  bool _imageRemoved = false;
   bool _saving = false;
   bool _closing = false;
 
@@ -1919,11 +1929,12 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
       'joinDate': _joinDateController.text.trim(),
       'availabilityStatus': _availabilityStatus,
       'notes': _notesController.text.trim(),
+      if (_imageRemoved) 'profileImageUrl': '',
     };
 
     try {
       late final String therapistId;
-      late final Map<String, dynamic> savedRow;
+      late Map<String, dynamic> savedRow;
       if (_isEditing) {
         therapistId = widget.therapist!.id;
         savedRow = await _therapistRepository.updateTherapist(
@@ -1933,6 +1944,26 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
       } else {
         savedRow = await _therapistRepository.addTherapist(data);
         therapistId = savedRow['id']?.toString() ?? '';
+      }
+
+      var profileImageUrl = (savedRow['profileImageUrl'] ??
+              widget.therapist?.profileImageUrl ??
+              '')
+          .toString();
+      final previousUrl = widget.therapist?.profileImageUrl ?? '';
+      if (_imagePreview != null && therapistId.isNotEmpty) {
+        profileImageUrl = await _imageUploadRepository.uploadImage(
+          image: _imagePreview!,
+          folder: 'therapists',
+          id: therapistId,
+          previousUrl: previousUrl,
+        );
+        savedRow = await _therapistRepository.updateTherapist(
+          therapistId,
+          {'profileImageUrl': profileImageUrl},
+        );
+      } else if (_imageRemoved && previousUrl.trim().isNotEmpty) {
+        await _imageUploadRepository.removePublicUrl(previousUrl);
       }
 
       final savedCommissions = savedRow.containsKey('serviceCommissions')
@@ -1949,6 +1980,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
           savedRow['availabilityStatus'] ?? data['availabilityStatus'],
         ),
         notes: (savedRow['notes'] ?? data['notes'])!.toString(),
+        profileImageUrl: profileImageUrl,
         serviceCommissions: savedCommissions,
         totalAppointments: widget.therapist?.totalAppointments ?? 0,
       );
@@ -1968,6 +2000,33 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     }
   }
 
+  Future<void> _pickImage() async {
+    try {
+      final image = await _imageUploadRepository.pickImage();
+      if (image == null || !mounted) return;
+      setState(() {
+        _imagePreview = image;
+        _imageRemoved = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(e.toString()),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  void _removeImage() {
+    setState(() {
+      _imagePreview = null;
+      _imageRemoved = true;
+    });
+  }
+
   void _close([TherapistModel? result]) {
     if (_closing || !mounted) return;
     _closing = true;
@@ -1978,6 +2037,22 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final previewTherapist = TherapistModel(
+      id: widget.therapist?.id ?? '',
+      name: _nameController.text.trim().isEmpty
+          ? 'Staff'
+          : _nameController.text.trim(),
+      phone: _phoneController.text.trim(),
+      gender: _genderController.text.trim(),
+      role: _normalizeStaffRole(_roleController.text),
+      joinDate: _joinDateController.text.trim(),
+      availabilityStatus: _availabilityStatus,
+      notes: _notesController.text.trim(),
+      profileImageUrl: _imageRemoved
+          ? ''
+          : widget.therapist?.profileImageUrl ?? '',
+      serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+    );
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -2007,6 +2082,51 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                       IconButton(
                         onPressed: _saving ? null : () => _close(),
                         icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  Row(
+                    children: [
+                      _Avatar(
+                        therapist: previewTherapist,
+                        radius: 36,
+                        preview: _imagePreview,
+                      ),
+                      const SizedBox(width: 16),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: _saving ? null : _pickImage,
+                              icon: const Icon(Icons.upload_outlined),
+                              label: Text(
+                                _imagePreview == null &&
+                                        (widget.therapist?.profileImageUrl ?? '')
+                                            .trim()
+                                            .isEmpty
+                                    ? 'Upload Photo'
+                                    : 'Replace Photo',
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            TextButton.icon(
+                              onPressed:
+                                  !_saving &&
+                                      !_imageRemoved &&
+                                      (_imagePreview != null ||
+                                          (widget.therapist?.profileImageUrl ??
+                                                  '')
+                                              .trim()
+                                              .isNotEmpty)
+                                  ? _removeImage
+                                  : null,
+                              icon: const Icon(Icons.delete_outline),
+                              label: const Text('Remove Photo'),
+                            ),
+                          ],
+                        ),
                       ),
                     ],
                   ),
@@ -2198,6 +2318,7 @@ class _TherapistGenderDropdown extends StatelessWidget {
       ),
     );
   }
+
 }
 
 class _StaffRoleDropdown extends StatelessWidget {
@@ -2276,20 +2397,66 @@ class _SearchBar extends StatelessWidget {
 class _Avatar extends StatelessWidget {
   final TherapistModel therapist;
   final double radius;
-  const _Avatar({required this.therapist, required this.radius});
+  final SelectedImage? preview;
+
+  const _Avatar({
+    required this.therapist,
+    required this.radius,
+    this.preview,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return CircleAvatar(
-      radius: radius,
-      backgroundColor: therapist.avatarColor,
-      child: Text(
-        therapist.initials,
-        style: TextStyle(
-          color: Colors.white,
-          fontWeight: FontWeight.bold,
-          fontSize: radius * 0.7,
-        ),
+    final imageUrl = therapist.profileImageUrl.trim();
+    final hasImage = preview != null || imageUrl.isNotEmpty;
+    return ClipOval(
+      child: Container(
+        width: radius * 2,
+        height: radius * 2,
+        color: hasImage ? Colors.transparent : therapist.avatarColor,
+        alignment: Alignment.center,
+        child: preview != null
+            ? Image.memory(
+                preview!.bytes,
+                width: radius * 2,
+                height: radius * 2,
+                fit: BoxFit.cover,
+              )
+            : imageUrl.isNotEmpty
+            ? CachedNetworkImage(
+                imageUrl: imageUrl,
+                width: radius * 2,
+                height: radius * 2,
+                fit: BoxFit.cover,
+                placeholder: (_, _) => _AvatarInitials(
+                  therapist: therapist,
+                  radius: radius,
+                ),
+                errorWidget: (_, _, _) => _AvatarInitials(
+                  therapist: therapist,
+                  radius: radius,
+                ),
+              )
+            : _AvatarInitials(therapist: therapist, radius: radius),
+      ),
+    );
+  }
+}
+
+class _AvatarInitials extends StatelessWidget {
+  final TherapistModel therapist;
+  final double radius;
+
+  const _AvatarInitials({required this.therapist, required this.radius});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      therapist.initials,
+      style: TextStyle(
+        color: Colors.white,
+        fontWeight: FontWeight.bold,
+        fontSize: radius * 0.7,
       ),
     );
   }
@@ -2429,3 +2596,5 @@ class _InfoRow extends StatelessWidget {
     );
   }
 }
+
+
