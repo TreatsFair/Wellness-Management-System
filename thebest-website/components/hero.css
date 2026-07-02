@@ -1,0 +1,183 @@
+.hero {
+    position: relative; /* Required for the pseudo-element positioning */
+    height: 90vh; /* Make the hero section take up the full viewport height */
+    display: flex; /* Use Flexbox for centering content */
+    justify-content: center; /* Center content horizontally */
+    align-items: center; /* Center content vertically */
+    text-align: center; /* Center the text */
+    flex-direction: column;
+    overflow: hidden; /* Ensure no overflow from the pseudo-element */
+    /* background-image: url('../pics/thebestwellness_massagearea.jpg'); */
+    background-image: url(../pics/beauty-spa.jpg);
+    background-position: center; /* Center the image */
+    background-repeat: no-repeat; /* Prevent the image from repeating */
+    background-size: cover; /* Ensure the image covers the entire section */
+
+}
+
+.hero::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(0, 0, 0, 0.65); /* Black overlay with 50% transparency */
+    background-size: cover; /* Ensure the image covers the entire section */
+    background-position: center; /* Center the image */
+    background-repeat: no-repeat; /* Prevent the image from repeating */
+    z-index: 1; /* Place the pseudo-element behind the content */
+}
+
+
+
+
+.hero__content {
+    color: white; /* Ensure text is visible against the background */
+    background-color: rgba(223, 191, 122, 0.3); 
+    border-radius: 10px; /* Optional: round the corners of the content box */
+    z-index: 1;
+    opacity: 1;
+}
+
+.hero__title {
+    padding: 0.5rem;
+    color: var(--clr-peach);
+    font-size: 1.2rem;
+    opacity: 1;
+}
+
+.hero__text {
+    padding: 0.5rem;
+    font-size: var(--size-xs);
+    opacity: 1;
+
+}
+
+.hero__logo {
+    border-radius: 50%;
+    width: 5rem;
+    margin-bottom: -0.4rem;
+    background-color: rgba(223, 191, 122, 0.3);
+    padding: 0.8%;
+    background-clip: padding-box;
+    opacity: 1;
+}
+
+
+
+/* xsmall */
+/* @media (min-width: 475px) {
+} */
+    
+/* small */
+@media (min-width: 640px) {
+    .hero__title {
+        font-size: 1.6rem;
+        padding: 1rem;
+    }
+    
+    .hero__text {
+        padding: 1rem;
+        font-size: var(--size-sm);
+    }
+}
+
+/* medium */
+@media (min-width: 768px) {
+    .hero__content {
+        color: white; /* Ensure text is visible against the background */
+        background-color: rgba(223, 191, 122, 0.3);
+        border-radius: 20px; /* Optional: round the corners of the content box */
+    }
+    
+    .hero__title {
+        font-size: 1.7rem;
+        padding: 1rem;
+    }
+    
+    .hero__text {
+        padding: 1rem;
+        font-size: var(--size-base);
+    }
+}
+
+/* large */
+@media (min-width: 1024px) {
+    .hero__title {
+        font-size: 2.4rem;
+        padding: 1.6rem;
+    }
+    
+    .hero__text {
+        padding: 1.6rem;
+        font-size: var(--size-lg);
+    }
+} 
+
+/* xlarge */
+/* @media (min-width: 1280px) {
+} */
+
+
+/* 2xlarge */
+/* @media (min-width: 1536px) {
+} */
+
+
+/* .hero {
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    margin-top: 1rem;
+}
+
+.hero__img_pfp {
+    display: inline;
+    border-radius: 50%;
+    width: 6rem;
+    height: 6rem;
+}
+
+.hero__title {
+    font-size: 20px;
+    display: inline-block;
+    font-weight: 600;
+    text-decoration: none;
+    letter-spacing: -0.02em;
+    background-color: var(--clr-peach);
+    border-radius: 10px;
+    padding: 10px;
+    margin: 5px;
+    color: var(--clr-orange);
+}
+
+.hero__img_menu {
+    display: flex;
+    flex-direction: row;
+    justify-content: center;
+    align-items: center;
+    gap: 8rem;
+    width: 18rem;
+    height: 28rem;
+}
+
+.hero__img_menu img{
+    border-radius: 6%;
+    background-color: var(--clr-peach);
+    padding: 2%;
+}
+
+.hero__img_menu img:hover {
+    transform: scale(1.1);
+    transition: all 0.1s ease-in-out;
+    background-color: var(--clr-light);
+    cursor: pointer;
+}
+
+
+.hero__menu {
+    margin: 4rem;
+} */

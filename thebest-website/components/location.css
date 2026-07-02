@@ -1,0 +1,198 @@
+/* Base styles for the locations section container (formerly .pics) */
+.pics {
+    margin-top: 3rem;
+    background-color: var(--clr-peach); 
+    border-top: 1px solid var(--clr-orange); 
+    border-bottom: 1px solid var(--clr-orange); 
+    border-left: none;
+    border-right: none;
+    padding-top: 2rem; 
+    padding-bottom: 2rem; 
+}
+
+.pics__title {
+    font-size: var(--size-xl);
+}
+
+/* Location Card Grid (Mobile/Default) */
+.location-cards-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 3rem;
+    align-items: center;
+    padding: 0 1rem;
+    margin-bottom: 3rem;
+}
+
+/* Override for location cards on Mobile/Default (inherited from home-service-card) */
+.location-card-override {
+    max-width: 300px;
+}
+
+/* Styling specifically for the location text content */
+.location-card-content {
+    padding: 1rem 1rem;
+    position: relative; 
+}
+
+/* Text styles (Mobile/Default) */
+.location__title {
+    font-size: var(--size-lg);
+    color: var(--clr-dark);
+    margin-bottom: 0.5rem;
+    font-weight: 700;
+    position: relative;
+}
+
+.location__address, .location__phone {
+    font-size: var(--size-sm);
+    color: var(--clr-dark);
+    margin-bottom: 0.5rem;
+    position: relative;
+}
+
+.location__map-link a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--clr-orange);
+    text-decoration: none;
+    font-weight: 600;
+    transition: color 0.2s;
+    font-size: var(--size-sm);
+    position: relative;
+}
+
+.location__map-link a:hover {
+    color: var(--clr-dark);
+}
+
+.location__map-link .material-icons {
+    font-size: var(--size-base);
+}
+
+.home-service-card.location-card-override .menu__img {
+    display: none; 
+    padding-left: 1.5rem;
+}
+
+/* Medium screens (>= 768px) */
+@media (min-width: 768px) {
+    /* Location Grid on Desktop: display side-by-side with space */
+    .location-cards-grid {
+        flex-direction: row;
+        justify-content: center;
+        gap: 1em; /* Restored original gap */
+        padding: 0;
+        max-width: 100%;
+        margin: 0 auto 3rem auto;
+        margin-left: 2rem;
+        margin-right: 2rem;
+    }
+    
+    /* === APPLY HORIZONTAL LAYOUT AND BIGGER SIZE ONLY TO LOCATION CARDS === */
+    .home-service-card.location-card-override {
+        max-width: 550px; /* INCREASED CARD SIZE */
+        border-radius: 10px;
+        
+        display: flex;
+        flex-direction: row; /* Make the card content horizontal */
+        height: 250px; /* Set a fixed height to accommodate horizontal layout */
+    }
+
+    .home-service-card.location-card-override .menu__img {
+        height: 100%; /* Image takes full height of the card */
+        width: 45%; /* Image takes 45% of the card width */
+        padding: 0;
+    }
+
+    .home-service-card.location-card-override .card-text-content {
+        width: 55%; /* Content takes remaining 55% */
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        align-items: flex-start;
+        padding-left: 2rem;
+    }
+    /* === END HORIZONTAL LAYOUT === */
+
+
+    .location-card-override:first-child,
+    .location-card-override:last-child {
+        border-radius: 10px;
+    }
+
+    .location__title {
+        font-size: var(--size-xl);
+    }
+
+    .location__address, .location__phone {
+        font-size: var(--size-xl);
+    }
+
+    .pics__title {
+        font-size: var(--size-2xl);
+    }
+
+    .location__map-link .material-icons {
+    font-size: var(--size-xl);
+    }
+    
+}
+
+/* Large screens (>= 1024px) */
+@media (min-width: 1024px) {
+    .location-card-override {
+        width: 550px; /* Match max-width */
+        max-width: 550px;
+        height: 250px;
+        margin-left: 2rem;
+        margin-right: 2rem;
+    }
+
+    .location-cards-grid {
+        flex-direction: row;
+        justify-content: center;
+        gap: 1em; /* Restored original gap */
+        padding: 0;
+        max-width: 100%;
+        margin: 0 auto 3rem auto;
+    }
+
+    .location__title {
+        font-size: var(--size-xl);
+        margin-bottom: 0.8rem;
+    }
+    .location__address, .location__phone {
+        font-size: var(--size-lg);
+    }
+
+    .home-service-card.location-card-override .menu__img {
+        display: flex;
+    }
+
+    .pics__title {
+        font-size: var(--size-3xl);
+    }
+
+}
+
+@media (min-width: 1440px) {
+    .location__title {
+        font-size: var(--size-2xl);
+        margin-bottom: 0.8rem;
+    }
+
+    .location__address, .location__phone {
+        font-size: var(--size-xl);
+    }
+
+    .location__map-link .material-icons {
+        font-size: var(--size-xl);
+    }
+
+    .location__map-link a {
+        font-size: var(--size-base);
+    }
+}
+

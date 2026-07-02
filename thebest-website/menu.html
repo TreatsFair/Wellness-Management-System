@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!-- Fonts & Icons (UNCHANGED) -->
+    <link
+      href="https://api.fontshare.com/v2/css?f[]=general-sans@400,700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="./pics/FB profile-180x180px-02.jpg"
+      type="image/x-icon"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"
+    />
+    <link
+      href="https://fonts.googleapis.com/icon?family=Material+Icons"
+      rel="stylesheet"
+    />
+
+    <!-- Core Styles -->
+    <link rel="stylesheet" href="./styles/modern-normalise.css" />
+    <link rel="stylesheet" href="./styles/styles.css" />
+    <link rel="stylesheet" href="./styles/utils.css" />
+
+    <!-- Shared Components -->
+    <link rel="stylesheet" href="./components/header.css" />
+    <link rel="stylesheet" href="./components/mobile-nav.css" />
+    <link rel="stylesheet" href="./components/booking.css" />
+    <link rel="stylesheet" href="./components/footer.css" />
+
+    <!-- Menu Page Specific -->
+    <link rel="stylesheet" href="./components/menu-page.css" />
+
+    <title>Menu | The Best Family Wellness</title>
+  </head>
+
+  <body>
+    <!-- ===== HEADER (IDENTICAL) ===== -->
+    <article class="headers container">
+      <header class="header container">
+        <div class="logo-wrapper">
+          <img
+            src="./pics/transparent logo 2.png"
+            alt="logo"
+            class="header-logo"
+          />
+        </div>
+
+        <div class="widgets-wrapper">
+          <nav>
+            <ul class="header__menu">
+              <li><a class="header__link" href="./index.html">Home</a></li>
+              <li>
+                <a class="header__link header__link--active" href="./menu.html"
+                  >Menu</a
+                >
+              </li>
+              <li><a class="header__link" href="./index.html#locations">Location</a></li>
+              <li><a class="header__link" href="#contacts">Contact</a></li>
+            </ul>
+
+            <button class="header__bars">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke-width="1.5"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"
+                />
+              </svg>
+            </button>
+          </nav>
+        </div>
+
+        <div class="header__button">
+          <a
+            href="https://linktr.ee/thebestwellness"
+            class="header__btn btn"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Booking Now
+          </a>
+        </div>
+      </header>
+    </article>
+
+    <!-- ===== MOBILE NAV (IDENTICAL) ===== -->
+    <div class="mobile-nav">
+      <nav>
+        <ul class="mobile-nav__menu">
+          <li><a href="./index.html" class="mobile-nav__link">Home</a></li>
+          <li><a href="./menu.html" class="mobile-nav__link">Menu</a></li>
+          <li><a href="./index.html#locations" class="mobile-nav__link">Location</a></li>
+          <li><a href="#contacts" class="mobile-nav__link">Contact</a></li>
+          <li class="mobile-nav__link-line"></li>
+          <li>
+            <a
+              href="https://linktr.ee/thebestwellness"
+              class="mobile-nav__btn header__btn btn"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Booking Now
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+
+    <!-- ===== MAIN CONTENT ===== -->
+    <main>
+      <section class="menu-page container section">
+        <h1 class="menu-page__title">Our Services</h1>
+        <p class="menu-page__subtitle">
+          Discover our signature wellness treatments, thoughtfully designed to
+          restore balance and relaxation.
+        </p>
+
+        <div class="menu-services-grid">
+          <!-- Service 1 -->
+          <article class="menu-service-card">
+            <img src="./pics/best_footmassage2.jpg" alt="Foot Reflexology" />
+
+            <div class="menu-service-content">
+              <h2 class="menu-service-title">Foot Reflexology</h2>
+
+              <p class="menu-service-desc">
+                A relaxing foot massage that improves circulation and eases tension. Includes a free herbal soak to soothe the feet.
+              </p>
+
+              <p class="menu-service-note">
+                * All prices are nett. Weekends and public holidays are subject
+                to an additional RM5 surcharge.
+              </p>
+
+              <div class="menu-service-durations">
+                <span>Branches</span>
+                <span><i class="fa-regular fa-clock"></i> 60 mins</span>
+                <span><i class="fa-regular fa-clock"></i> 90 mins</span>
+              </div>
+
+              <!-- Service 1 prices -->
+              <div class="menu-service-prices">
+                <div class="price-row">
+                  <strong>Kepong</strong>
+                  <strong>RM 88</strong>
+                  <strong>RM 108</strong>
+                </div>
+                <div class="price-row">
+                  <strong>Setapak</strong>
+                  <strong>RM 98</strong>
+                  <strong>RM 118</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Service 2 -->
+          <article class="menu-service-card">
+            <img src="./pics/beauty-spa.jpg" alt="Thai Body Massage" />
+
+            <div class="menu-service-content">
+              <h2 class="menu-service-title">Thai Body Massage</h2>
+
+              <p class="menu-service-desc">
+                An energizing no-oil massage using stretches and pressure points to release deep tension and restore flexibility.
+              </p>
+
+              <p class="menu-service-note">
+                * All prices are nett. Weekends and public holidays are subject
+                to an additional RM5 surcharge.
+              </p>
+
+              <div class="menu-service-durations">
+                <span>Branches</span>
+                <span><i class="fa-regular fa-clock"></i> 60 mins</span>
+                <span><i class="fa-regular fa-clock"></i> 90 mins</span>
+              </div>
+
+              <!-- Service 2 prices -->
+              <div class="menu-service-prices">
+                <div class="price-row">
+                  <strong>Kepong</strong>
+                  <strong>RM 88</strong>
+                  <strong>RM 118</strong>
+                </div>
+                <div class="price-row">
+                  <strong>Setapak</strong>
+                  <strong>RM 98</strong>
+                  <strong>RM 128</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Service 3 -->
+          <article class="menu-service-card">
+            <img src="./pics/best_oilmassage.jpg" alt="Aroma Oil Massage" />
+
+            <div class="menu-service-content">
+              <h2 class="menu-service-title">Aroma Oil Body Massage</h2>
+
+              <p class="menu-service-desc">
+                A calming full-body massage with aromatic oils to soothe stress, relax muscles and nourish the skin.
+              </p>
+
+              <p class="menu-service-note">
+                * All prices are nett. Weekends and public holidays are subject
+                to an additional RM5 surcharge.
+              </p>
+
+              <div class="menu-service-durations">
+                <span>Branches</span>
+                <span><i class="fa-regular fa-clock"></i> 60 mins</span>
+                <span><i class="fa-regular fa-clock"></i> 90 mins</span>
+              </div>
+
+              <!-- Service 3 prices -->
+              <div class="menu-service-prices">
+                <div class="price-row">
+                  <strong>Kepong</strong>
+                  <strong>RM 99</strong>
+                  <strong>RM 138</strong>
+                </div>
+                <div class="price-row">
+                  <strong>Setapak</strong>
+                  <strong>RM 109</strong>
+                  <strong>RM 148</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Service 4 -->
+          <article class="menu-service-card">
+            <img src="./pics/best_combo.jpg" alt="Foot & Aroma Oil Combo" />
+
+            <div class="menu-service-content">
+              <h2 class="menu-service-title">Foot & Aroma Oil Combo</h2>
+
+              <p class="menu-service-desc">
+                A signature combination of foot massage and full-body aroma oil massage therapy.
+                Includes a free herbal soak.
+              </p>
+
+              <p class="menu-service-note">
+                * All prices are nett. Weekends and public holidays are subject
+                to an additional RM5 surcharge.
+              </p>
+
+              <div class="menu-service-durations">
+                <span>Branches</span>
+                <span><i class="fa-regular fa-clock"></i> 60 mins</span>
+                <span><i class="fa-regular fa-clock"></i> 90 mins</span>
+              </div>
+
+              <!-- Service 4 prices -->
+              <div class="menu-service-prices">
+                <div class="price-row">
+                  <strong>Kepong</strong>
+                  <strong>RM 138</strong>
+                  <strong>RM 138</strong>
+                </div>
+                <div class="price-row">
+                  <strong>Setapak</strong>
+                  <strong>RM 109</strong>
+                  <strong>RM 148</strong>
+                </div>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ===== CONTACTS CONTENT ===== -->
+      <section id="contacts" class="booking container section">
+        <div class="booking__info">
+          <h2 class="booking__title">Bookings</h2>
+          <p><b>Book your session today!</b></p>
+          <br />
+          <p><b>Call or Whatsapp Us for Bookings</b></p>
+          <div class="booking__number">
+            <p><b>(Setapak)</b></p>
+            <h2><a href="tel:0367894116">012 - 7449 266</a></h2>
+            <p>
+              <b>(Kepong)<br /> </b>
+            </p>
+            <h2><a href="tel:0125262551">012 - 5262 551 </a></h2>
+          </div>
+          <a
+            href="https://linktr.ee/thebestwellness"
+            class="booking__btn btn"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Book Now
+          </a>
+        </div>
+      </section>
+
+      <!-- ===== FOOTER CONTENT ===== -->
+      <div id="footer" class="footer-background">
+        <div class="footer container">
+          <img
+            class="footer__logo"
+            src="./pics/transparent logo.png"
+            alt="logo"
+          />
+
+          <div class="footer__opening-hrs">
+            <div class="footer__hrtitle">
+              <i class="fa-solid fa-clock"></i> <b>Opening Hours - Kepong</b>
+            </div>
+            <!-- <i class="fa-regular fa-clock"></i> -->
+            <div class="footer__hours">
+              <p>Monday to Thursday:</p>
+              <p>11AM - 11PM</p>
+            </div>
+            <div class="footer__hours">
+              <p>Friday to Sunday:</p>
+              <p>11AM - 11:30PM</p>
+            </div>
+          </div>
+
+          <div class="footer__opening-hrs">
+            <div class="footer__hrtitle">
+              <i class="fa-solid fa-clock"></i> <b>Opening Hours - Setapak</b>
+            </div>
+            <div class="footer__hours">
+              <p>Weekdays:</p>
+              <p>10:30AM - 11PM</p>
+            </div>
+            <div class="footer__hours">
+              <p>Weekends:</p>
+              <p>10:30AM - 11PM</p>
+            </div>
+          </div>
+
+          <div class="footer__socials">
+            <hr class="custom-hr" />
+            <b>
+              <a
+                href="https://www.facebook.com/share/RPPDrUBPm72VphhW/?mibextid=LQQJ4d"
+                target="_blank"
+                class="footer__fb"
+              >
+                <p>Facebook</p>
+              </a>
+              <a
+                href="https://www.instagram.com/thebestmassage.kl?igsh=MXNzZXJ3YnZyMGpybA%3D%3D&utm_source=qr"
+                target="_blank"
+                class="footer__insta"
+              >
+                <p>Instagram</p>
+              </a>
+              <a
+                href="https://www.tiktok.com/@thebestwellness?_t=8pUIcf3N2wa&_r=1"
+                target="_blank"
+                class="footer__tiktok"
+              >
+                <p>TikTok</p>
+              </a>
+              <a
+                href="https://www.xiaohongshu.com/user/profile/67133a2f000000001d023183"
+                target="_blank"
+                class="footer__xhs"
+              >
+                <p>XiaoHongShu</p>
+              </a>
+            </b>
+            <hr class="custom-hr" />
+          </div>
+        </div>
+
+        <div class="footer__copyright">
+          <p>Copyright &copy; 2026 The Best Wellness Sdn. Bhd.</p>
+          <p>All Rights Reserved.</p>
+        </div>
+      </div>
+    </main>
+
+    <!-- JS (UNCHANGED + PAGE SPECIFIC) -->
+    <script src="./js/main.js"></script>
+    <script src="./js/mobile-nav.js"></script>
+    <script src="./js/menu.js"></script>
+  </body>
+</html>

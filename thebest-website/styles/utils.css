@@ -1,0 +1,251 @@
+/* xsmall */
+/* @media (min-width: 475px) {
+} */
+    
+/* small */
+/* @media (min-width: 640px) {
+} */
+
+/* medium */
+/* @media (min-width: 768px) {
+} */
+
+/* large */
+/* @media (min-width: 1024px) {
+} */
+
+/* xlarge */
+/* @media (min-width: 1280px) {
+} */
+
+
+/* 2xlarge */
+/* @media (min-width: 1536px) {
+} */
+
+/* 3xlarge */
+/* @media (min-width: 1920px) { 
+} */
+
+
+
+.btn {
+    display: inline-block;
+    font-weight: 600;
+    text-decoration: none;
+    letter-spacing: -0.02em;
+    background-color: var(--clr-peach);
+    color: var(--clr-orange);
+    padding: 0.5em 1em;
+    border-radius: 10px;
+    box-shadow: 0 10px 20px rgba(202, 138, 4, 0.5), 
+    0 6px 6px rgba(202, 138, 4, 0.5), 0 0 100px -10px var(--clr-orange);
+    transition: transform 0.3s, box-shadow 0.3s;
+}
+
+.btn:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 14px 28px rgba(202, 138, 4, 0.25), 
+    0 10px 10px rgba(202, 138, 4, 0.22), 0 0 120px -10px var(--clr-orange);
+}
+
+.container {
+    width: 100%;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+
+
+.section {
+    margin-top: 3.7rem;
+}
+
+/* xsmall */
+@media (min-width: 475px) {
+    .container {
+        max-width: 475px;
+    }
+}
+    
+/* small */
+@media (min-width: 640px) {
+    .container {
+        max-width: 640px;
+    }
+}
+
+/* medium */
+@media (min-width: 768px) {
+    .container {
+        max-width: 768px;
+    }
+}
+
+/* large */
+@media (min-width: 1024px) {
+    .container {
+        max-width: 1024px;
+    }
+    .section {
+        margin-top: 10rem;
+    }
+}
+
+/* xlarge */
+@media (min-width: 1280px) {
+    .container {
+        max-width: 1280px;
+    }
+}
+
+
+/* 2xlarge */
+@media (min-width: 1536px) {
+    .container {
+        max-width: 1536px;
+    }
+}
+
+@media (min-width: 1920px) {
+    .container {
+        max-width: 1920px;
+    }
+}
+
+
+/* SERVICE CARD STYLES */
+.home-services-grid {
+    display: flex;
+    flex-direction: column; /* Stacks vertically by default (mobile view) */
+    align-items: center; 
+    gap: 3rem; 
+    padding: 0 1rem; /* 1rem padding to left/right edges for small screens */
+}
+
+.home-service-card {
+    text-align: left;
+    max-width: 250px; 
+    width: 100%;
+    background-color: var(--clr-light);
+    border-radius: 10px;
+    overflow: hidden; 
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+    transition: transform 0.3s ease;
+    cursor: default;
+    position: relative; /* Ensure card is position context for pseudo-elements */
+    /* Mobile/Default: Card content is vertical */
+    display: flex; /* Kept for flex children alignment */
+    flex-direction: column; /* Default vertical stack */
+}
+
+/* disable menu images for screen smaller  */
+/* .menu__img {
+    display: none;
+} */
+
+.home-service-card:hover {
+    transform: translateY(-5px); 
+}
+
+.home-service-card .menu__img {
+    height: 150px; 
+    width: 100%;
+    object-fit: cover;
+    border-radius: 0; 
+    padding: 0; 
+    /* Mobile: Image takes full width */
+}
+
+/* NEW RULE: Remove hover effects from the image inside the service card */
+.home-service-card .menu__img:hover {
+    transform: none;
+    cursor: default;
+}
+
+.card-text-content {
+    padding: 1rem 1rem; 
+    /* Mobile: Text takes full width */
+    flex-grow: 1;
+}
+
+.card-text-content .menu__title2 {
+    color: var(--clr-dark); 
+    font-size: var(--size-xl); 
+    margin-top: 0;
+    margin-bottom: 0.5rem;
+    text-align: left;
+}
+
+.card-text-content p {
+    font-size: var(--size-sm); 
+    color: var(--clr-dark);
+    text-align: left;
+    line-height: 1.4;
+}
+
+
+.section-divider {
+    height: 1px;
+    background-color: var(--clr-orange); /* Use a subtle color */
+    max-width: 80%; /* Don't stretch across the whole screen */
+    margin: 4rem auto; /* Center it and add significant vertical space */
+    opacity: 0.5;
+}
+
+
+/* 2x2 GRID LAYOUT (Starts from medium screens) */
+@media (min-width: 768px) {
+    .home-services-grid {
+        flex-direction: row; /* Switch to horizontal layout */
+        flex-wrap: wrap; /* Allow cards to wrap to the next row */
+        justify-content: center; /* Centers rows of cards */
+        gap: 2rem; /* Spacing between cards */
+        max-width: 100%;
+        padding: 0; /* Remove left/right padding when the grid starts centering */
+        margin-left: 2rem;
+        margin-right: 2rem;
+    }
+    
+    .home-service-card {
+        /* Calculates size to fit two cards per row with 2rem gap */
+        max-width: calc(50% - 1rem); 
+        margin: 0;
+        border-radius: 10px;
+        /* Revert to default vertical stack (flex-direction: column is inherited) */
+        height: auto; /* Allow height to adjust */
+    }
+
+    .home-service-card .menu__img {
+        /* Revert to vertical card size */
+        height: 200px;
+        width: 100%;
+    }
+
+    .card-text-content {
+        /* Revert to vertical card size */
+        width: 100%;
+    }
+
+    .card-text-content .menu__title2 {
+        /* Restore original size for desktop */
+        font-size: var(--size-2xl); 
+    }
+    .card-text-content p {
+        /* Restore original size for desktop */
+        font-size: var(--size-base); 
+    }
+
+    /* .menu__img {
+    display: flex;
+    } */
+}
+
+@media (min-width: 1024px) {
+    .home-service-card {
+        /* Ensures better fit within the wider container on large screens by setting a fixed width */
+        width: 450px; 
+        max-width: 450px; /* Explicitly constrain the max width as well */
+        height: auto; /* Ensure height is auto for vertical content */
+    }
+}

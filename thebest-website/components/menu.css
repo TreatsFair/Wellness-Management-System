@@ -1,0 +1,328 @@
+.menu {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 1.2rem;
+    width: 14rem;
+    height: 18rem;
+}
+
+.menu__title {
+    font-size: 1.2rem;
+    text-align: center;
+    color: var(--clr-orange);
+}
+
+.menu__title2{
+    font-size: 1.2rem;
+    text-align: center;
+    color: var(--clr-orange);
+}
+
+.menu__p {
+    font-style: bold;
+    text-align: center;
+    color: var(--clr-orange);
+    font-size: var(--size-base);
+    margin-bottom: -1rem;
+}
+
+.menu__img {
+    border-radius: 6%;
+    background-color: var(--clr-thebest);
+    padding: 2%;
+}
+
+.super_morning_menu {
+    gap: 10rem;
+}
+
+
+
+.menu__img:hover {
+    transform: scale(1.05);
+    transition: all 0.1s ease-in-out;
+    background-color: var(--clr-thebest);
+    cursor: pointer;
+}
+
+
+
+
+
+/* xsmall */
+/* @media (min-width: 375px) {
+    .menu {
+        padding-bottom: 7000rem;
+    }
+} */
+
+/* Fix for mobile (below 640px) */
+@media (max-width: 639px) {
+    .menu {
+        max-width: 18rem;
+        margin-bottom: 120rem;
+    }
+}
+
+    
+/* small */
+@media (min-width: 640px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1.1rem;
+        width: 20rem;
+        height: 28rem;
+    }
+
+    .menu__title {
+        font-size: 1.5rem;
+    }
+
+    .menu__title2 {
+        margin-top: 1rem;
+        font-size: 1.5rem;
+    }
+
+    .menu__p {
+        font-size: var(--size-lg);
+    }
+    
+}
+
+/* medium */
+@media (min-width: 768px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 1.1rem;
+        width: 22rem;
+        height: 28rem;
+        padding-bottom: 110rem;
+    }
+    
+    .menu__btn {
+        font-size: var(--size-xl);
+    }
+
+    .menu__p {
+        margin-top: 1rem;
+        margin-bottom: -1rem;
+        font-size: var(--size-xl);
+    }
+
+    
+
+}
+
+/* large */
+@media (min-width: 1024px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 20rem;
+        height: 24rem;
+        padding-bottom: 60rem;
+    }
+
+    .menu__p {
+        margin-bottom: -0.5rem;
+        font-size: var(--size-2xl);
+    }
+
+
+    .menu__image {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        align-items: center;
+        gap: 2rem;
+    }
+
+    .menu__title {
+        font-size: 1.8rem;
+        margin-bottom: 0.6rem;
+        text-align: center;
+        color: var(--clr-orange);
+    }
+        
+    .menu__title2 {
+        margin-top: 2.5rem;
+        font-size: 1.8rem;
+    }
+
+    .image--first {
+        order: 1; /* Reorder the first image to the second position */
+    }
+
+    .image--second {
+        order: 3; /* Reorder the second image to the first position */
+    }
+
+    .image--third {
+        order: 2; /* The third image stays in the third position */
+    }
+
+    .menu__btn {
+        font-size: var(--size-xl);
+        margin: 1rem;
+        padding: 0.6em 1.2em;
+    }
+
+}
+
+
+/* xlarge */
+@media (min-width: 1280px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 24rem;
+        height: 28rem;
+        padding-bottom: 70rem;
+    }
+
+    .menu__image {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        align-items: center;
+        gap: 2.5rem;
+    }
+
+    .menu__title {
+        padding: 1rem;
+        margin-top: -2rem;
+        font-size: 2rem;
+        text-align: center;
+        color: var(--clr-orange);
+    }
+
+    .menu__title2 {
+        margin-top: 3.5rem;
+        font-size: 2rem;
+    }
+
+    .image--first {
+        order: 1; /* Reorder the first image to the second position */
+    }
+
+    .image--second {
+        order: 3; /* Reorder the second image to the first position */
+    }
+
+    .image--third {
+        order: 2; /* The third image stays in the third position */
+    }
+
+    .menu__btn {
+        font-size: var(--size-2xl);
+        margin-top: 1.3rem;
+        padding: 0.7em 1.3em;
+    }
+}
+
+
+/* 2xlarge */
+@media (min-width: 1536px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 24rem;
+        height: 28rem;
+    }
+
+    .menu__image {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        align-items: center;
+        gap: 6rem;
+    }
+
+    .menu__title {
+        margin-top: -2rem;
+        font-size: 2.4rem;
+        padding: 1rem;
+        text-align: center;
+        color: var(--clr-orange);
+    }
+
+    .menu__title2 {
+        margin-top: 3.8rem;
+        font-size: 2.4rem;
+    }
+
+    .image--first {
+        order: 1; /* Reorder the first image to the second position */
+    }
+
+    .image--second {
+        order: 3; /* Reorder the second image to the first position */
+    }
+
+    .image--third {
+        order: 2; /* The third image stays in the third position */
+    }
+
+    .menu__btn {
+        font-size: var(--size-2xl);
+        padding: 0.7em 1.4em;
+    }
+}
+
+/* 3xlarge */
+@media (min-width: 1920px) {
+    .menu {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        width: 26rem;
+        height: 28rem;
+    }
+
+    .menu__image {
+        display: flex;
+        flex-direction: row;
+        justify-content: center;
+        align-items: center;
+        gap: 7rem;
+    }
+
+    .menu__title {
+        font-size: 2.4rem;
+        padding: 1rem;
+        margin-bottom: 1.5rem;
+        text-align: center;
+        color: var(--clr-orange);
+    }
+
+    .image--first {
+        order: 1; /* Reorder the first image to the second position */
+    }
+
+    .image--second {
+        order: 3; /* Reorder the second image to the first position */
+    }
+
+    .image--third {
+        order: 2; /* The third image stays in the third position */
+    }
+
+    .menu__btn {
+        font-size: 1.65rem;
+        margin-top: 1.5rem;
+        padding: 0.7em 1.4em;
+    }
+
+}
+
+.test {
+    margin: 10rem;
+}

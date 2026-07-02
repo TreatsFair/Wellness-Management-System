@@ -1,0 +1,353 @@
+.pics {
+    margin-top: 3rem;
+}
+
+.pics__grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 0.75rem; /* Adjust the gap between the images */
+    width: 100%;
+    max-width: 600px; /* Set a max width for the grid */
+    margin: 0 auto;
+}
+
+.pics__grid img {
+    border-radius: 0.70em;
+    background-color: var(--clr-peach);
+    padding: 1%;
+    width: 100%;
+    height: 150px; /* Maintain aspect ratio */
+    object-fit: cover; /* Cover the image within the grid cell */
+    position: relative;
+    z-index: 1;
+    transition: transform 0.3s ease, opacity 400ms ease;
+    overflow: hidden; /* Prevents overflow issues */
+}
+
+.pics__grid img:hover {
+    transform: scale(1.04); /* Slightly enlarges the image on hover */
+    transition: transform 0.3s ease;
+}
+
+.pics__textcontainer {
+    padding: 2%;
+    background: var(--clr-peach);
+    margin-bottom: 1rem;
+    border: 0.8px solid var(--clr-orange);
+    border-left: none;
+    border-right: none;
+}
+
+
+.pics__title{
+    font-size: 0.9rem;
+    color: var(--clr-orange);
+    margin-bottom: 1%;
+}
+
+.pics__text {
+    font-size: 11px;
+    color: var(--clr-orange);
+    line-height: 1.2rem;
+}
+
+iframe {
+    max-width: 100%;
+    background-clip: border-box;
+    border: 2px solid var(--clr-dark);
+    border-radius: 2%;
+}
+
+.pics__video {
+    text-align: center;
+    margin-top: 1rem;
+}
+
+.pics__controls {
+    text-align: center;
+    display: flex;
+    justify-content: center;
+    gap: 2rem;
+    margin-top: 0rem;
+    margin-bottom: 3rem;
+    margin-left: 1rem;
+    margin-right: 1rem;
+}
+
+/* The Pill Button Style */
+.toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 25px; /* Space between dot and text */
+    padding: 0.5rem;
+    border-radius: 50px; /* Full rounded pill shape */
+    border: none;
+    cursor: pointer;
+    font-family: 'General Sans', sans-serif;
+    font-size: var(--size-sm);
+    font-weight: 600;
+    transition: all 0.3s ease;
+    width: 13rem; 
+    
+    /* Default State (Inactive) - Light Background */
+    background-color: #e2e8f0; /* Light grey/white */
+    color: var(--clr-dark);
+    box-shadow: 0 2px 5px rgba(0,0,0,0.05);
+}
+
+/* The "Dot" Circle */
+.toggle-btn::before {
+    content: '';
+    display: block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background-color: var(--clr-orange); /* Green dot when inactive */
+    transition: background-color 0.3s ease;
+}
+
+.toggle-btn:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 5px 15px rgba(0,0,0,0.1);
+}
+
+.toggle-btn.active {
+    background-color: var(--clr-orange);
+    color: #ffffff;
+}
+
+.toggle-btn.active::before {
+    background-color: #ffffff;
+}
+
+.btn-subtext {
+    display: block;
+    font-size: 0.86em;
+    font-weight: 400;
+    margin-top: 2px;
+    opacity: 0.9;
+}
+
+/* xsmall */
+@media (min-width: 475px) {
+    .pics__controls {
+        margin-top: 0rem;
+        margin-bottom: 3rem;
+    }
+
+
+    .pics {
+    margin-top: 3rem;
+    }
+
+    .pics__textcontainer {
+        padding: 4%;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 400px;
+        height: 200px;
+    }
+}
+    
+/* small */
+@media (min-width: 640px) {
+    
+    .pics {
+        margin-top: 3rem;
+    }
+
+    .pics__grid img {
+        height: 200px;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 430px;
+        height: 250px;
+    }
+}
+
+/* medium */
+@media (min-width: 768px) {
+    .toggle-btn {
+        width: 12rem; 
+        padding: 0.6rem 0;
+        font-size: var(--size-sm);
+    }
+
+    .pics__controls {
+        margin-top: 0rem;
+        margin-bottom: 3rem;
+    }
+
+    .pics {
+        margin-top: 3rem;
+    }
+
+    .pics__title{
+        font-size: 1.2rem;
+        color: var(--clr-orange);
+        margin-bottom: 1%;
+    }
+    
+    .pics__text {
+        font-size: 15px;
+        color: var(--clr-orange);
+        line-height: 1.2rem;
+    
+    }
+
+    .pics__textcontainer {
+        padding: 3%;
+    }
+
+    .pics__grid img {
+        height: 250px;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 460px;
+        height: 280px;
+    }
+}
+
+/* large */
+@media (min-width: 1024px) {
+    .pics__controls {
+        margin-top: -5rem;
+        margin-bottom: 3rem;
+    }
+
+    .pics {
+        margin-top: 3rem;
+    }
+
+    .pics__title{
+        font-size: 1.35rem;
+        color: var(--clr-orange);
+        margin-bottom: 2.5%;
+    }
+    
+    .pics__text {
+        font-size: 16px;
+        color: var(--clr-orange);
+        line-height: 1.8rem;
+    
+    }
+
+    .pics__textcontainer {
+        padding: 3%;
+    }
+
+    .pics__grid img {
+        height: 300px;
+    }
+}
+
+/* xlarge */
+@media (min-width: 1280px) {
+    .pics__controls {
+        margin-top: -5rem;
+        margin-bottom: 3rem;
+    }
+
+    .pics {
+        margin-top: 4rem;
+    }
+
+    .pics__grid {
+        max-width: 800px; /* Set a max width for the grid */
+        gap: 1rem;
+        margin-top: 1.2rem;
+        margin-bottom: 1.2rem;
+    }
+
+    .pics__textcontainer {
+        padding-left: 7rem;
+        padding-right: 7rem;
+    }
+
+    .pics__grid img {
+        height: 350px;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 580px;
+        height: 360px;
+    }
+}
+
+
+/* 2xlarge */
+@media (min-width: 1536px) {
+    .pics {
+        margin-top: 5rem;
+    }
+    
+    .pics__grid {
+        margin-top: 2rem;
+        margin-bottom: 2rem;
+        gap: 1.5rem;
+        grid-template-columns: repeat(3, 1fr);
+    }
+    .pics__title{
+        font-size: 1.7rem;
+        color: var(--clr-orange);
+        margin-bottom: 2.5%;
+    }
+    
+    .pics__text {
+        font-size: 20px;
+        color: var(--clr-orange);
+        line-height: 1.8rem;
+    }
+
+    .pics__textcontainer {
+        padding-left: 9rem;
+        padding-right: 9rem;
+    }
+
+
+    .pics__grid {
+        max-width: 1200px; /* Set a max width for the grid */
+
+    }
+
+    .pics__grid img {
+        height: 400px;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 700px;
+        height: 400px;
+    }
+}
+
+/* 3xlarge */
+@media (min-width: 1920px) {
+    .pics__controls {
+        margin-top: -5rem;
+        margin-bottom: 3rem;
+    }
+
+    .pics {
+        margin-top: 6rem;
+    }
+
+    .pics__textcontainer {
+        padding-left: 14rem;
+        padding-right: 14rem;
+    }
+
+    iframe {
+        max-width: 200%;
+        width: 700px;
+        height: 400px;
+    }
+}

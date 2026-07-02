@@ -1,0 +1,157 @@
+.booking { 
+    background-image: url("../pics/bookingpic.jpg");
+    background-size: cover;
+    background-position: center;
+    background-repeat: no-repeat;
+    height: 50vh;
+    display: flex; /* Use Flexbox to center child elements */
+    justify-content: center; /* Center horizontally */
+    align-items: center; /* Center vertically */
+    position: relative;
+}
+
+.booking::before {
+    content: '';
+    position: absolute;
+    background-color: rgba(0, 0, 0, 0.5); /* Black overlay with 50% transparency */
+    z-index: 1;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 100%;
+}
+
+
+.booking__info {
+    position: relative; 
+    z-index: 2;
+    text-align: center; /* Center the text  */
+    color: var(--clr-light);
+}
+
+.booking__btn {
+    background-color: var(--clr-light);
+    border: none;
+}
+
+.booking__title {
+    margin-bottom: 30px;
+}
+
+.booking__number {
+    margin-top: 20px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.booking__number h2{
+    text-decoration: none;
+    color: white;
+}
+
+.booking__number h2 a {
+    color: white;
+    text-decoration: none;
+}
+
+
+/* xsmall */
+/* @media (min-width: 475px) {
+
+} */
+    
+    
+/* small */
+/* @media (min-width: 640px) {
+} */
+
+/* medium */
+@media (min-width: 768px) {
+    .booking {
+        padding: 12rem;
+    }
+    
+    .booking__title {
+        font-size: var(--size-3xl);
+    }
+
+    .booking__info p{
+        font-size: var(--size-lg);
+    }
+
+    .booking__number {
+        font-size: var(--size-xl);
+    }
+
+    .booking__number h2 {
+        padding-bottom: 6px; /* Adjust the padding as needed */
+    }
+
+    .booking__btn {
+        margin-top: 1rem;
+        font-size: var(--size-lg);
+    }
+}
+
+/* large */
+@media (min-width: 1024px) {
+    .booking__number h2 {
+        padding-bottom: 6px; /* Adjust the padding as needed */
+    }
+}
+
+/* xlarge */
+/* @media (min-width: 1280px) {
+} */
+
+
+/* 2xlarge */
+@media (min-width: 1536px) {
+    .booking {
+        padding: 13.5rem;
+    }
+
+    .booking__title {
+        font-size: var(--size-4xl);
+        margin-bottom: 40px;
+    }
+
+    .booking__info p{
+        font-size: var(--size-xl);
+    }
+
+    .booking__number {
+        font-size: var(--size-2xl);
+    }
+
+    .booking__number h2 {
+        padding-bottom: 10px; /* Adjust the padding as needed */
+    }
+
+    .booking__btn {
+        margin-top: 1rem;
+        font-size: var(--size-xl);
+    }
+}
+
+/* 3xlarge */
+@media (min-width: 1920px) { 
+    .booking {
+        padding: 16rem;
+    }
+
+    .booking__title {
+        font-size: var(--size-4xl);
+        margin-bottom: 46px;
+    }
+
+    .booking__number h2 {
+        padding-bottom: 16px; /* Adjust the padding as needed */
+    }
+
+    .booking__btn {
+        margin-top: 1rem;
+        font-size: var(--size-2xl);
+    }
+}

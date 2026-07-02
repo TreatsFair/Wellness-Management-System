@@ -1,0 +1,257 @@
+/* =========================================================
+   PAGE LAYOUT
+========================================================= */
+
+.menu-page {
+  text-align: left;
+}
+
+.menu-page.container {
+  margin-top: 6.7rem;
+  max-width: 1200px;
+  padding-left: 3rem;
+  padding-right: 3rem;
+}
+
+@media (max-width: 768px) {
+  .menu-page.container {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}
+
+.menu-page__title {
+  font-size: var(--size-4xl);
+  margin-bottom: 0.5rem;
+  text-align: center;
+}
+
+.menu-page__subtitle {
+  font-weight: 500;
+  padding: 1rem;
+  font-size: var(--size-2xl);
+  margin-bottom: 3rem;
+  text-align: center;
+}
+
+/* =========================================================
+   SERVICES GRID
+========================================================= */
+
+.menu-services-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2.5rem;
+}
+
+@media (min-width: 768px) {
+  .menu-services-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .menu-services-grid {
+    gap: 3rem;
+  }
+}
+
+/* =========================================================
+   SERVICE CARD
+========================================================= */
+
+.menu-service-card {
+  background: #f6f2ec;
+  border-radius: 24px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 40px rgba(0,0,0,0.08);
+
+  transition:
+    transform 0.35s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.35s ease;
+  will-change: transform;
+}
+
+.menu-service-card:hover {
+  transform: translateY(-8px);
+  box-shadow: 0 25px 45px rgba(0,0,0,0.14);
+}
+
+/* Image */
+.menu-service-card img {
+  width: 100%;
+  height: 280px;
+  object-fit: cover;
+  transition: transform 0.6s ease;
+}
+
+.menu-service-card:hover img {
+  transform: scale(1.05);
+}
+
+/* =========================================================
+   CARD CONTENT
+========================================================= */
+
+.menu-service-content {
+  padding: 2.75rem 3rem;
+}
+
+@media (max-width: 768px) {
+  .menu-service-content {
+    padding: 2rem 1.75rem;
+  }
+}
+
+
+
+.menu-service-title {
+  font-size: 2rem;
+  margin-bottom: 1rem;
+  transition: transform 0.3s ease;
+}
+
+.menu-service-card:hover .menu-service-title {
+  transform: translateY(-2px);
+}
+
+.menu-service-desc {
+  max-width: 620px;
+  line-height: 1.7;
+  color: #555;
+  margin-bottom: 1.25rem;
+}
+
+.menu-service-note {
+  font-size: 0.85rem;
+  font-style: italic;
+  color: #777;
+  margin-bottom: 2rem;
+}
+
+@media (max-width: 1024px) {
+  .menu-service-title {
+    font-size: 1.67rem;
+    margin-bottom: 1rem;
+    transition: transform 0.3s ease;
+    }
+
+    .menu-page__title {
+    font-size: var(--size-3xl);
+    margin-bottom: 0.5rem;
+    text-align: center;
+    }
+
+    .menu-page__subtitle {
+    font-weight: 500;
+    padding: 1rem;
+    font-size: var(--size-xl);
+    margin-bottom: 3rem;
+    text-align: center;
+    }
+    
+}
+
+/* =========================================================
+   DURATIONS
+========================================================= */
+
+.menu-service-durations {
+  display: grid;
+  grid-template-columns: 140px repeat(2, minmax(80px, 1fr));
+  gap: 0rem;
+  font-size: 0.95rem;
+  color: #444;
+  margin-bottom: 1.25rem;
+}
+
+@media (max-width: 768px) {
+  .menu-service-durations {
+    grid-template-columns: 110px repeat(2, 1fr);
+    gap: 0.5rem;
+  }
+}
+
+@media (max-width: 520px) {
+  .menu-service-durations {
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  }
+}
+
+.menu-service-durations,
+.price-row {
+  align-items: center;
+}
+
+.menu-service-durations i {
+  display: inline-flex;
+   /* fixed width like fa-fw */
+  justify-content: center;
+}
+
+@media (max-width: 431px) {
+    .menu-service-durations i {
+        display: none;
+    }
+
+    .menu-service-durations {
+        grid-template-columns: 110px repeat(2, 1fr);
+    }
+}
+
+
+/* =========================================================
+   PRICING TABLE
+========================================================= */
+
+.menu-service-prices {
+  border-top: 1px solid rgba(0,0,0,0.1);
+  padding-top: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.price-row {
+  display: grid;
+  grid-template-columns: 140px repeat(2, minmax(80px, 1fr));
+  align-items: center;
+  font-size: 1rem;
+  gap: 0.75rem;
+}
+
+@media (max-width: 768px) {
+  .price-row {
+    grid-template-columns: 110px repeat(2, 1fr);
+  }
+}
+
+.price-row span {
+  color: #666;
+}
+
+.price-gold {
+  color: #b89b5e;
+  font-weight: 600;
+  transition: transform 0.3s ease;
+}
+
+.menu-service-card:hover .price-gold {
+  transform: translateY(-1px);
+}
+
+/* =========================================================
+   ACCESSIBILITY
+========================================================= */
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-service-card,
+  .menu-service-card img,
+  .menu-service-title,
+  .price-gold {
+    transition: none;
+    transform: none;
+  }
+}

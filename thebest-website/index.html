@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link
+      href="https://api.fontshare.com/v2/css?f[]=general-sans@400,700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      rel="icon"
+      href="./pics/FB profile-180x180px-02.jpg"
+      type="image/x-icon"
+    />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css"
+    />
+    <link
+      href="https://fonts.googleapis.com/icon?family=Material+Icons"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="./styles/modern-normalise.css" />
+    <link rel="stylesheet" href="./styles/styles.css" />
+    <link rel="stylesheet" href="./styles/utils.css" />
+    <link rel="stylesheet" href="./components/header.css" />
+    <link rel="stylesheet" href="./components/hero.css" />
+    <link rel="stylesheet" href="./components/menu.css" />
+    <link rel="stylesheet" href="./components/pics.css" />
+    <link rel="stylesheet" href="./components/testimonial.css" />
+    <link rel="stylesheet" href="./components/booking.css" />
+    <link rel="stylesheet" href="./components/footer.css" />
+    <link rel="stylesheet" href="./components/mobile-nav.css" />
+    <link rel="stylesheet" href="./components/location.css" />
+    <title>The Best Family Wellness</title>
+  </head>
+  <body>
+    <article class="headers container">
+      <header class="header container">
+        <div class="logo-wrapper">
+          <img
+            src="./pics/FB_profile-180x180px-02-removebg-preview-cropped.png"
+            alt="logo"
+            class="header-logo"
+          />
+        </div>
+        <div class="widgets-wrapper">
+          <nav>
+            <!--menu is under header therefore BEM naming convention "header__menu"-->
+            <ul class="header__menu">
+              <li>
+                <a class="header__link" href="./index.html">Home</a>
+              </li>
+              <li>
+                <a class="header__link" href="#menu">Menu</a>
+              </li>
+              <li>
+                <a class="header__link" href="#locations">Location</a>
+              </li>
+              <li>
+                <a class="header__link" href="#contacts">Contact</a>
+              </li>
+            </ul>
+            <button class="header__bars">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke-width="1.5"
+                stroke="currentColor"
+              >
+                <path
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5"
+                />
+              </svg>
+            </button>
+          </nav>
+        </div>
+        <div class="header__button">
+          <a
+            href="https://linktr.ee/thebestwellness"
+            class="header__btn btn"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Booking Now
+          </a>
+        </div>
+      </header>
+    </article>
+
+    <!-- mobile navigation  -->
+    <div class="mobile-nav">
+      <nav>
+        <ul class="mobile-nav__menu">
+          <li>
+            <a href="./index.html" class="mobile-nav__link">Home</a>
+          </li>
+          <li>
+            <a href="#menu" class="mobile-nav__link">Menu</a>
+          </li>
+          <li>
+            <a href="#locations" class="mobile-nav__link">Location</a>
+          </li>
+          <li>
+            <a href="#contacts" class="mobile-nav__link">Contact</a>
+          </li>
+          <li class="mobile-nav__link-line"></li>
+          <li>
+            <a
+              href="https://linktr.ee/thebestwellness"
+              class="mobile-nav__btn header__btn btn"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Booking Now
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+    <!-- end of mobile navgiation -->
+
+    <main>
+      <section class="hero container">
+        <div class="slideUp hero__content">
+          <h2 class="hero__title">The Best Family Wellness</h2>
+          <hr />
+          <p class="hero__text">
+            <b>The Best Wellness and Relaxation for everyone</b>
+          </p>
+        </div>
+        <a
+          href="https://linktr.ee/thebestwellness"
+          class="menu__btn btn"
+          target="_blank"
+          rel="noopener noreferrer"
+          style="
+            margin-top: 2rem;
+            position: relative;
+            z-index: 10;
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+            display: inline-block;
+            border-radius: 50px; /* Makes it fully oval */
+            padding-left: 3rem; /* Widen it slightly to look elegant */
+            padding-right: 3rem; /* Widen it slightly to look elegant */
+          "
+        >
+          Book Now
+        </a>
+      </section>
+
+      <section id="menu" class="container section">
+        <h2
+          class="card menu__title"
+          style="text-align: center; margin-bottom: 0.5rem"
+        >
+          Our Signature Services
+        </h2>
+        <h2
+          class="card menu__p"
+          style="text-align: center; margin-bottom: 2rem"
+        ></h2>
+        <div class="home-services-grid">
+          <div class="home-service-card">
+            <img
+              class="menu__img"
+              src="./pics/best_footmassage2.jpg"
+              alt="Foot Massage"
+            />
+            <div class="card-text-content">
+              <h3 class="menu__title2">Foot Massage</h3>
+              <p>
+                A relaxing foot massage that improves circulation and eases
+                tension. Includes a free herbal soak to soothe the feet.
+              </p>
+            </div>
+          </div>
+
+          <div class="home-service-card">
+            <img
+              class="menu__img"
+              src="./pics/beauty-spa.jpg"
+              alt="Thai Massage"
+            />
+            <div class="card-text-content">
+              <h3 class="menu__title2">Thai Body Massage</h3>
+              <p>
+                An energizing no-oil massage using stretches and pressure points
+                to release deep tension and restore flexibility.
+              </p>
+            </div>
+          </div>
+
+          <div class="home-service-card">
+            <img
+              class="menu__img"
+              src="./pics/best_oilmassage.jpg"
+              alt="Full Body Oil Massage"
+            />
+            <div class="card-text-content">
+              <h3 class="menu__title2">Aroma Oil Traditional Body Massage</h3>
+              <p>
+                A calming full-body massage with aromatic oils to soothe stress,
+                relax muscles and nourish the skin.
+              </p>
+            </div>
+          </div>
+
+          <div class="home-service-card">
+            <img
+              class="menu__img"
+              src="./pics/best_combo.jpg"
+              alt="Combo Service"
+            />
+            <div class="card-text-content">
+              <h3 class="menu__title2">Foot & Aroma Oil Combo</h3>
+              <p>
+                A combination of foot massage and full-body aroma oil therapy.
+                Includes a free herbal soak to relax before your treatment.
+              </p>
+            </div>
+          </div>
+        </div>
+        <!-- <div style="text-align: center; margin-top: 3rem">
+          <a href="./menu.html" class="menu__btn btn" rel="noopener noreferrer">
+            View All Services
+          </a>
+        </div> -->
+      </section>
+
+      <section id="locations" class="pics container section">
+        <h1 class="pics__title" style="text-align: center; margin-bottom: 2rem">
+          Our Locations
+        </h1>
+
+        <div class="location-cards-grid">
+          <!-- Location 1: Taman Wahyu - Now using home-service-card structure -->
+          <div class="home-service-card location-card-override">
+            <img
+              class="menu__img"
+              src="./pics/thebestwellness_outside.jpg"
+              alt="Kepong Branch"
+            />
+            <div class="card-text-content location-card-content">
+              <h2 class="location__title">The Best Family Wellness @ Kepong</h2>
+              <p class="location__address">
+                50G, Jalan Seri Utara 1, Taman Wahyu, 68100, KL
+              </p>
+              <p class="location__phone">
+                Call: <a href="https://wa.me/60125262551">012-5262 551</a>
+              </p>
+              <div class="location__map-link">
+                <a
+                  href="https://maps.app.goo.gl/zSSCi66QQdhmQvHh8"
+                  target="_blank"
+                >
+                  <i class="material-icons">&#xe55f;</i> Get Directions
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div class="home-service-card location-card-override">
+            <img
+              class="menu__img"
+              src="./pics/thebest_setapak_outside.jpg"
+              alt="Setaptak Branch"
+            />
+            <div class="card-text-content location-card-content">
+              <h2 class="location__title">
+                The Best Family Wellness @ Setapak
+              </h2>
+              <p class="location__address">
+                G13-A, PV128, Jalan Genting Kelang, Setapak, 53300, KL
+              </p>
+              <p class="location__phone">
+                Call: <a href="https://wa.me/60127449266">012-7449 266</a>
+              </p>
+              <div class="location__map-link">
+                <a
+                  href="https://maps.app.goo.gl/ntA4hqhd4zcc3BiE9"
+                  target="_blank"
+                >
+                  <i class="material-icons">&#xe55f;</i> Get Directions
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="container section">
+        <div class="pics__controls">
+          <button class="toggle-btn active" data-index="0">
+            <div style="text-align: left; line-height: 1.2">
+              Kepong
+              <span class="btn-subtext">@ Taman Wahyu</span>
+            </div>
+          </button>
+          <button class="toggle-btn" data-index="1">
+            <div style="text-align: left; line-height: 1.2">
+              Setapak
+              <span class="btn-subtext">@ PV128</span>
+            </div>
+          </button>
+        </div>
+        <div class="pics__grid">
+          <img src="./pics/thebestwellness_outside.jpg" alt="outside" />
+          <img src="./pics/thebestwellness_front.jpg" alt="front" />
+          <img src="./pics/thebestwellness_counter.jpg" alt="counter" />
+          <img src="./pics/thebestwellness_massagearea.jpg" alt="" />
+          <img src="./pics/thebestwellness_massaging.jpg" alt="massaging" />
+          <img src="./pics/thhebestwellness_foot.jpg" alt="foot" />
+        </div>
+      </section>
+
+      <section class="testimonial container section">
+        <h1 class="testimonial__title">What They Say</h1>
+        <div class="testimonial__cards">
+          <div class="testimonial__card">
+            <p>
+              Massage is good and we selected the RM99 package price which
+              includes of head massage and guasha / cupping! Really enjoy myself
+              here! Overall this is a very good and comfortable place, would
+              come very often!
+            </p>
+            <div class="testimonial__author">Tan Xinyi</div>
+          </div>
+          <div class="testimonial__card">
+            <p>
+              I would like to say the prices are very reasonable bcs u can enjoy
+              more than only massage. The staff are very nice and they try their
+              best to make u comfortable! I love their services and their boss
+              attitude. Would come again!
+            </p>
+            <div class="testimonial__author">Britney Ho</div>
+          </div>
+          <div class="testimonial__card">
+            <p>
+              Was a very good relaxing massage. I was surprised with the foot
+              massage on the remote controlled bed, so u can have your foot
+              massage while lying on the bed for only the price of just only
+              RM39!
+            </p>
+            <div class="testimonial__author">Maha Laxshmi</div>
+          </div>
+        </div>
+      </section>
+
+      <section id="contacts" class="booking container section">
+        <div class="booking__info">
+          <h2 class="booking__title">Bookings</h2>
+          <p><b>Book your session today!</b></p>
+          <br />
+          <p><b>Call or Whatsapp Us for Bookings</b></p>
+          <div class="booking__number">
+            <p><b>(Setapak)</b></p>
+            <h2><a href="tel:0367894116">012 - 7449 266</a></h2>
+            <p>
+              <b>(Kepong)<br /> </b>
+            </p>
+            <h2><a href="tel:0125262551">012 - 5262 551 </a></h2>
+          </div>
+          <a
+            href="https://linktr.ee/thebestwellness"
+            class="booking__btn btn"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Book Now
+          </a>
+        </div>
+      </section>
+
+      <div id="location" class="footer-background">
+        <div class="footer container">
+          <img
+            class="footer__logo"
+            src="./pics/thebestwellnesspfp-removebg-preview.png"
+            alt="logo"
+          />
+
+          <!-- <div class="footer__locations">
+            <h2 class="footer__title">Our Location</h2>
+            <p class="footer__text"><b>The Best Massage Family Wellness</b></p>
+            <p class="footer__address">
+              No 50G, Jalan Seri Utara 1, Taman Wahyu, 68100, Kuala Lumpur.
+            </p>
+            <div class="footer__location">
+              <a
+                href="https://maps.app.goo.gl/zSSCi66QQdhmQvHh8"
+                target="_blank"
+              >
+                <i class="material-icons">&#xe55f;</i> Get Directions
+              </a>
+               <iframe src="https://www.google.com/maps/embed?pb=!1m18!1m12!1m3!1d3983.4958286092356!2d101.6712707!3d3.2259867!2m3!1f0!2f0!3f0!3m2!1i1024!2i768!4f13.1!3m3!1m2!1s0x31cc47b01add2605%3A0x25e25d724427f2ff!2sThe%20Best%20Massage%20Family%20Wellness!5e0!3m2!1sen!2smy!4v1725611788929!5m2!1sen!2smy" 
+                            width="200" height="100" style="border:0;" allowfullscreen="" loading="lazy" referrerpolicy="no-referrer-when-downgrade"></iframe>"  
+            </div>
+          </div> -->
+
+          <div class="footer__opening-hrs">
+            <div class="footer__hrtitle">
+              <i class="fa-solid fa-clock"></i> <b>Opening Hours - Kepong</b>
+            </div>
+            <!-- <i class="fa-regular fa-clock"></i> -->
+            <div class="footer__hours">
+              <p>Monday to Thursday:</p>
+              <p>11AM - 11PM</p>
+            </div>
+            <div class="footer__hours">
+              <p>Friday to Sunday:</p>
+              <p>11AM - 11:30PM</p>
+            </div>
+          </div>
+
+          <div class="footer__opening-hrs">
+            <div class="footer__hrtitle">
+              <i class="fa-solid fa-clock"></i> <b>Opening Hours - Setapak</b>
+            </div>
+            <div class="footer__hours">
+              <p>Weekdays:</p>
+              <p>10:30AM - 11PM</p>
+            </div>
+            <div class="footer__hours">
+              <p>Weekends:</p>
+              <p>10:30AM - 11PM</p>
+            </div>
+          </div>
+
+          <div class="footer__socials">
+            <hr class="custom-hr" />
+            <b>
+              <a
+                href="https://www.facebook.com/share/RPPDrUBPm72VphhW/?mibextid=LQQJ4d"
+                target="_blank"
+                class="footer__fb"
+              >
+                <p>Facebook</p>
+              </a>
+              <a
+                href="https://www.instagram.com/thebestmassage.kl?igsh=MXNzZXJ3YnZyMGpybA%3D%3D&utm_source=qr"
+                target="_blank"
+                class="footer__insta"
+              >
+                <p>Instagram</p>
+              </a>
+              <a
+                href="https://www.tiktok.com/@thebestwellness?_t=8pUIcf3N2wa&_r=1"
+                target="_blank"
+                class="footer__tiktok"
+              >
+                <p>TikTok</p>
+              </a>
+              <a
+                href="https://www.xiaohongshu.com/user/profile/67133a2f000000001d023183"
+                target="_blank"
+                class="footer__xhs"
+              >
+                <p>XiaoHongShu</p>
+              </a>
+            </b>
+            <hr class="custom-hr" />
+          </div>
+        </div>
+
+        <div class="footer__copyright">
+          <p>Copyright &copy; 2026 The Best Wellness Sdn. Bhd.</p>
+          <p>All Rights Reserved.</p>
+        </div>
+      </div>
+
+      <!--             
+            <div class="footer container">
+                <img class="footer__logo" src="./pics/thebestwellnesslogoclearcropppednobg.png" alt="logo">
+                
+                <div class="footer__content">
+                    <div class="footer__address-section">
+                        <h2 class="footer__title">Our Location</h2>
+                        <p class="footer__text"><b>The Best Massage Family Wellness</b></p>
+                        <p class="footer__address">No 50G, Jalan Seri Utara 1, Taman Wahyu, 68100, Kuala Lumpur.</p>
+                        <div class="footer__location">
+                            <a href="https://maps.app.goo.gl/zSSCi66QQdhmQvHh8" target="_blank">
+                                <i class="material-icons">&#xe55f;</i> Get Directions
+                            </a>
+                        </div>
+                    </div>
+                    
+                    <div class="footer__opening-hrs-section">
+                        <div class="footer__hrtitle">
+                            <i class="fa-solid fa-clock"></i> <b>Opening Hours</b>
+                        </div>
+                        <div class="footer__hours">
+                            <p>Weekdays:</p>
+                            <p>11AM - 11PM</p>
+                        </div>
+                        <div class="footer__hours">
+                            <p>Weekends:</p> 
+                            <p>10AM - 12AM</p>
+                        </div>
+                    </div>
+                </div>
+            
+                <div class="footer__socials">
+                    <hr class="custom-hr">
+                    <b>
+                        <a href="https://www.facebook.com/share/RPPDrUBPm72VphhW/?mibextid=LQQJ4d" target="_blank" class="footer__fb"><p>Facebook</p></a>
+                        <a href="https://www.instagram.com/thebestmassage.kl" target="_blank" class="footer__insta"><p>Instagram</p></a>
+                        <a href="https://www.tiktok.com/@thebestwellness" target="_blank" class="footer__tiktok"><p>TikTok</p></a>
+                        <a href="https://www.xiaohongshu.com/user/profile/6663098f0000000003032f1b" target="_blank" class="footer__xhs"><p>Xiaohongshu</p></a>
+                    </b>
+                    <hr class="custom-hr">
+                </div>
+            
+                <div class="footer__copyright">
+                    <p>Copyright &copy; 2024 The Best Wellness Sdn. Bhd.</p>
+                    <p>All Rights Reserved.</p>
+                </div>
+            </div> -->
+    </main>
+
+    <script src="./js/main.js"></script>
+    <script src="./js/mobile-nav.js"></script>
+    <script src="./js/disable-card-links.js"></script>
+    <script src="./js/image-gallery.js"></script>
+  </body>
+</html>
