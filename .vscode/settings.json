@@ -1,5 +1,7 @@
 {
     "cmake.sourceDirectory": "C:/Users/chinh/Documents/Wellness-Management-System/thebest-app/frontend/linux",
     "dart.projectSearchDepth": 3,
-    "liveServer.settings.root": "/thebest-website"
+    "liveServer.settings.root": "/thebest-website",
+    "java.import.gradle.enabled": false,
+    "java.import.maven.enabled": false,
 }

@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Book a wellness treatment at The Best Family Wellness in Kepong or Setapak."
+    />
+    <link rel="preconnect" href="https://api.fontshare.com" />
+    <link
+      href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="./pics/transparent logo.png" />
+    <link rel="stylesheet" href="./styles/modern-normalise.css" />
+    <link rel="stylesheet" href="./styles/booking-page.css" />
+    <link rel="stylesheet" href="./styles/booking-responsive.css" />
+    <title>Book an Appointment | The Best Family Wellness</title>
+  </head>
+  <body>
+    <header class="booking-header">
+      <a class="brand" href="./index.html" aria-label="The Best Family Wellness home">
+        <img
+          src="./pics/transparent logo.png"
+          alt="The Best Family Wellness"
+        />
+      </a>
+      <nav class="booking-nav" aria-label="Main navigation">
+        <a href="./index.html">Home</a>
+        <a href="./menu.html">Menu</a>
+        <a href="./index.html#locations">Location</a>
+        <a href="./index.html#contacts">Contact</a>
+      </nav>
+      <a class="exit-booking" href="./index.html">Exit booking</a>
+    </header>
+
+    <main class="booking-shell">
+      <section class="booking-intro">
+        <p class="eyebrow">Reserve your time to unwind</p>
+        <h1>Your moment of calm,<br /><em>beautifully planned.</em></h1>
+        <p>Choose your preferred outlet, treatment and time. We’ll take care of the rest.</p>
+      </section>
+
+      <div class="mobile-progress" aria-live="polite">
+        <div class="mobile-progress-row">
+          <span id="mobile-step-label">Outlet</span>
+          <div class="mobile-progress-dots" aria-hidden="true">
+            <i class="is-current" data-progress-dot="1"></i>
+            <i data-progress-dot="2"></i>
+            <i data-progress-dot="3"></i>
+            <i data-progress-dot="4"></i>
+            <i data-progress-dot="5"></i>
+          </div>
+          <b id="mobile-step-count">Step 1 of 5</b>
+        </div>
+      </div>
+
+      <nav class="stepper" aria-label="Booking progress">
+        <button class="step is-active" data-step-target="1" type="button">
+          <span>1</span><b>Outlet</b>
+        </button>
+        <i></i>
+        <button class="step" data-step-target="2" type="button" disabled>
+          <span>2</span><b>Treatment</b>
+        </button>
+        <i></i>
+        <button class="step" data-step-target="3" type="button" disabled>
+          <span>3</span><b>Therapist</b>
+        </button>
+        <i></i>
+        <button class="step" data-step-target="4" type="button" disabled>
+          <span>4</span><b>Date & time</b>
+        </button>
+        <i></i>
+        <button class="step" data-step-target="5" type="button" disabled>
+          <span>5</span><b>Details</b>
+        </button>
+      </nav>
+
+      <div class="booking-layout">
+        <div class="booking-content">
+          <section class="booking-panel is-active" data-panel="1">
+            <div class="panel-heading">
+              <div>
+                <span class="section-number">01</span>
+                <h2>Where would you like to visit?</h2>
+              </div>
+              <p>Services and availability are tailored to each outlet.</p>
+            </div>
+
+            <div class="outlet-grid" id="outlet-options">
+              <button class="outlet-card" type="button" data-outlet="kepong">
+                <span class="card-image">
+                  <img src="./pics/thebestwellness_outside.jpg" alt="The Best Family Wellness Kepong exterior" />
+                  <span class="open-pill"><i></i> Open today</span>
+                </span>
+                <span class="card-body">
+                  <span class="selection-dot" aria-hidden="true"></span>
+                  <span>
+                    <small>Kuala Lumpur</small>
+                    <strong>Kepong · Taman Wahyu</strong>
+                    <span>50G, Jalan Seri Utara 1, Taman Wahyu</span>
+                    <span class="card-meta">11:00 AM – 11:00 PM</span>
+                  </span>
+                </span>
+              </button>
+
+              <button class="outlet-card" type="button" data-outlet="setapak">
+                <span class="card-image">
+                  <img src="./pics/thebest_setapak_outside.jpg" alt="The Best Family Wellness Setapak exterior" />
+                  <span class="open-pill"><i></i> Open today</span>
+                </span>
+                <span class="card-body">
+                  <span class="selection-dot" aria-hidden="true"></span>
+                  <span>
+                    <small>Kuala Lumpur</small>
+                    <strong>Setapak · PV128</strong>
+                    <span>G13-A, PV128, Jalan Genting Kelang</span>
+                    <span class="card-meta">10:30 AM – 11:00 PM</span>
+                  </span>
+                </span>
+              </button>
+            </div>
+          </section>
+
+          <section class="booking-panel" data-panel="2" hidden>
+            <div class="panel-heading">
+              <div>
+                <span class="section-number">02</span>
+                <h2>Choose your treatment</h2>
+              </div>
+              <p>Add one or more treatments and expand each card for more information.</p>
+            </div>
+
+            <div class="service-list" id="service-options"></div>
+          </section>
+
+          <section class="booking-panel" data-panel="3" hidden>
+            <div class="panel-heading">
+              <div>
+                <span class="section-number">03</span>
+                <h2>Choose your therapist preference</h2>
+              </div>
+              <p>We will match your preference with an eligible available therapist.</p>
+            </div>
+
+            <fieldset class="preference-fieldset">
+              <legend>Therapist preference</legend>
+              <div class="preference-grid" id="therapist-options">
+                <button class="preference-card is-selected" type="button" data-therapist="No preference">
+                  <span class="avatar avatar-any">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1.5A3.5 3.5 0 0 0 12.5 14h-5A3.5 3.5 0 0 0 4 17.5V19m14-8a3 3 0 1 0 0-6m2 14v-1.5a3.5 3.5 0 0 0-2.5-3.35M10 10a3 3 0 1 0-6 0 3 3 0 0 0 6 0Z" /></svg>
+                  </span>
+                  <span><strong>No preference</strong><small>Best availability · Recommended</small></span>
+                  <span class="radio-mark"></span>
+                </button>
+                <button class="preference-card" type="button" data-therapist="Female therapist">
+                  <span class="avatar">F</span>
+                  <span><strong>Female therapist</strong><small>Assign any available female therapist</small></span>
+                  <span class="radio-mark"></span>
+                </button>
+                <button class="preference-card" type="button" data-therapist="Male therapist">
+                  <span class="avatar">M</span>
+                  <span><strong>Male therapist</strong><small>Assign any available male therapist</small></span>
+                  <span class="radio-mark"></span>
+                </button>
+              </div>
+            </fieldset>
+
+            <label class="field therapist-comment">
+              <span>Specific therapist request <small>Optional</small></span>
+              <textarea id="therapist-comment" rows="4" placeholder="If you know the therapist's name, write it here. We will try our best to accommodate your request."></textarea>
+              <small>Requests remain subject to the therapist’s schedule and service eligibility.</small>
+            </label>
+          </section>
+
+          <section class="booking-panel" data-panel="4" hidden>
+            <div class="panel-heading">
+              <div>
+                <span class="section-number">04</span>
+                <h2>Choose your date and time</h2>
+              </div>
+              <p>Available dates and times will later come from the outlet’s live schedule.</p>
+            </div>
+
+            <div class="date-time-selection">
+              <div class="date-section">
+                <h3>Available dates</h3>
+                <div class="date-strip" id="date-options"></div>
+                <p class="availability-note">More dates will be available when live scheduling is connected.</p>
+              </div>
+              <div class="time-section">
+                <div class="time-heading">
+                  <h3>Available times</h3>
+                  <span><i></i> Available</span>
+                </div>
+                <div class="time-groups" id="time-options"></div>
+              </div>
+            </div>
+          </section>
+
+          <section class="booking-panel" data-panel="5" hidden>
+            <div class="panel-heading">
+              <div>
+                <span class="section-number">05</span>
+                <h2>A few final details</h2>
+              </div>
+              <p>Your confirmation will be sent to the details below.</p>
+            </div>
+
+            <form class="details-form" id="details-form">
+              <label class="field field-wide">
+                <span>Full name</span>
+                <input name="name" autocomplete="name" placeholder="e.g. Sarah Tan" required />
+              </label>
+              <label class="field">
+                <span>Mobile number</span>
+                <input name="phone" autocomplete="tel" inputmode="tel" placeholder="+60 12 345 6789" required />
+              </label>
+              <label class="field">
+                <span>Email address</span>
+                <input name="email" autocomplete="email" type="email" placeholder="sarah@example.com" required />
+              </label>
+              <label class="field field-wide">
+                <span>Anything we should know? <small>Optional</small></span>
+                <textarea name="notes" rows="3" placeholder="Preferences, accessibility needs or special requests"></textarea>
+              </label>
+              <label class="consent field-wide">
+                <input type="checkbox" required />
+                <span>I agree to the booking and cancellation terms and understand that changes are handled by the selected outlet.</span>
+              </label>
+            </form>
+
+          </section>
+
+          <div class="panel-actions">
+            <button class="text-button" id="back-button" type="button" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              Back
+            </button>
+            <button class="primary-button" id="continue-button" type="button" disabled>
+              Continue
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <aside class="booking-summary" id="booking-summary" aria-labelledby="review-title" aria-live="polite">
+          <div class="summary-sheet-handle" aria-hidden="true"></div>
+          <button class="summary-close" id="summary-close" type="button" aria-label="Close booking summary">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          </button>
+          <article class="review-card">
+            <div class="review-heading">
+              <div>
+                <span>Your selections</span>
+                <h3 id="review-title">Booking summary</h3>
+              </div>
+              <span class="review-secure">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3m-9 0h8a2 2 0 0 1 2 2v7H6v-7a2 2 0 0 1 2-2Z" /></svg>
+                Secure checkout
+              </span>
+            </div>
+            <dl class="review-details">
+              <div><dt>Outlet</dt><dd id="review-outlet">&mdash;</dd></div>
+              <div><dt>Treatment</dt><dd id="review-services">&mdash;</dd></div>
+              <div><dt>Therapist</dt><dd id="review-therapist">No preference</dd></div>
+              <div><dt>Date & time</dt><dd id="review-datetime">&mdash;</dd></div>
+            </dl>
+            <div class="review-total">
+              <span><small>Estimated duration</small><b id="review-duration">0 minutes</b></span>
+              <span><small>Total payable</small><strong id="review-total">RM 0</strong></span>
+            </div>
+            <p class="review-note">Your selected time will be held for 15 minutes when you continue to Billplz payment.</p>
+          </article>
+        </aside>
+      </div>
+
+      <div class="summary-overlay" id="summary-overlay"></div>
+      <button class="mobile-summary-bar" id="mobile-summary-toggle" type="button" aria-controls="booking-summary" aria-expanded="false">
+        <span>
+          <small>Booking summary</small>
+          <b id="mobile-summary-caption">Choose an outlet</b>
+        </span>
+        <strong id="mobile-summary-total">RM 0</strong>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+      </button>
+    </main>
+
+    <dialog class="confirmation-dialog" id="confirmation-dialog">
+      <div class="success-mark">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>
+      </div>
+      <p class="eyebrow">Preview complete</p>
+      <h2>Your booking flow is ready.</h2>
+      <p>
+        In the live version, this button will create a 15-minute hold and take the customer to Billplz. No payment has been created in this preview.
+      </p>
+      <button class="primary-button" id="close-dialog" type="button">Return to booking</button>
+    </dialog>
+
+    <script src="./js/booking-page.js"></script>
+  </body>
+</html>

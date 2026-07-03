@@ -1,3 +1,8 @@
 {
-    "java.compile.nullAnalysis.mode": "automatic"
+    "java.compile.nullAnalysis.mode": "automatic",
+    "java.import.gradle.enabled": false,
+    "java.jdt.ls.androidSupport.enabled": "off",
+    "java.import.exclusions": [
+        "**/android/**"
+    ]
 }
