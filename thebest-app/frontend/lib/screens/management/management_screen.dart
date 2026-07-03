@@ -7,6 +7,7 @@ import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+import '../../data/services/supabase_table_service.dart';
 import '../therapists/therapist_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
@@ -73,7 +74,9 @@ int _timeToMinutes(String value) {
 }
 
 bool _isPendingAppointmentStatus(String status) {
-  return status == 'pending' || status == 'confirmed' || status == 'in_progress';
+  return status == 'pending' ||
+      status == 'confirmed' ||
+      status == 'in_progress';
 }
 
 String _initials(String name) {
@@ -450,11 +453,8 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   Future<void> _openForm({_ResourceItem? item}) async {
     final saved = await showDialog<bool>(
       context: context,
-      builder: (_) => _ResourceFormDialog(
-        type: widget.type,
-        item: item,
-        isAdmin: _isAdmin,
-      ),
+      builder: (_) =>
+          _ResourceFormDialog(type: widget.type, item: item, isAdmin: _isAdmin),
     );
     if (saved == true) await _load();
   }
@@ -749,10 +749,7 @@ class _ResourceInitial extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       _initials(item.name),
-      style: const TextStyle(
-        color: Colors.white,
-        fontWeight: FontWeight.w800,
-      ),
+      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
     );
   }
 }
@@ -961,6 +958,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   final _serviceRepository = ServiceRepository();
   final _roomRepository = RoomRepository();
   final _imageUploadRepository = ImageUploadRepository();
+  final _categoryTable = SupabaseTableService('service_categories');
   final _formKey = GlobalKey<FormState>();
   late final TextEditingController _name;
   late final TextEditingController _category;
@@ -977,6 +975,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   bool _imageRemoved = false;
   bool _saving = false;
   bool _closing = false;
+  List<String> _categoryOptions = const ['Services', 'Packages', 'Add-ons'];
 
   bool get _isService => widget.type == _ResourceType.service;
   bool get _isEditing => widget.item != null;
@@ -1008,12 +1007,104 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
         _isService ? 'body_room' : 'body_room',
       ),
     );
-    _floor = TextEditingController(text: _asString(raw['floor'], 'Main Floor'));
+    _floor = TextEditingController(text: _asString(raw['floor'], 'Ground'));
     _slots = TextEditingController(
       text: _asInt(raw['totalSlots'], 1).toString(),
     );
     _equipment = TextEditingController(text: _asString(raw['equipment']));
     _active = _asBool(raw['active'] ?? raw['isActive'], true);
+    _loadCategories();
+  }
+
+  Future<void> _loadCategories() async {
+    if (!_isService) return;
+    try {
+      final rows = await _categoryTable.list(orderBy: 'name');
+      final categories = <String>{
+        'Services',
+        'Packages',
+        'Add-ons',
+        _category.text.trim(),
+        ...rows
+            .where((row) => _asBool(row['isActive'], true))
+            .map((row) => _asString(row['name']).trim()),
+      }..removeWhere((category) => category.isEmpty);
+      if (!mounted) return;
+      setState(() => _categoryOptions = categories.toList());
+    } catch (_) {
+      // Keep the built-in categories until the category table is available.
+    }
+  }
+
+  Future<void> _addCategory() async {
+    if (!widget.isAdmin || _saving) return;
+    final controller = TextEditingController();
+    final category = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Add service category'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          textCapitalization: TextCapitalization.words,
+          decoration: const InputDecoration(
+            labelText: 'Category name',
+            hintText: 'Example: Wellness Programs',
+          ),
+          onSubmitted: (value) {
+            if (value.trim().isNotEmpty) {
+              Navigator.of(dialogContext).pop(value.trim());
+            }
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () {
+              final value = controller.text.trim();
+              if (value.isNotEmpty) Navigator.of(dialogContext).pop(value);
+            },
+            child: const Text('Add'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (category == null || category.trim().isEmpty || !mounted) return;
+
+    final normalizedName = category.trim();
+    final existing = _categoryOptions.where(
+      (item) => item.toLowerCase() == normalizedName.toLowerCase(),
+    );
+    if (existing.isNotEmpty) {
+      setState(() => _category.text = existing.first);
+      return;
+    }
+
+    final code = normalizedName
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9]+'), '-')
+        .replaceAll(RegExp(r'^-+|-+$'), '');
+    try {
+      await _categoryTable.create({
+        'code': code,
+        'name': normalizedName,
+        'isActive': true,
+      });
+      if (!mounted) return;
+      setState(() {
+        _categoryOptions = [..._categoryOptions, normalizedName];
+        _category.text = normalizedName;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Unable to add category: $e')));
+    }
   }
 
   @override
@@ -1090,7 +1181,9 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
             id: serviceId,
             previousUrl: previousUrl,
           );
-          await _serviceRepository.updateService(serviceId, {'imageUrl': imageUrl});
+          await _serviceRepository.updateService(serviceId, {
+            'imageUrl': imageUrl,
+          });
         } else if (_imageRemoved && previousUrl.trim().isNotEmpty) {
           await _imageUploadRepository.removePublicUrl(previousUrl);
         }
@@ -1159,7 +1252,9 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
       active: true,
       color: _teal,
       raw: {
-        'imageUrl': _imageRemoved ? '' : _asString(widget.item?.raw['imageUrl']),
+        'imageUrl': _imageRemoved
+            ? ''
+            : _asString(widget.item?.raw['imageUrl']),
       },
     );
     return Dialog(
@@ -1214,9 +1309,9 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                               icon: const Icon(Icons.upload_outlined),
                               label: Text(
                                 _imagePreview == null &&
-                                        _asString(widget.item?.raw['imageUrl'])
-                                            .trim()
-                                            .isEmpty
+                                        _asString(
+                                          widget.item?.raw['imageUrl'],
+                                        ).trim().isEmpty
                                     ? 'Upload Image'
                                     : 'Replace Image',
                               ),
@@ -1228,9 +1323,9 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                                       _canEditAdminFields &&
                                       !_imageRemoved &&
                                       (_imagePreview != null ||
-                                          _asString(widget.item?.raw['imageUrl'])
-                                              .trim()
-                                              .isNotEmpty)
+                                          _asString(
+                                            widget.item?.raw['imageUrl'],
+                                          ).trim().isNotEmpty)
                                   ? _removeImage
                                   : null,
                               icon: const Icon(Icons.delete_outline),
@@ -1250,11 +1345,20 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                 ),
                 const SizedBox(height: 12),
                 if (_isService) ...[
-                  _FormField(
+                  _ControllerDropdown(
                     label: 'Category',
                     controller: _category,
-                    hint: 'Services / Packages / Add-ons',
+                    options: _categoryOptions,
                   ),
+                  if (_canEditAdminFields)
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton.icon(
+                        onPressed: _saving ? null : _addCategory,
+                        icon: const Icon(Icons.add, size: 18),
+                        label: const Text('Add category'),
+                      ),
+                    ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
@@ -1300,22 +1404,28 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                     ],
                   ),
                   const SizedBox(height: 12),
-                  _FormField(
+                  _ControllerDropdown(
                     label: 'Room Type',
                     controller: _roomType,
-                    hint: 'body_room / foot_chair',
+                    options: const ['body_room', 'foot_chair'],
+                    optionLabel: _roomTypeLabel,
                   ),
                 ] else ...[
-                  _FormField(
+                  _ControllerDropdown(
                     label: 'Room Type',
                     controller: _roomType,
-                    hint: 'body_room / foot_chair',
+                    options: const ['body_room', 'foot_chair'],
+                    optionLabel: _roomTypeLabel,
                   ),
                   const SizedBox(height: 12),
                   Row(
                     children: [
                       Expanded(
-                        child: _FormField(label: 'Floor', controller: _floor),
+                        child: _ControllerDropdown(
+                          label: 'Floor',
+                          controller: _floor,
+                          options: const ['Ground', 'First', 'Second', 'Third'],
+                        ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
@@ -1387,7 +1497,9 @@ class _ManagedTherapist {
       id: _asString(d['id']),
       name: _asString(d['name']),
       phone: _asString(d['phone']),
-      role: _normalizeStaffRole(d['role'] ?? d['staffRole'] ?? d['employmentType']),
+      role: _normalizeStaffRole(
+        d['role'] ?? d['staffRole'] ?? d['employmentType'],
+      ),
       available: _asBool(d['availabilityStatus'], true),
       busyUntil: _asString(d['busyUntil']),
       doneToday: 0,
@@ -2199,6 +2311,63 @@ class _FormField extends StatelessWidget {
         hintText: hint,
         filled: true,
         fillColor: enabled ? const Color(0xFFF7F8FA) : const Color(0xFFEDEFF2),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(8),
+          borderSide: const BorderSide(color: _teal, width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+class _ControllerDropdown extends StatelessWidget {
+  final String label;
+  final TextEditingController controller;
+  final List<String> options;
+  final String Function(String)? optionLabel;
+
+  const _ControllerDropdown({
+    required this.label,
+    required this.controller,
+    required this.options,
+    this.optionLabel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final current = controller.text.trim();
+    final available = <String>{
+      ...options,
+      if (current.isNotEmpty) current,
+    }.toList();
+    final selected = current.isEmpty
+        ? (available.isEmpty ? null : available.first)
+        : current;
+    if (controller.text.isEmpty && selected != null) controller.text = selected;
+
+    return DropdownButtonFormField<String>(
+      key: ValueKey('$label|$selected|${available.join('|')}'),
+      initialValue: selected,
+      isExpanded: true,
+      items: available
+          .map(
+            (value) => DropdownMenuItem<String>(
+              value: value,
+              child: Text(optionLabel?.call(value) ?? value),
+            ),
+          )
+          .toList(),
+      onChanged: (value) {
+        if (value != null) controller.text = value;
+      },
+      decoration: InputDecoration(
+        labelText: label,
+        filled: true,
+        fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(8),
           borderSide: BorderSide.none,

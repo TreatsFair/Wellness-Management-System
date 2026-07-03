@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../core/outlets/outlet_context.dart';
+
 const Map<String, String> _snakeToCamelAliases = {
   'appointment_id': 'appointmentId',
   'appointment_date': 'date',
@@ -29,6 +31,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'join_date': 'joinDate',
   'logo_url': 'logoUrl',
   'open_time': 'openTime',
+  'outlet_id': 'outletId',
   'paid_at': 'paidAt',
   'payment_method': 'paymentMethod',
   'payment_status': 'paymentStatus',
@@ -73,12 +76,17 @@ class SupabaseTableService {
 
   SupabaseClient get client => _client;
 
+  bool get _isOutletScoped =>
+      OutletContext.outletScopedTables.contains(tableName);
+  String get _activeOutletId => OutletContext.activeOutletId.value;
+
   Future<List<Map<String, dynamic>>> list({
     String? orderBy,
     bool ascending = true,
     int? limit,
   }) async {
     dynamic query = _client.from(tableName).select();
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
     if (orderBy != null) {
       query = query.order(orderBy, ascending: ascending);
     }
@@ -91,11 +99,9 @@ class SupabaseTableService {
   }
 
   Future<Map<String, dynamic>?> getById(String id) async {
-    final row = await _client
-        .from(tableName)
-        .select()
-        .eq('id', id)
-        .maybeSingle();
+    dynamic query = _client.from(tableName).select().eq('id', id);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
+    final row = await query.maybeSingle();
     if (row == null) return null;
     return _toMap(row);
   }
@@ -104,10 +110,9 @@ class SupabaseTableService {
     final uniqueIds = ids.where((id) => id.trim().isNotEmpty).toSet().toList();
     if (uniqueIds.isEmpty) return [];
 
-    final rows = await _client
-        .from(tableName)
-        .select()
-        .inFilter('id', uniqueIds);
+    dynamic query = _client.from(tableName).select().inFilter('id', uniqueIds);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
+    final rows = await query;
     return _toMapList(rows);
   }
 
@@ -119,6 +124,7 @@ class SupabaseTableService {
     int? limit,
   }) async {
     dynamic query = _client.from(tableName).select().eq(column, value);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
     if (orderBy != null) {
       query = query.order(orderBy, ascending: ascending);
     }
@@ -139,6 +145,7 @@ class SupabaseTableService {
   }) async {
     if (values.isEmpty) return [];
     dynamic query = _client.from(tableName).select().inFilter(column, values);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
     if (orderBy != null) {
       query = query.order(orderBy, ascending: ascending);
     }
@@ -162,6 +169,7 @@ class SupabaseTableService {
         .select()
         .gte(column, startInclusive)
         .lte(column, endInclusive);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
     if (orderBy != null) {
       query = query.order(orderBy, ascending: ascending);
     }
@@ -171,9 +179,12 @@ class SupabaseTableService {
   }
 
   Future<Map<String, dynamic>> create(Map<String, dynamic> values) async {
+    final scopedValues = _isOutletScoped
+        ? {...values, 'outletId': _activeOutletId}
+        : values;
     final row = await _client
         .from(tableName)
-        .insert(toSupabaseValues(values))
+        .insert(toSupabaseValues(scopedValues))
         .select()
         .single();
     return _toMap(row);
@@ -183,14 +194,24 @@ class SupabaseTableService {
     String id,
     Map<String, dynamic> values,
   ) async {
-    await _client.from(tableName).update(toSupabaseValues(values)).eq('id', id);
+    final scopedValues = _isOutletScoped
+        ? {...values, 'outletId': _activeOutletId}
+        : values;
+    dynamic query = _client
+        .from(tableName)
+        .update(toSupabaseValues(scopedValues))
+        .eq('id', id);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
+    await query;
     final row = await getById(id);
     if (row != null) return row;
     return {'id': id, ...values};
   }
 
   Future<void> delete(String id) async {
-    await _client.from(tableName).delete().eq('id', id);
+    dynamic query = _client.from(tableName).delete().eq('id', id);
+    if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
+    await query;
   }
 
   Map<String, dynamic> toSupabaseValues(Map<String, dynamic> values) {
@@ -214,6 +235,7 @@ class SupabaseTableService {
       'counterStaffId',
       'createdBy',
       'customerId',
+      'outletId',
       'roomId',
       'serviceId',
       'therapistId',

@@ -144,10 +144,9 @@ class _ScheduleAppointment {
         customerId.trim().isEmpty || customerId == 'walk_in_guest';
     final rawCustomerName =
         data['customerName']?.toString() ?? customer?['name']?.toString();
-    final customerName =
-        isGuestCustomer && _isGuestName(rawCustomerName)
-            ? 'Guest'
-            : rawCustomerName ?? 'Customer';
+    final customerName = isGuestCustomer && _isGuestName(rawCustomerName)
+        ? 'Guest'
+        : rawCustomerName ?? 'Customer';
 
     return _ScheduleAppointment(
       id: data['id']?.toString() ?? '',
@@ -212,7 +211,8 @@ class _ScheduleAppointment {
     if (value is List && value.isNotEmpty) {
       return value.whereType<Map>().map((item) {
         final data = Map<String, dynamic>.from(item);
-        final itemId = data['id']?.toString() ?? data['serviceId']?.toString() ?? '';
+        final itemId =
+            data['id']?.toString() ?? data['serviceId']?.toString() ?? '';
         final linkedService = itemId == serviceId ? service : null;
         return {
           ...data,
@@ -242,7 +242,9 @@ class _ScheduleAppointment {
         'id': serviceId,
         'name': serviceName,
         'duration': _readInt(service?['duration'], 60),
-        'price': fallbackPrice > 0 ? fallbackPrice : _readDouble(service?['price']),
+        'price': fallbackPrice > 0
+            ? fallbackPrice
+            : _readDouble(service?['price']),
         'therapistCommission': _readDouble(service?['therapistCommission']),
         'counterCommission': _readDouble(service?['counterCommission']),
       },
@@ -347,12 +349,10 @@ class _AppointmentGroup {
       ? 'Cancelled'
       : 'Pending';
 
-  int get startMinutes => appointments
-      .map((a) => a.startMinutes)
-      .reduce((a, b) => a < b ? a : b);
-  int get endMinutes => appointments
-      .map((a) => a.endMinutes)
-      .reduce((a, b) => a > b ? a : b);
+  int get startMinutes =>
+      appointments.map((a) => a.startMinutes).reduce((a, b) => a < b ? a : b);
+  int get endMinutes =>
+      appointments.map((a) => a.endMinutes).reduce((a, b) => a > b ? a : b);
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
   String get timeRange =>
       '${_clockLabel(_minutesToTime(startMinutes))} - ${_clockLabel(_minutesToTime(endMinutes))}';
@@ -479,7 +479,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
   Future<void> _loadBusinessHours() async {
     try {
-      final row = await _businessSettingsTable.getById('1');
+      final rows = await _businessSettingsTable.list(limit: 1);
+      final row = rows.isEmpty ? null : rows.first;
       final openMinutes = _parseBusinessMinutes(row?['openTime'], 9 * 60);
       var closeMinutes = _parseBusinessMinutes(row?['closeTime'], 21 * 60);
       if (closeMinutes <= openMinutes) closeMinutes += 24 * 60;
@@ -511,25 +512,25 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       byGroup.putIfAbsent(key, () => []).add(appointment);
     }
 
-    final groups = byGroup.entries.map((entry) {
-      final items = entry.value
-        ..sort((a, b) {
-          final start = a.startMinutes.compareTo(b.startMinutes);
-          if (start != 0) return start;
-          return a.customerName.compareTo(b.customerName);
+    final groups =
+        byGroup.entries.map((entry) {
+          final items = entry.value
+            ..sort((a, b) {
+              final start = a.startMinutes.compareTo(b.startMinutes);
+              if (start != 0) return start;
+              return a.customerName.compareTo(b.customerName);
+            });
+          final groupId = items.first.appointmentGroupId;
+          return _AppointmentGroup(
+            id: entry.key,
+            appointmentGroupId: groupId,
+            appointments: items,
+          );
+        }).toList()..sort((a, b) {
+          final dateCompare = a.dateKey.compareTo(b.dateKey);
+          if (dateCompare != 0) return dateCompare;
+          return a.startMinutes.compareTo(b.startMinutes);
         });
-      final groupId = items.first.appointmentGroupId;
-      return _AppointmentGroup(
-        id: entry.key,
-        appointmentGroupId: groupId,
-        appointments: items,
-      );
-    }).toList()
-      ..sort((a, b) {
-        final dateCompare = a.dateKey.compareTo(b.dateKey);
-        if (dateCompare != 0) return dateCompare;
-        return a.startMinutes.compareTo(b.startMinutes);
-      });
     return groups;
   }
 
@@ -554,13 +555,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         .toList();
   }
 
-  int get _pendingCount =>
-      _selectedDayGroups.where((a) => a.isPending).length;
+  int get _pendingCount => _selectedDayGroups.where((a) => a.isPending).length;
 
-  double get _selectedDaySales => _selectedDayGroups.fold<double>(
-    0,
-    (total, group) => total + group.price,
-  );
+  double get _selectedDaySales =>
+      _selectedDayGroups.fold<double>(0, (total, group) => total + group.price);
 
   Future<void> _loadAppointments() async {
     setState(() {
@@ -818,26 +816,22 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       customerName: primary.customerName,
       customerPhone: primary.customerPhone,
       activePaxIndex: activeIndex < 0 ? 0 : activeIndex,
-      allocations: sorted
-          .map(
-            (appointment) {
-              final serviceIds = <String>{
-                ...appointment.serviceItems
-                    .map((item) => item['id']?.toString() ?? '')
-                    .where((id) => id.isNotEmpty),
-                if (appointment.serviceId.isNotEmpty) appointment.serviceId,
-              }.toList();
-              return AppointmentEditAllocation(
-                appointmentId: appointment.id,
-                serviceIds: serviceIds,
-                therapistId: appointment.therapistId,
-                roomId: appointment.roomId,
-                startTime: appointment.startTime,
-                endTime: appointment.endTime,
-              );
-            },
-          )
-          .toList(),
+      allocations: sorted.map((appointment) {
+        final serviceIds = <String>{
+          ...appointment.serviceItems
+              .map((item) => item['id']?.toString() ?? '')
+              .where((id) => id.isNotEmpty),
+          if (appointment.serviceId.isNotEmpty) appointment.serviceId,
+        }.toList();
+        return AppointmentEditAllocation(
+          appointmentId: appointment.id,
+          serviceIds: serviceIds,
+          therapistId: appointment.therapistId,
+          roomId: appointment.roomId,
+          startTime: appointment.startTime,
+          endTime: appointment.endTime,
+        );
+      }).toList(),
     );
   }
 
@@ -2257,7 +2251,10 @@ class _MobileTimelineBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(appointment.isPending, appointment.isCompleted);
+    final colors = _statusColorsFor(
+      appointment.isPending,
+      appointment.isCompleted,
+    );
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -2369,7 +2366,8 @@ class _MobileCollapsedBlock extends StatelessWidget {
     final end = appointments
         .map((a) => a.endMinutes)
         .reduce((a, b) => a.compareTo(b) > 0 ? a : b);
-    final timeRange = '${_clockLabel(_minutesToTime(start))} - '
+    final timeRange =
+        '${_clockLabel(_minutesToTime(start))} - '
         '${_clockLabel(_minutesToTime(end))}';
     return GestureDetector(
       onTap: onTap,
@@ -2445,7 +2443,10 @@ class _MobileAppointmentCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(appointment.isPending, appointment.isCompleted);
+    final colors = _statusColorsFor(
+      appointment.isPending,
+      appointment.isCompleted,
+    );
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -2547,7 +2548,10 @@ class _TabletAppointmentCardTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(appointment.isPending, appointment.isCompleted);
+    final colors = _statusColorsFor(
+      appointment.isPending,
+      appointment.isCompleted,
+    );
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -3442,7 +3446,8 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     try {
       var customerId = widget.appointment.customerId;
       final customerName = _resolvedCustomerName();
-      final counterStaff = await _commissionRepository.getAvailableCounterStaff();
+      final counterStaff = await _commissionRepository
+          .getAvailableCounterStaff();
       final therapistCommissionAmount =
           CommissionRepository.commissionForServices(
             widget.appointment.serviceItems,
@@ -3472,9 +3477,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                 'notes': 'Created from appointment checkout',
               }
             : null,
-        appointmentUpdates: {
-          'customerId': customerId,
-        },
+        appointmentUpdates: {'customerId': customerId},
         transactionValues: {
           'customerId': customerId,
           'customerName': customerName,
@@ -3826,7 +3829,8 @@ class _AppointmentGroupCheckoutSheetState
     try {
       var customerId = widget.group.primary.customerId;
       final customerName = _resolvedCustomerName();
-      final counterStaff = await _commissionRepository.getAvailableCounterStaff();
+      final counterStaff = await _commissionRepository
+          .getAvailableCounterStaff();
       final therapistCommissionAmount = _therapistCommissionTotal();
       final counterCommissionAmount = counterStaff == null
           ? 0.0
@@ -3852,9 +3856,7 @@ class _AppointmentGroupCheckoutSheetState
                 'notes': 'Created from group appointment checkout',
               }
             : null,
-        appointmentUpdates: {
-          'customerId': customerId,
-        },
+        appointmentUpdates: {'customerId': customerId},
         transactionValues: {
           'customerId': customerId,
           'customerName': customerName,
@@ -4003,7 +4005,10 @@ class _AppointmentGroupCheckoutSheetState
                       ),
                       subtitle: const Text(
                         'A member is created only when name and phone are filled.',
-                        style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF6B7280),
+                        ),
                       ),
                     ),
                   ],
@@ -4241,10 +4246,7 @@ class _GroupCheckoutPaxRow extends StatelessWidget {
   final int index;
   final _ScheduleAppointment appointment;
 
-  const _GroupCheckoutPaxRow({
-    required this.index,
-    required this.appointment,
-  });
+  const _GroupCheckoutPaxRow({required this.index, required this.appointment});
 
   @override
   Widget build(BuildContext context) {

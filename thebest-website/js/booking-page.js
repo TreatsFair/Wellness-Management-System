@@ -1,10 +1,12 @@
 const outlets = {
-  kepong: {
+  "taman-wahyu": {
+    id: "00000000-0000-0000-0000-000000000002",
     name: "Kepong · Taman Wahyu",
     phone: "60125262551",
     priceOffset: 0,
   },
-  setapak: {
+  pv128: {
+    id: "00000000-0000-0000-0000-000000000128",
     name: "Setapak · PV128",
     phone: "60127449266",
     priceOffset: 10,

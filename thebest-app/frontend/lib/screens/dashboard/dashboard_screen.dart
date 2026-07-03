@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../core/outlets/outlet_context.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
@@ -74,6 +75,8 @@ class _TherapistStatus {
 }
 
 class _BusinessProfile {
+  final String outletId;
+  final String outletName;
   final String name;
   final String location;
   final String openTime;
@@ -84,6 +87,8 @@ class _BusinessProfile {
   final String? settingsDocumentId;
 
   const _BusinessProfile({
+    required this.outletId,
+    required this.outletName,
     required this.name,
     required this.location,
     required this.openTime,
@@ -95,6 +100,8 @@ class _BusinessProfile {
   });
 
   _BusinessProfile copyWith({
+    String? outletId,
+    String? outletName,
     String? name,
     String? location,
     String? openTime,
@@ -105,6 +112,8 @@ class _BusinessProfile {
     String? settingsDocumentId,
   }) {
     return _BusinessProfile(
+      outletId: outletId ?? this.outletId,
+      outletName: outletName ?? this.outletName,
       name: name ?? this.name,
       location: location ?? this.location,
       openTime: openTime ?? this.openTime,
@@ -154,6 +163,8 @@ class _DashboardData {
 }
 
 const _placeholderBusinessProfile = _BusinessProfile(
+  outletId: '00000000-0000-0000-0000-000000000128',
+  outletName: 'PV128',
   name: 'The Best Family Wellness',
   location: 'Kuala Lumpur',
   openTime: '09:00',
@@ -215,7 +226,9 @@ bool _isCancelled(Map<String, dynamic> data) {
 }
 
 bool _isPendingAppointmentStatus(String status) {
-  return status == 'pending' || status == 'confirmed' || status == 'in_progress';
+  return status == 'pending' ||
+      status == 'confirmed' ||
+      status == 'in_progress';
 }
 
 bool _isPaid(Map<String, dynamic> data) {
@@ -236,6 +249,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _dashboardRepository = DashboardRepository();
   final _settingsRepository = SettingsRepository();
   final _businessHoursTable = SupabaseTableService('business_settings');
+  final _outletsTable = SupabaseTableService('outlets');
   _BusinessProfile _businessProfile = _placeholderBusinessProfile;
   _DashboardData _dashboardData = _DashboardData.empty;
   bool _isCurrentUserAdmin = false;
@@ -406,7 +420,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
       );
       final serviceIds = [
         ...transactionData.map((data) => _asString(data['serviceId'])),
-        ...linkedAppointments.values.map((data) => _asString(data['serviceId'])),
+        ...linkedAppointments.values.map(
+          (data) => _asString(data['serviceId']),
+        ),
       ].where((id) => id.isNotEmpty);
       final therapistIds = [
         ...transactionData.map((data) => _asString(data['therapistId'])),
@@ -489,7 +505,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final currentUser = _authRepository.currentUser;
     var email = currentUser?.email;
 
-    var profile = _placeholderBusinessProfile;
+    final activeOutlet = OutletContext.activeOutlet;
+    var profile = _placeholderBusinessProfile.copyWith(
+      outletId: activeOutlet.id,
+      outletName: activeOutlet.name,
+    );
     var normalizedRole = 'staff';
 
     try {
@@ -504,15 +524,27 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
+      final outlet = await _outletsTable.getById(activeOutlet.id);
+      if (outlet != null) {
+        profile = profile.copyWith(
+          outletName: _asString(outlet['name'], activeOutlet.name),
+          location: _asString(outlet['address'], profile.location),
+        );
+      }
+    } catch (_) {
+      // Keep the known outlet name and fallback address.
+    }
+
+    try {
       final data = await _settingsRepository.getBusinessSettings();
       if (data != null) {
         profile = _BusinessProfile(
+          outletId: profile.outletId,
+          outletName: profile.outletName,
           name: (data['businessName'] as String?)?.trim().isNotEmpty == true
               ? (data['businessName'] as String).trim()
               : _placeholderBusinessProfile.name,
-          location: (data['location'] as String?)?.trim().isNotEmpty == true
-              ? (data['location'] as String).trim()
-              : _placeholderBusinessProfile.location,
+          location: profile.location,
           openTime: profile.openTime,
           closeTime: profile.closeTime,
           logoInitial: _placeholderBusinessProfile.logoInitial,
@@ -525,11 +557,18 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
-      final hours = await _businessHoursTable.getById('1');
+      final hourRows = await _businessHoursTable.findBy(
+        'outlet_id',
+        activeOutlet.id,
+        limit: 1,
+      );
+      final hours = hourRows.isEmpty ? null : hourRows.first;
       if (hours != null) {
         profile = profile.copyWith(
           openTime: _cleanTime(_asString(hours['openTime'], profile.openTime)),
-          closeTime: _cleanTime(_asString(hours['closeTime'], profile.closeTime)),
+          closeTime: _cleanTime(
+            _asString(hours['closeTime'], profile.closeTime),
+          ),
         );
       }
     } catch (_) {
@@ -549,6 +588,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _saveBusinessSettings(_BusinessProfile profile) async {
+    if (profile.outletId != OutletContext.activeOutletId.value) {
+      OutletContext.select(profile.outletId);
+      setState(() {
+        _isLoadingBusinessSettings = true;
+        _isLoadingDashboardData = true;
+      });
+      await _loadBusinessSettings();
+      await _loadDashboardData();
+      return;
+    }
+
     final uid = _authRepository.currentUser?.id;
     if (!_isCurrentUserAdmin || uid == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -579,20 +629,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       final savedSettings = await _settingsRepository.updateBusinessSettings(
-        {
-          'businessName': profile.name,
-          'location': profile.location,
-          'logoUrl': logoUrl,
-        },
+        {'businessName': profile.name, 'logoUrl': logoUrl},
         id: settingsDocumentId == _businessSettingsDocumentId
             ? null
             : settingsDocumentId,
       );
 
-      await _businessHoursTable.update('1', {
-        'openTime': profile.openTime,
-        'closeTime': profile.closeTime,
+      await _outletsTable.update(profile.outletId, {
+        'address': profile.location,
       });
+
+      final hourRows = await _businessHoursTable.findBy(
+        'outlet_id',
+        profile.outletId,
+        limit: 1,
+      );
+      if (hourRows.isEmpty) {
+        await _businessHoursTable.create({
+          'outletId': profile.outletId,
+          'openTime': profile.openTime,
+          'closeTime': profile.closeTime,
+        });
+      } else {
+        await _businessHoursTable.update(_asString(hourRows.first['id']), {
+          'openTime': profile.openTime,
+          'closeTime': profile.closeTime,
+        });
+      }
 
       if (!mounted) return;
       setState(() {
@@ -638,6 +701,21 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _saveBusinessSettings(updatedProfile);
   }
 
+  Future<void> _switchOutlet(String outletId) async {
+    if (!_isCurrentUserAdmin ||
+        outletId == OutletContext.activeOutletId.value) {
+      return;
+    }
+    OutletContext.select(outletId);
+    if (!mounted) return;
+    setState(() {
+      _isLoadingBusinessSettings = true;
+      _isLoadingDashboardData = true;
+    });
+    await _loadBusinessSettings();
+    await _loadDashboardData();
+  }
+
   @override
   Widget build(BuildContext context) {
     final isTablet = _isTablet(context);
@@ -655,6 +733,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 dashboardError: _dashboardError,
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
+                onSwitchOutlet: _switchOutlet,
               )
             : _PhoneLayout(
                 profile: _businessProfile,
@@ -666,6 +745,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 dashboardError: _dashboardError,
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
+                onSwitchOutlet: _switchOutlet,
               ),
       ),
     );
@@ -685,6 +765,7 @@ class _TabletLayout extends StatelessWidget {
   final String? dashboardError;
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
+  final Future<void> Function(String) onSwitchOutlet;
 
   const _TabletLayout({
     required this.profile,
@@ -696,6 +777,7 @@ class _TabletLayout extends StatelessWidget {
     required this.dashboardError,
     required this.onRefreshDashboard,
     required this.onOpenSettings,
+    required this.onSwitchOutlet,
   });
 
   @override
@@ -710,6 +792,7 @@ class _TabletLayout extends StatelessWidget {
           isLoadingSettings: isLoadingSettings,
           transactions: dashboardData.recentTransactions,
           onOpenSettings: onOpenSettings,
+          onSwitchOutlet: onSwitchOutlet,
         ),
         if (dashboardError != null)
           _DashboardErrorBanner(
@@ -936,6 +1019,7 @@ class _TabletTopBar extends StatelessWidget {
   final bool isLoadingSettings;
   final List<_TransactionSummary> transactions;
   final VoidCallback onOpenSettings;
+  final Future<void> Function(String) onSwitchOutlet;
 
   const _TabletTopBar({
     required this.profile,
@@ -944,13 +1028,18 @@ class _TabletTopBar extends StatelessWidget {
     required this.isLoadingSettings,
     required this.transactions,
     required this.onOpenSettings,
+    required this.onSwitchOutlet,
   });
 
   void _openBusinessProfile(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (context) =>
-          _BusinessProfileDialog(profile: profile, email: email),
+      builder: (context) => _BusinessProfileDialog(
+        profile: profile,
+        email: email,
+        isAdmin: role == 'admin',
+        onSwitchOutlet: onSwitchOutlet,
+      ),
     );
   }
 
@@ -1370,6 +1459,7 @@ class _PhoneLayout extends StatelessWidget {
   final String? dashboardError;
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
+  final Future<void> Function(String) onSwitchOutlet;
 
   const _PhoneLayout({
     required this.profile,
@@ -1381,6 +1471,7 @@ class _PhoneLayout extends StatelessWidget {
     required this.dashboardError,
     required this.onRefreshDashboard,
     required this.onOpenSettings,
+    required this.onSwitchOutlet,
   });
 
   @override
@@ -1397,6 +1488,7 @@ class _PhoneLayout extends StatelessWidget {
             isLoadingSettings: isLoadingSettings,
             transactions: dashboardData.recentTransactions,
             onOpenSettings: onOpenSettings,
+            onSwitchOutlet: onSwitchOutlet,
           ),
           if (dashboardError != null)
             _DashboardErrorBanner(
@@ -1570,6 +1662,7 @@ class _PhoneTopBar extends StatelessWidget {
   final bool isLoadingSettings;
   final List<_TransactionSummary> transactions;
   final VoidCallback onOpenSettings;
+  final Future<void> Function(String) onSwitchOutlet;
 
   const _PhoneTopBar({
     required this.profile,
@@ -1578,13 +1671,18 @@ class _PhoneTopBar extends StatelessWidget {
     required this.isLoadingSettings,
     required this.transactions,
     required this.onOpenSettings,
+    required this.onSwitchOutlet,
   });
 
   void _openBusinessProfile(BuildContext context) {
     showDialog<void>(
       context: context,
-      builder: (context) =>
-          _BusinessProfileDialog(profile: profile, email: email),
+      builder: (context) => _BusinessProfileDialog(
+        profile: profile,
+        email: email,
+        isAdmin: role == 'admin',
+        onSwitchOutlet: onSwitchOutlet,
+      ),
     );
   }
 
@@ -2176,8 +2274,58 @@ class _DashboardErrorBanner extends StatelessWidget {
 class _BusinessProfileDialog extends StatelessWidget {
   final _BusinessProfile profile;
   final String email;
+  final bool isAdmin;
+  final Future<void> Function(String) onSwitchOutlet;
 
-  const _BusinessProfileDialog({required this.profile, required this.email});
+  const _BusinessProfileDialog({
+    required this.profile,
+    required this.email,
+    required this.isAdmin,
+    required this.onSwitchOutlet,
+  });
+
+  Future<void> _chooseOutlet(BuildContext context) async {
+    if (!isAdmin) return;
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Switch outlet'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: OutletContext.outlets
+              .map(
+                (outlet) => ListTile(
+                  leading: Icon(
+                    outlet.id == profile.outletId
+                        ? Icons.radio_button_checked
+                        : Icons.radio_button_off,
+                    color: const Color(0xFFF59E0B),
+                  ),
+                  title: Text(outlet.name),
+                  subtitle: Text(
+                    outlet == OutletContext.pv128
+                        ? 'G13-A, PV128, Jalan Genting Kelang'
+                        : '50G, Jalan Seri Utara 1, Taman Wahyu',
+                  ),
+                  onTap: () => Navigator.of(dialogContext).pop(outlet.id),
+                ),
+              )
+              .toList(),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || selected == profile.outletId || !context.mounted) {
+      return;
+    }
+    Navigator.of(context).pop();
+    await onSwitchOutlet(selected);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -2207,11 +2355,7 @@ class _BusinessProfileDialog extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 4),
-              _BusinessLogoAvatar(
-                profile: profile,
-                size: 82,
-                circular: true,
-              ),
+              _BusinessLogoAvatar(profile: profile, size: 82, circular: true),
               const SizedBox(height: 18),
               Text(
                 profile.name,
@@ -2228,13 +2372,20 @@ class _BusinessProfileDialog extends StatelessWidget {
                 style: const TextStyle(fontSize: 14, color: Color(0xFF9E9E9E)),
               ),
               const SizedBox(height: 24),
-              _BusinessProfileRow(
-                icon: Icons.storefront_outlined,
-                iconBg: const Color(0xFFFFF3D6),
-                iconColor: const Color(0xFFF59E0B),
-                label: 'Outlet',
-                value: profile.location.toUpperCase(),
-                showChevron: true,
+              Material(
+                color: Colors.transparent,
+                child: InkWell(
+                  onTap: isAdmin ? () => _chooseOutlet(context) : null,
+                  borderRadius: BorderRadius.circular(14),
+                  child: _BusinessProfileRow(
+                    icon: Icons.storefront_outlined,
+                    iconBg: const Color(0xFFFFF3D6),
+                    iconColor: const Color(0xFFF59E0B),
+                    label: 'Outlet',
+                    value: profile.location.toUpperCase(),
+                    showChevron: isAdmin,
+                  ),
+                ),
               ),
               const SizedBox(height: 12),
               const _BusinessProfileRow(
@@ -2760,7 +2911,9 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
     _nameController = TextEditingController(text: widget.profile.name);
     _locationController = TextEditingController(text: widget.profile.location);
     _openTimeController = TextEditingController(text: widget.profile.openTime);
-    _closeTimeController = TextEditingController(text: widget.profile.closeTime);
+    _closeTimeController = TextEditingController(
+      text: widget.profile.closeTime,
+    );
   }
 
   @override

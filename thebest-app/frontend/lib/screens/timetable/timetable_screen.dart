@@ -54,12 +54,10 @@ class _TimetableScreenState extends State<TimetableScreen> {
     try {
       final date = DateFormat('yyyy-MM-dd').format(_selectedDate);
       final settings = await _loadBusinessSettings();
-      final appointmentRows = await _appointmentRepository.getAppointmentsByDate(
-        date,
-      );
-      final transactionRows = await _transactionRepository.getTransactionsByDate(
-        _selectedDate,
-      );
+      final appointmentRows = await _appointmentRepository
+          .getAppointmentsByDate(date);
+      final transactionRows = await _transactionRepository
+          .getTransactionsByDate(_selectedDate);
 
       final customerIds = appointmentRows
           .map((row) => asString(row['customerId']))
@@ -95,21 +93,22 @@ class _TimetableScreenState extends State<TimetableScreen> {
         }
       }
 
-      final entries = appointmentRows
-          .map(
-            (row) => _TimetableEntry.fromMap(
-              row,
-              customers: customers,
-              services: services,
-              therapists: therapists,
-              rooms: rooms,
-              transaction: transactionsByAppointment[asString(row['id'])],
-              selectedDate: _selectedDate,
-            ),
-          )
-          .where((entry) => !entry.isCancelled)
-          .toList()
-        ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+      final entries =
+          appointmentRows
+              .map(
+                (row) => _TimetableEntry.fromMap(
+                  row,
+                  customers: customers,
+                  services: services,
+                  therapists: therapists,
+                  rooms: rooms,
+                  transaction: transactionsByAppointment[asString(row['id'])],
+                  selectedDate: _selectedDate,
+                ),
+              )
+              .where((entry) => !entry.isCancelled)
+              .toList()
+            ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
 
       if (!mounted) return;
       setState(() {
@@ -126,7 +125,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
   Future<(int, int)> _loadBusinessSettings() async {
     try {
-      final row = await _businessSettingsTable.getById('1');
+      final rows = await _businessSettingsTable.list(limit: 1);
+      final row = rows.isEmpty ? null : rows.first;
       final open = _timeToMinutes(asString(row?['openTime'], '09:00'));
       var close = _timeToMinutes(asString(row?['closeTime'], '21:00'));
       if (close <= open) close += 24 * 60;
@@ -140,19 +140,21 @@ class _TimetableScreenState extends State<TimetableScreen> {
     final query = _search.text.trim().toLowerCase();
     return _entries.where((entry) {
       if (query.isEmpty) return true;
-      if (_mode == 'staff') return entry.staffName.toLowerCase().contains(query);
+      if (_mode == 'staff') {
+        return entry.staffName.toLowerCase().contains(query);
+      }
       if (_mode == 'rooms') return entry.roomName.toLowerCase().contains(query);
       return entry.matches(query);
     }).toList();
   }
 
-  _TimetableStats get _stats => _TimetableStats.fromEntries(
-    _entries,
-    selectedDate: _selectedDate,
-  );
+  _TimetableStats get _stats =>
+      _TimetableStats.fromEntries(_entries, selectedDate: _selectedDate);
 
   void _shiftDate(int days) {
-    setState(() => _selectedDate = _stripDate(_selectedDate.add(Duration(days: days))));
+    setState(
+      () => _selectedDate = _stripDate(_selectedDate.add(Duration(days: days))),
+    );
     _loadTimetable();
   }
 
@@ -207,49 +209,52 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   RefreshIndicator(
                     onRefresh: _loadTimetable,
                     child: ListView(
-                  padding: EdgeInsets.fromLTRB(
-                    isWide ? 24 : 14,
-                    12,
-                    isWide ? 24 : 14,
-                    28,
-                  ),
-                  children: [
-                    _StatsRow(stats: _stats, compact: !isWide),
-                    const SizedBox(height: 14),
-                    _TimetableControls(
-                      mode: _mode,
-                      controller: _search,
-                      onModeChanged: (value) => setState(() => _mode = value),
-                    ),
-                    const SizedBox(height: 14),
-                    if (_loading)
-                      const _TimetableStateCard(
-                        icon: Icons.hourglass_empty,
-                        title: 'Loading timetable',
-                        message: 'Checking today’s services and resource usage.',
-                      )
-                    else if (_error != null)
-                      _TimetableStateCard(
-                        icon: Icons.error_outline,
-                        title: 'Unable to load timetable',
-                        message: _error!,
-                      )
-                    else if (entries.isEmpty)
-                      const _TimetableStateCard(
-                        icon: Icons.event_available_outlined,
-                        title: 'No services found',
-                        message: 'There are no visible services for this day.',
-                      )
-                    else
-                      _TimetableTimeline(
-                        entries: entries,
-                        selectedDate: _selectedDate,
-                        openMinute: _openMinute,
-                        closeMinute: _closeMinute,
-                        isWide: isWide,
-                        onTap: _showEntry,
+                      padding: EdgeInsets.fromLTRB(
+                        isWide ? 24 : 14,
+                        12,
+                        isWide ? 24 : 14,
+                        28,
                       ),
-                  ],
+                      children: [
+                        _StatsRow(stats: _stats, compact: !isWide),
+                        const SizedBox(height: 14),
+                        _TimetableControls(
+                          mode: _mode,
+                          controller: _search,
+                          onModeChanged: (value) =>
+                              setState(() => _mode = value),
+                        ),
+                        const SizedBox(height: 14),
+                        if (_loading)
+                          const _TimetableStateCard(
+                            icon: Icons.hourglass_empty,
+                            title: 'Loading timetable',
+                            message:
+                                'Checking today’s services and resource usage.',
+                          )
+                        else if (_error != null)
+                          _TimetableStateCard(
+                            icon: Icons.error_outline,
+                            title: 'Unable to load timetable',
+                            message: _error!,
+                          )
+                        else if (entries.isEmpty)
+                          const _TimetableStateCard(
+                            icon: Icons.event_available_outlined,
+                            title: 'No services found',
+                            message:
+                                'There are no visible services for this day.',
+                          )
+                        else
+                          _TimetableTimeline(
+                            entries: entries,
+                            selectedDate: _selectedDate,
+                            openMinute: _openMinute,
+                            closeMinute: _closeMinute,
+                            isWide: isWide,
+                            onTap: _showEntry,
+                          ),
+                      ],
                     ),
                   ),
                   if (showSidePanel)
@@ -371,7 +376,8 @@ class _TimetableEntry {
   }
 
   int get startMinutes =>
-      _minutesFromSelectedDate(startAt, selectedDate) ?? _timeToMinutes(startTime);
+      _minutesFromSelectedDate(startAt, selectedDate) ??
+      _timeToMinutes(startTime);
   int get endMinutes {
     final fromTimestamp = _minutesFromSelectedDate(endAt, selectedDate);
     if (fromTimestamp != null) return fromTimestamp;
@@ -380,8 +386,10 @@ class _TimetableEntry {
     if (end <= start) end += 24 * 60;
     return end;
   }
+
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
-  bool get isWalkIn => type == 'walkin' || type == 'walk_in' || type == 'walk-in';
+  bool get isWalkIn =>
+      type == 'walkin' || type == 'walk_in' || type == 'walk-in';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
   bool get isCompleted => operationalStatus == 'Completed';
   bool get isInProgress => operationalStatus == 'In Progress';
@@ -406,7 +414,9 @@ class _TimetableEntry {
         nowMinutes < endMinutes) {
       return 'In Progress';
     }
-    if (nowMinutes >= endMinutes && (hasPayment || isWalkIn)) return 'Completed';
+    if (nowMinutes >= endMinutes && (hasPayment || isWalkIn)) {
+      return 'Completed';
+    }
     return 'Upcoming';
   }
 
@@ -624,8 +634,8 @@ class _TimetableControls extends StatelessWidget {
             hintText: mode == 'staff'
                 ? 'Search staff...'
                 : mode == 'rooms'
-                    ? 'Search rooms...'
-                    : 'Search customer, service, staff, room...',
+                ? 'Search rooms...'
+                : 'Search customer, service, staff, room...',
             prefixIcon: const Icon(Icons.search),
             filled: true,
             fillColor: const Color(0xFFEAF0F5),
@@ -742,7 +752,8 @@ class _TimetableTimeline extends StatelessWidget {
     final labelWidth = isWide ? 58.0 : 42.0;
     final earliestEntryStart = entries.fold<int>(
       openMinute,
-      (earliest, entry) => entry.startMinutes < earliest ? entry.startMinutes : earliest,
+      (earliest, entry) =>
+          entry.startMinutes < earliest ? entry.startMinutes : earliest,
     );
     final latestEntryEnd = entries.fold<int>(
       closeMinute,
@@ -751,8 +762,10 @@ class _TimetableTimeline extends StatelessWidget {
     final canvasStartMinute = _floorToHour(earliestEntryStart);
     final canvasEndMinute = _ceilToHour(latestEntryEnd);
     final totalHeight =
-        ((canvasEndMinute - canvasStartMinute) / 60 * hourHeight)
-            .clamp(120.0, 2600.0);
+        ((canvasEndMinute - canvasStartMinute) / 60 * hourHeight).clamp(
+          120.0,
+          2600.0,
+        );
     final placements = _assignLanes(entries);
 
     return Container(
@@ -776,7 +789,8 @@ class _TimetableTimeline extends StatelessWidget {
                   canvasEndMinute: canvasEndMinute,
                   hourHeight: hourHeight,
                   labelWidth: labelWidth,
-                  showNowLine: _stripDate(selectedDate) == _stripDate(DateTime.now()),
+                  showNowLine:
+                      _stripDate(selectedDate) == _stripDate(DateTime.now()),
                 ),
                 for (final placement in placements)
                   _PositionedTimetableCard(
@@ -897,13 +911,13 @@ class _PositionedTimetableCard extends StatelessWidget {
     const spacing = 8.0;
     final entry = placement.entry;
     final laneWidth =
-        (canvasWidth - spacing * (placement.laneCount - 1)) / placement.laneCount;
+        (canvasWidth - spacing * (placement.laneCount - 1)) /
+        placement.laneCount;
     final left = canvasLeft + placement.lane * (laneWidth + spacing);
     final top = ((entry.startMinutes - canvasStartMinute) / 60) * hourHeight;
-    final height =
-        (((entry.endMinutes - entry.startMinutes) / 60) * hourHeight)
-            .clamp(54.0, 240.0)
-            .toDouble();
+    final height = (((entry.endMinutes - entry.startMinutes) / 60) * hourHeight)
+        .clamp(54.0, 240.0)
+        .toDouble();
 
     return Positioned(
       top: top,
@@ -980,8 +994,9 @@ class _TimetableCard extends StatelessWidget {
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment:
-                      dense ? MainAxisAlignment.center : MainAxisAlignment.start,
+                  mainAxisAlignment: dense
+                      ? MainAxisAlignment.center
+                      : MainAxisAlignment.start,
                   children: [
                     Row(
                       children: [
@@ -1047,7 +1062,10 @@ class _TinyBadge extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: EdgeInsets.symmetric(horizontal: label.isEmpty ? 5 : 8, vertical: 5),
+      padding: EdgeInsets.symmetric(
+        horizontal: label.isEmpty ? 5 : 8,
+        vertical: 5,
+      ),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(999),
@@ -1156,7 +1174,10 @@ class _TimetableDetailCard extends StatelessWidget {
           children: [
             Row(
               children: [
-                _PanelStatusBadge(label: entry.operationalStatus, color: style.color),
+                _PanelStatusBadge(
+                  label: entry.operationalStatus,
+                  color: style.color,
+                ),
                 const Spacer(),
                 IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
               ],
@@ -1474,7 +1495,10 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
 }
 
 String _initials(String value) {
-  final parts = value.trim().split(RegExp(r'\s+')).where((part) => part.isNotEmpty);
+  final parts = value
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty);
   final letters = parts.take(2).map((part) => part[0]).join();
   return letters.isEmpty ? '?' : letters.toUpperCase();
 }
@@ -1512,8 +1536,7 @@ String _cleanTime(String value) {
 int _timeToMinutes(String time) {
   final parts = time.split(':');
   if (parts.length < 2) return 0;
-  return (int.tryParse(parts[0]) ?? 0) * 60 +
-      (int.tryParse(parts[1]) ?? 0);
+  return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }
 
 int _floorToHour(int minutes) => (minutes ~/ 60) * 60;
