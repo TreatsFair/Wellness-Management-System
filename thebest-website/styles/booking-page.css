@@ -149,8 +149,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .time-heading { display: flex; align-items: center; justify-content: space-between; }
 .time-heading span { display: flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.63rem; }
 .time-groups { display: grid; gap: 0.75rem; }
-.time-group { display: grid; grid-template-columns: 72px repeat(4, 1fr); gap: 0.45rem; align-items: center; }
-.time-group > span { color: var(--muted); font-size: 0.67rem; }
+.time-group { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 0.75rem; align-items: start; }
+.time-group > span { padding-top: 0.72rem; color: var(--ink); font-size: 0.8rem; font-weight: 700; line-height: 1.2; }
+.time-button-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; min-width: 0; }
 .time-button { padding: 0.58rem 0.3rem; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); font-size: 0.7rem; cursor: pointer; }
 .time-button:hover { border-color: var(--gold); }
 .time-button.is-selected { color: white; border-color: var(--green); background: var(--green); }
@@ -165,6 +166,11 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field textarea { resize: vertical; }
 .consent { display: flex; align-items: start; gap: 0.7rem; color: var(--muted); font-size: 0.7rem; line-height: 1.5; }
 .consent input { margin-top: 0.15rem; accent-color: var(--green); }
+.booking-honeypot { position: absolute !important; left: -10000px !important; width: 1px !important; height: 1px !important; overflow: hidden !important; }
+.booking-feedback { margin: 0; padding: 0.9rem 1rem; border: 1px solid rgba(143, 95, 0, 0.18); border-radius: 12px; color: var(--muted); background: rgba(255, 244, 221, 0.7); font-size: 0.75rem; line-height: 1.5; }
+.booking-feedback.is-error { color: #8b2e24; border-color: rgba(174, 59, 45, 0.28); background: #fff2ef; }
+.booking-mode-notice { max-width: 720px; margin: 0 auto 1rem; padding: 0.65rem 0.9rem; border-radius: 10px; color: #74531b; background: rgba(255, 244, 221, 0.88); font-size: 0.7rem; text-align: center; }
+.booking-mode-notice.is-error { color: #8b2e24; background: #fff2ef; }
 
 .booking-summary { position: sticky; top: 1rem; overflow: hidden; border: 1px solid rgba(143, 95, 0, 0.25); border-radius: 18px; background: #fff8ed; box-shadow: var(--shadow); }
 .review-card { margin: 0; overflow: hidden; border: 0; border-radius: 0; background: #fff8ed; }
@@ -278,8 +284,9 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .date-strip { margin: 0 -0.75rem; padding: 0 0.75rem 0.35rem; display: flex; gap: 0.5rem; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
   .date-strip::-webkit-scrollbar { display: none; }
   .date-button { min-width: 64px; min-height: 70px; scroll-snap-align: start; }
-  .time-group { grid-template-columns: repeat(2, 1fr); }
-  .time-group > span { grid-column: 1 / -1; }
+  .time-group { grid-template-columns: 1fr; gap: 0.55rem; }
+  .time-group > span { padding-top: 0; }
+  .time-button-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .time-button { min-height: 46px; font-size: 0.76rem; }
   .preference-card { min-height: 64px; padding: 0.9rem 0.8rem; }
   .details-form { grid-template-columns: 1fr; }

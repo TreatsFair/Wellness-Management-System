@@ -41,6 +41,13 @@ class OutletContext {
     'transactions',
     'booking_holds',
     'business_settings',
+    'online_booking_outlet_settings',
+    'online_booking_services',
+    'online_booking_service_rooms',
+    'online_booking_service_hours',
+    'online_booking_closures',
+    'therapist_working_hours',
+    'therapist_unavailability',
   };
 
   static OutletOption get activeOutlet => outletById(activeOutletId.value);

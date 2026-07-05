@@ -1,0 +1,4 @@
+project_id = "thebest-wellness"
+
+[functions.booking-api]
+verify_jwt = false

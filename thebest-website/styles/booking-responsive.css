@@ -167,8 +167,9 @@ body {
 .date-button { flex: 0 0 62px; min-width: 62px; min-height: 70px; padding: 0.5rem 0.2rem; scroll-snap-align: start; }
 
 .time-groups { display: grid; gap: 0.9rem; overflow: visible; }
-.time-group { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; }
-.time-group > span { grid-column: 1 / -1; }
+.time-group { display: grid; grid-template-columns: 1fr; gap: 0.55rem; align-items: start; }
+.time-group > span { padding-top: 0; color: var(--ink); font-size: 0.8rem; font-weight: 700; line-height: 1.2; }
+.time-button-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; min-width: 0; }
 .time-button { width: 100%; min-width: 0; min-height: 46px; padding: 0.55rem 0.2rem; font-size: 0.74rem; }
 
 .details-form { grid-template-columns: 1fr; gap: 0.85rem; }
@@ -270,8 +271,9 @@ body {
   .time-section { padding: 1.25rem; }
   .date-strip { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); overflow: visible; }
   .date-button { min-width: 0; width: 100%; }
-  .time-group { grid-template-columns: 72px repeat(4, minmax(0, 1fr)); align-items: center; }
-  .time-group > span { grid-column: auto; }
+  .time-group { grid-template-columns: 88px minmax(0, 1fr); gap: 0.75rem; align-items: start; }
+  .time-group > span { padding-top: 0.78rem; }
+  .time-button-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
   .details-form { grid-template-columns: 1fr 1fr; gap: 1rem; }
   .field-wide { grid-column: 1 / -1; }
   .panel-actions { position: static; margin: 2rem 0 0; padding: 1.25rem 0 0; border-radius: 0; background: transparent; box-shadow: none; backdrop-filter: none; }

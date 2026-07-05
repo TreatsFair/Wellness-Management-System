@@ -9,6 +9,7 @@ import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 import '../../data/services/supabase_table_service.dart';
 import '../therapists/therapist_screen.dart';
+import 'online_booking_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF1A1A2E);
@@ -163,6 +164,20 @@ class ManagementScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (userRole == 'admin')
+                    _ManagementOption(
+                      icon: Icons.language_outlined,
+                      color: const Color(0xFFB7790B),
+                      title: 'Online Booking',
+                      subtitle:
+                          'Control public services, schedules, rooms, and closures',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const OnlineBookingScreen(),
+                        ),
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -1477,6 +1492,7 @@ class _ManagedTherapist {
   final String phone;
   final String role;
   final bool available;
+  final bool onLeave;
   final String busyUntil;
   final int doneToday;
   final Map<String, dynamic> raw;
@@ -1487,6 +1503,7 @@ class _ManagedTherapist {
     required this.phone,
     required this.role,
     required this.available,
+    this.onLeave = false,
     required this.busyUntil,
     required this.doneToday,
     required this.raw,
@@ -1509,6 +1526,7 @@ class _ManagedTherapist {
 
   _ManagedTherapist copyWith({
     bool? available,
+    bool? onLeave,
     String? busyUntil,
     int? doneToday,
   }) {
@@ -1518,6 +1536,7 @@ class _ManagedTherapist {
       phone: phone,
       role: role,
       available: available ?? this.available,
+      onLeave: onLeave ?? this.onLeave,
       busyUntil: busyUntil ?? this.busyUntil,
       doneToday: doneToday ?? this.doneToday,
       raw: raw,
@@ -1537,9 +1556,11 @@ class _TherapistAvailabilityScreenState
     extends State<TherapistAvailabilityScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _therapistRepository = TherapistRepository();
+  final _unavailabilityTable = SupabaseTableService('therapist_unavailability');
   final _searchController = TextEditingController();
   List<_ManagedTherapist> _therapists = [];
   List<_ManagedTherapist> _filtered = [];
+  _ManagedTherapist? _selected;
   bool _loading = true;
 
   @override
@@ -1558,14 +1579,27 @@ class _TherapistAvailabilityScreenState
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final rows = await _therapistRepository.getTherapists();
+      final results = await Future.wait([
+        _therapistRepository.getTherapists(),
+        _unavailabilityTable.list(orderBy: 'starts_at'),
+      ]);
+      final rows = results[0];
+      final leaveRows = results[1];
       final loaded = await Future.wait(
-        rows.map((row) async => _enrich(_ManagedTherapist.fromMap(row))),
+        rows.map(
+          (row) async => _enrich(_ManagedTherapist.fromMap(row), leaveRows),
+        ),
       );
       if (!mounted) return;
       setState(() {
         _therapists = loaded;
         _filtered = loaded;
+        _selected = loaded.isEmpty
+            ? null
+            : loaded.firstWhere(
+                (item) => item.id == _selected?.id,
+                orElse: () => loaded.first,
+              );
         _loading = false;
       });
       _filter();
@@ -1574,7 +1608,10 @@ class _TherapistAvailabilityScreenState
     }
   }
 
-  Future<_ManagedTherapist> _enrich(_ManagedTherapist therapist) async {
+  Future<_ManagedTherapist> _enrich(
+    _ManagedTherapist therapist,
+    List<Map<String, dynamic>> leaveRows,
+  ) async {
     final today = _today();
     final appointments = await _appointmentRepository
         .getAppointmentsByTherapist(
@@ -1589,7 +1626,10 @@ class _TherapistAvailabilityScreenState
 
     for (final d in appointments) {
       final status = _asString(d['status']).toLowerCase();
-      if (status == 'completed') done++;
+      if (status == 'completed') {
+        final items = d['serviceItems'] ?? d['service_items'];
+        done += items is List && items.isNotEmpty ? items.length : 1;
+      }
       if (_isPendingAppointmentStatus(status)) {
         final start = _timeToMinutes(_asString(d['startTime'], '00:00'));
         final end = _timeToMinutes(_asString(d['endTime'], '00:00'));
@@ -1599,7 +1639,28 @@ class _TherapistAvailabilityScreenState
       }
     }
 
-    return therapist.copyWith(doneToday: done, busyUntil: busyUntil);
+    final current = DateTime.now().toUtc();
+    final onLeave = leaveRows.any((row) {
+      if (_asString(row['therapistId'] ?? row['therapist_id']) !=
+          therapist.id) {
+        return false;
+      }
+      final starts = DateTime.tryParse(
+        _asString(row['startsAt'] ?? row['starts_at']),
+      );
+      final ends = DateTime.tryParse(
+        _asString(row['endsAt'] ?? row['ends_at']),
+      );
+      return starts != null &&
+          ends != null &&
+          starts.isBefore(current) &&
+          ends.isAfter(current);
+    });
+    return therapist.copyWith(
+      doneToday: done,
+      busyUntil: busyUntil,
+      onLeave: onLeave,
+    );
   }
 
   void _filter() {
@@ -1610,10 +1671,15 @@ class _TherapistAvailabilityScreenState
             therapist.phone.toLowerCase().contains(query) ||
             therapist.role.toLowerCase().contains(query);
       }).toList();
+      if (_filtered.isNotEmpty &&
+          !_filtered.any((item) => item.id == _selected?.id)) {
+        _selected = _filtered.first;
+      }
     });
   }
 
   Future<void> _setAvailability(_ManagedTherapist therapist, bool value) async {
+    if (therapist.onLeave) return;
     await _therapistRepository.updateTherapist(therapist.id, {
       'availabilityStatus': value,
     });
@@ -1625,6 +1691,9 @@ class _TherapistAvailabilityScreenState
                 : item,
           )
           .toList();
+      if (_selected?.id == therapist.id) {
+        _selected = _selected!.copyWith(available: value);
+      }
     });
     _filter();
   }
@@ -1658,14 +1727,25 @@ class _TherapistAvailabilityScreenState
                   ? Row(
                       children: [
                         SizedBox(
-                          width: 360,
+                          width: 304,
                           child: _staffListPane(
                             horizontalPadding: 14,
                             listPadding: 10,
                             paneColor: Colors.white,
                           ),
                         ),
-                        const Expanded(child: SizedBox()),
+                        Expanded(
+                          child: _selected == null
+                              ? const _StaffScheduleEmptyState()
+                              : _StaffScheduleDetail(
+                                  key: ValueKey(_selected!.id),
+                                  therapist: _selected!,
+                                  onChanged: _load,
+                                  onEdit: () => _openForm(therapist: _selected),
+                                  onAvailabilityChanged: (value) =>
+                                      _setAvailability(_selected!, value),
+                                ),
+                        ),
                       ],
                     )
                   : _staffListPane(
@@ -1719,9 +1799,24 @@ class _TherapistAvailabilityScreenState
                         final therapist = _filtered[index];
                         return _TherapistAvailabilityCard(
                           therapist: therapist,
-                          onChanged: (value) =>
-                              _setAvailability(therapist, value),
-                          onEdit: () => _openForm(therapist: therapist),
+                          selected: therapist.id == _selected?.id,
+                          onTap: () {
+                            if (MediaQuery.of(context).size.width >= 900) {
+                              setState(() => _selected = therapist);
+                              return;
+                            }
+                            Navigator.of(context).push(
+                              MaterialPageRoute(
+                                builder: (_) => _StaffSchedulePage(
+                                  therapist: therapist,
+                                  onChanged: _load,
+                                  onEdit: () => _openForm(therapist: therapist),
+                                  onAvailabilityChanged: (value) =>
+                                      _setAvailability(therapist, value),
+                                ),
+                              ),
+                            );
+                          },
                         );
                       },
                     ),
@@ -1733,62 +1828,496 @@ class _TherapistAvailabilityScreenState
   }
 }
 
-class _TherapistAvailabilityCard extends StatelessWidget {
-  final _ManagedTherapist therapist;
-  final ValueChanged<bool> onChanged;
-  final VoidCallback onEdit;
+class _StaffScheduleEmptyState extends StatelessWidget {
+  const _StaffScheduleEmptyState();
 
-  const _TherapistAvailabilityCard({
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Text(
+        'Select a therapist to manage working hours and leave.',
+        style: TextStyle(color: _muted),
+      ),
+    );
+  }
+}
+
+class _StaffSchedulePage extends StatelessWidget {
+  final _ManagedTherapist therapist;
+  final Future<void> Function() onChanged;
+  final VoidCallback onEdit;
+  final ValueChanged<bool> onAvailabilityChanged;
+
+  const _StaffSchedulePage({
     required this.therapist,
     required this.onChanged,
+    required this.onEdit,
+    required this.onAvailabilityChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: _page,
+      appBar: AppBar(
+        title: Text(therapist.name),
+        backgroundColor: Colors.white,
+        foregroundColor: _ink,
+        elevation: 0,
+      ),
+      body: _StaffScheduleDetail(
+        therapist: therapist,
+        onChanged: onChanged,
+        onEdit: onEdit,
+        onAvailabilityChanged: onAvailabilityChanged,
+      ),
+    );
+  }
+}
+
+class _StaffScheduleDetail extends StatefulWidget {
+  final _ManagedTherapist therapist;
+  final Future<void> Function() onChanged;
+  final VoidCallback onEdit;
+  final ValueChanged<bool> onAvailabilityChanged;
+
+  const _StaffScheduleDetail({
+    super.key,
+    required this.therapist,
+    required this.onChanged,
+    required this.onEdit,
+    required this.onAvailabilityChanged,
+  });
+
+  @override
+  State<_StaffScheduleDetail> createState() => _StaffScheduleDetailState();
+}
+
+class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
+  static const _days = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
+
+  final _hoursTable = SupabaseTableService('therapist_working_hours');
+  final _leaveTable = SupabaseTableService('therapist_unavailability');
+  final _settingsTable = SupabaseTableService('business_settings');
+  List<Map<String, dynamic>> _hours = [];
+  List<Map<String, dynamic>> _leaves = [];
+  String _defaultOpen = '09:00';
+  String _defaultClose = '21:00';
+  bool? _availableOverride;
+  bool _savingLeave = false;
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (mounted) setState(() => _loading = true);
+    try {
+      final results = await Future.wait([
+        _hoursTable.findBy(
+          'therapist_id',
+          widget.therapist.id,
+          orderBy: 'day_of_week',
+        ),
+        _leaveTable.findBy(
+          'therapist_id',
+          widget.therapist.id,
+          orderBy: 'starts_at',
+        ),
+        _settingsTable.list(limit: 1),
+      ]);
+      final settings = results[2];
+      if (!mounted) return;
+      setState(() {
+        _hours = results[0];
+        _leaves = results[1];
+        if (settings.isNotEmpty) {
+          _defaultOpen = _shortTime(
+            settings.first['openTime'] ?? settings.first['open_time'],
+            '09:00',
+          );
+          _defaultClose = _shortTime(
+            settings.first['closeTime'] ?? settings.first['close_time'],
+            '21:00',
+          );
+        }
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      _showMessage('Unable to load this schedule.');
+    }
+  }
+
+  String _shortTime(Object? value, String fallback) {
+    final text = _asString(value, fallback);
+    return text.length >= 5 ? text.substring(0, 5) : fallback;
+  }
+
+  Map<String, dynamic>? _hoursFor(int day) {
+    for (final row in _hours) {
+      if (_asInt(row['dayOfWeek'] ?? row['day_of_week'], -1) == day) return row;
+    }
+    return null;
+  }
+
+  TimeOfDay _parseTime(String value) {
+    final parts = value.split(':');
+    return TimeOfDay(
+      hour: parts.isNotEmpty ? int.tryParse(parts[0]) ?? 9 : 9,
+      minute: parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0,
+    );
+  }
+
+  String _storageTime(TimeOfDay time) =>
+      '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}';
+
+  String _displayTime(BuildContext context, String value) =>
+      _parseTime(value).format(context);
+
+  Future<void> _editDay(int day) async {
+    final row = _hoursFor(day);
+    var start = _parseTime(
+      _shortTime(row?['startTime'] ?? row?['start_time'], _defaultOpen),
+    );
+    var end = _parseTime(
+      _shortTime(row?['endTime'] ?? row?['end_time'], _defaultClose),
+    );
+    final action = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('${_days[day]} working hours'),
+          content: Row(
+            children: [
+              Expanded(
+                child: _CompactTimeButton(
+                  label: 'Starts',
+                  value: start.format(context),
+                  onTap: () async {
+                    final picked = await showTimePicker(
+                      context: context,
+                      initialTime: start,
+                    );
+                    if (picked != null) setDialogState(() => start = picked);
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _CompactTimeButton(
+                  label: 'Ends',
+                  value: end.format(context),
+                  onTap: () async {
+                    final picked = await showTimePicker(
+                      context: context,
+                      initialTime: end,
+                    );
+                    if (picked != null) setDialogState(() => end = picked);
+                  },
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, 'inherit'),
+              child: const Text('Use business hours'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, 'custom'),
+              child: const Text('Save'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (action == null) return;
+    if (action == 'inherit') {
+      start = _parseTime(_defaultOpen);
+      end = _parseTime(_defaultClose);
+    }
+    final startMinutes = start.hour * 60 + start.minute;
+    final endMinutes = end.hour * 60 + end.minute;
+    if (startMinutes == endMinutes) {
+      _showMessage('Start and end time must be different.');
+      return;
+    }
+    final existing = _hours.where(
+      (item) => _asInt(item['dayOfWeek'] ?? item['day_of_week'], -1) == day,
+    );
+    for (final item in existing) {
+      await _hoursTable.delete(_asString(item['id']));
+    }
+    await _hoursTable.create({
+      'therapistId': widget.therapist.id,
+      'dayOfWeek': day,
+      'startTime': _storageTime(start),
+      'endTime': _storageTime(end),
+      'isCustom': action == 'custom',
+    });
+    await _load();
+    await widget.onChanged();
+  }
+
+  Future<void> _addLeave() async {
+    if (_savingLeave) return;
+    final now = DateTime.now();
+    final range = await showDialog<DateTimeRange>(
+      context: context,
+      builder: (_) => _LeaveDateRangeDialog(
+        firstDate: DateTime(now.year, now.month, now.day),
+        lastDate: DateTime(now.year + 2, 12, 31),
+      ),
+    );
+    if (range == null) return;
+    if (!mounted) return;
+    final starts = DateTime(
+      range.start.year,
+      range.start.month,
+      range.start.day,
+    );
+    final ends = DateTime(
+      range.end.year,
+      range.end.month,
+      range.end.day,
+    ).add(const Duration(days: 1));
+    setState(() => _savingLeave = true);
+    try {
+      await _leaveTable.create({
+        'therapistId': widget.therapist.id,
+        'startsAt': starts.toUtc().toIso8601String(),
+        'endsAt': ends.toUtc().toIso8601String(),
+        'internalReason': 'Leave',
+      });
+      await _load();
+      await widget.onChanged();
+      _showMessage('Leave saved successfully.');
+    } catch (error) {
+      _showMessage('Could not save leave: $error');
+    } finally {
+      if (mounted) setState(() => _savingLeave = false);
+    }
+  }
+
+  Future<void> _deleteLeave(Map<String, dynamic> row) async {
+    await _leaveTable.delete(_asString(row['id']));
+    await _load();
+    await widget.onChanged();
+  }
+
+  DateTime? _leaveDate(Map<String, dynamic> row, String camel, String snake) {
+    return DateTime.tryParse(_asString(row[camel] ?? row[snake]))?.toLocal();
+  }
+
+  void _showMessage(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _changeAvailability(bool value) {
+    setState(() => _availableOverride = value);
+    widget.onAvailabilityChanged(value);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_loading) {
+      return const Center(child: CircularProgressIndicator(color: _teal));
+    }
+    final effectivelyAvailable =
+        (_availableOverride ?? widget.therapist.available) &&
+        !widget.therapist.onLeave;
+    final statusColor = widget.therapist.onLeave
+        ? const Color(0xFFD97706)
+        : effectivelyAvailable
+        ? const Color(0xFF10B981)
+        : const Color(0xFF94A3B8);
+    final statusLabel = widget.therapist.onLeave
+        ? 'On Leave'
+        : effectivelyAvailable
+        ? 'Available'
+        : 'Unavailable';
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 1040),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _StaffProfileBanner(
+                therapist: widget.therapist,
+                statusColor: statusColor,
+                statusLabel: statusLabel,
+                effectivelyAvailable: effectivelyAvailable,
+                onAvailabilityChanged: widget.therapist.onLeave
+                    ? null
+                    : _changeAvailability,
+                onEdit: widget.onEdit,
+              ),
+              const SizedBox(height: 12),
+              _StaffSection(
+                icon: Icons.calendar_month_outlined,
+                title: 'Weekly Schedule',
+                subtitle: 'Set this therapist’s regular working hours.',
+                child: Column(
+                  children: [
+                    const _ScheduleTableHeader(),
+                    ...List.generate(7, (day) {
+                      final row = _hoursFor(day);
+                      final start = _shortTime(
+                        row?['startTime'] ?? row?['start_time'],
+                        _defaultOpen,
+                      );
+                      final end = _shortTime(
+                        row?['endTime'] ?? row?['end_time'],
+                        _defaultClose,
+                      );
+                      return _ScheduleDayCard(
+                        day: _days[day],
+                        time:
+                            '${_displayTime(context, start)} – ${_displayTime(context, end)}',
+                        onEdit: () => _editDay(day),
+                        isLast: day == 6,
+                      );
+                    }),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 12),
+              _StaffSection(
+                icon: Icons.beach_access_outlined,
+                title: 'Leave',
+                subtitle:
+                    'Planned leave automatically blocks availability and bookings.',
+                action: FilledButton.icon(
+                  onPressed: _savingLeave ? null : _addLeave,
+                  icon: _savingLeave
+                      ? const SizedBox(
+                          width: 15,
+                          height: 15,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            color: Colors.white,
+                          ),
+                        )
+                      : const Icon(Icons.add, size: 17),
+                  label: Text(_savingLeave ? 'Saving...' : 'Add Leave'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: _teal,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 11,
+                    ),
+                    textStyle: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ),
+                child: _leaves.isEmpty
+                    ? const _EmptyLeaveCard()
+                    : Column(
+                        children: _leaves.reversed.map((row) {
+                          final start = _leaveDate(
+                            row,
+                            'startsAt',
+                            'starts_at',
+                          );
+                          final endExclusive = _leaveDate(
+                            row,
+                            'endsAt',
+                            'ends_at',
+                          );
+                          final end = endExclusive?.subtract(
+                            const Duration(days: 1),
+                          );
+                          return _LeaveRow(
+                            dates: start == null || end == null
+                                ? 'Leave dates unavailable'
+                                : '${DateFormat('d MMM yyyy').format(start)} – ${DateFormat('d MMM yyyy').format(end)}',
+                            reason: _asString(
+                              row['internalReason'] ?? row['internal_reason'],
+                              'Leave',
+                            ),
+                            onDelete: () => _deleteLeave(row),
+                          );
+                        }).toList(),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffProfileBanner extends StatelessWidget {
+  final _ManagedTherapist therapist;
+  final Color statusColor;
+  final String statusLabel;
+  final bool effectivelyAvailable;
+  final ValueChanged<bool>? onAvailabilityChanged;
+  final VoidCallback onEdit;
+
+  const _StaffProfileBanner({
+    required this.therapist,
+    required this.statusColor,
+    required this.statusLabel,
+    required this.effectivelyAvailable,
+    required this.onAvailabilityChanged,
     required this.onEdit,
   });
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = therapist.available
-        ? const Color(0xFF10B981)
-        : const Color(0xFF9CA3AF);
-    final freeText = therapist.available
-        ? 'Free now'
-        : therapist.busyUntil.isNotEmpty
-        ? 'Free at ${therapist.busyUntil}'
-        : 'Unavailable';
-    final isCompact = MediaQuery.of(context).size.width < 600;
-    final avatarRadius = isCompact ? 22.0 : 24.0;
     return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: EdgeInsets.all(isCompact ? 12 : 14),
+      width: double.infinity,
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.05),
-            blurRadius: 6,
-            offset: const Offset(0, 1),
-          ),
-        ],
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 560;
+          return Row(
             children: [
               CircleAvatar(
-                radius: avatarRadius,
+                radius: compact ? 27 : 34,
                 backgroundColor: _avatarColor(therapist.name),
                 child: Text(
                   _initials(therapist.name),
                   style: TextStyle(
                     color: Colors.white,
-                    fontSize: isCompact ? 15 : 16,
-                    fontWeight: FontWeight.w800,
+                    fontSize: compact ? 20 : 26,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
-              SizedBox(width: isCompact ? 12 : 14),
+              const SizedBox(width: 16),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1798,115 +2327,796 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
-                        fontSize: isCompact ? 15 : 16,
-                        color: _ink,
+                        fontSize: compact ? 20 : 24,
                         fontWeight: FontWeight.w800,
+                        color: _ink,
                       ),
                     ),
-                    const SizedBox(height: 4),
-                    if (therapist.phone.isNotEmpty)
-                      Text(
-                        therapist.phone,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: _muted, fontSize: 12),
+                    const SizedBox(height: 2),
+                    Text(
+                      therapist.role,
+                      style: const TextStyle(
+                        color: _teal,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
                       ),
+                    ),
                     const SizedBox(height: 8),
-                    Wrap(
-                      spacing: 6,
-                      runSpacing: 6,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
                       children: [
-                        _TherapistMiniPill(therapist.role),
-                        _TherapistMiniPill(
-                          '${therapist.doneToday} appts today',
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: statusColor,
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                        _TherapistMiniPill(freeText),
+                        const SizedBox(width: 7),
+                        Text(
+                          statusLabel,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        SizedBox(
+                          height: 25,
+                          child: Transform.scale(
+                            scale: 0.72,
+                            child: Switch(
+                              value: effectivelyAvailable,
+                              onChanged: onAvailabilityChanged,
+                              activeThumbColor: Colors.white,
+                              activeTrackColor: _teal,
+                            ),
+                          ),
+                        ),
                       ],
                     ),
                   ],
                 ),
               ),
-              SizedBox(
-                width: 34,
-                height: 34,
-                child: IconButton(
+              if (!compact)
+                OutlinedButton.icon(
                   onPressed: onEdit,
-                  tooltip: 'Edit staff',
-                  padding: EdgeInsets.zero,
-                  icon: const Icon(Icons.edit_outlined, size: 18),
-                  color: _teal,
-                  style: IconButton.styleFrom(
-                    backgroundColor: const Color(0xFFE8F5F5),
-                    shape: const CircleBorder(),
+                  icon: const Icon(Icons.edit_outlined, size: 17),
+                  label: const Text('Edit Profile'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _teal,
+                    side: const BorderSide(color: Color(0xFFCBD5E1)),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
                   ),
+                )
+              else
+                IconButton(
+                  onPressed: onEdit,
+                  tooltip: 'Edit profile',
+                  icon: const Icon(Icons.edit_outlined, color: _teal),
                 ),
-              ),
             ],
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Container(
-                width: 8,
-                height: 8,
-                decoration: BoxDecoration(
-                  color: statusColor,
-                  shape: BoxShape.circle,
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _StaffSection extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final Widget child;
+  final Widget? action;
+
+  const _StaffSection({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.child,
+    this.action,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 14, 14, 13),
+            child: Row(
+              children: [
+                Container(
+                  width: 32,
+                  height: 32,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F5F5),
+                    borderRadius: BorderRadius.circular(9),
+                  ),
+                  child: Icon(icon, size: 18, color: _teal),
                 ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  therapist.available ? 'Available' : 'Unavailable',
-                  style: TextStyle(
-                    color: statusColor,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: _ink,
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        subtitle,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(color: _muted, fontSize: 11),
+                      ),
+                    ],
                   ),
                 ),
-              ),
-              SizedBox(
-                width: 52,
-                height: 32,
-                child: Transform.scale(
-                  scale: 0.82,
-                  child: Switch(
-                    value: therapist.available,
-                    onChanged: onChanged,
-                    activeThumbColor: Colors.white,
-                    activeTrackColor: const Color(0xFF10B981),
-                    inactiveThumbColor: Colors.white,
-                    inactiveTrackColor: const Color(0xFFD1D5DB),
-                  ),
-                ),
-              ),
-            ],
+                if (action != null) ...[const SizedBox(width: 10), action!],
+              ],
+            ),
           ),
+          const Divider(height: 1, color: Color(0xFFE2E8F0)),
+          Padding(padding: const EdgeInsets.all(14), child: child),
         ],
       ),
     );
   }
 }
 
-class _TherapistMiniPill extends StatelessWidget {
-  final String label;
-
-  const _TherapistMiniPill(this.label);
+class _ScheduleTableHeader extends StatelessWidget {
+  const _ScheduleTableHeader();
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF3F4F6),
-        borderRadius: BorderRadius.circular(999),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
       ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          color: _muted,
-          fontSize: 11,
-          fontWeight: FontWeight.w700,
+      child: const Row(
+        children: [
+          Expanded(flex: 3, child: Text('Day', style: _scheduleHeaderStyle)),
+          Expanded(
+            flex: 4,
+            child: Text('Working Hours', style: _scheduleHeaderStyle),
+          ),
+          SizedBox(width: 42, child: Text('Edit', style: _scheduleHeaderStyle)),
+        ],
+      ),
+    );
+  }
+}
+
+const _scheduleHeaderStyle = TextStyle(
+  color: Color(0xFF64748B),
+  fontSize: 11,
+  fontWeight: FontWeight.w700,
+);
+
+class _ScheduleDayCard extends StatelessWidget {
+  final String day;
+  final String time;
+  final VoidCallback onEdit;
+  final bool isLast;
+  const _ScheduleDayCard({
+    required this.day,
+    required this.time,
+    required this.onEdit,
+    required this.isLast,
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+    decoration: BoxDecoration(
+      border: isLast
+          ? null
+          : const Border(bottom: BorderSide(color: Color(0xFFE2E8F0))),
+    ),
+    child: Row(
+      children: [
+        Expanded(
+          flex: 3,
+          child: Text(
+            day,
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 12,
+              color: _ink,
+            ),
+          ),
+        ),
+        Expanded(
+          flex: 4,
+          child: Text(
+            time,
+            style: const TextStyle(fontSize: 12, color: _muted),
+          ),
+        ),
+        SizedBox(
+          width: 42,
+          height: 34,
+          child: IconButton(
+            onPressed: onEdit,
+            tooltip: 'Edit $day',
+            padding: EdgeInsets.zero,
+            icon: const Icon(Icons.edit_outlined, size: 17, color: _teal),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _LeaveDateRangeDialog extends StatefulWidget {
+  final DateTime firstDate;
+  final DateTime lastDate;
+
+  const _LeaveDateRangeDialog({
+    required this.firstDate,
+    required this.lastDate,
+  });
+
+  @override
+  State<_LeaveDateRangeDialog> createState() => _LeaveDateRangeDialogState();
+}
+
+class _LeaveDateRangeDialogState extends State<_LeaveDateRangeDialog> {
+  late DateTime _visibleMonth;
+  DateTime? _start;
+  DateTime? _end;
+
+  @override
+  void initState() {
+    super.initState();
+    _visibleMonth = DateTime(widget.firstDate.year, widget.firstDate.month);
+  }
+
+  DateTime _dateOnly(DateTime value) =>
+      DateTime(value.year, value.month, value.day);
+
+  bool _sameDate(DateTime? first, DateTime second) =>
+      first != null &&
+      first.year == second.year &&
+      first.month == second.month &&
+      first.day == second.day;
+
+  bool _isSelectable(DateTime day) {
+    final clean = _dateOnly(day);
+    return !clean.isBefore(_dateOnly(widget.firstDate)) &&
+        !clean.isAfter(_dateOnly(widget.lastDate));
+  }
+
+  void _select(DateTime day) {
+    if (!_isSelectable(day)) return;
+    final clean = _dateOnly(day);
+    setState(() {
+      if (_start == null || _end != null) {
+        _start = clean;
+        _end = null;
+      } else if (clean.isBefore(_start!)) {
+        _start = clean;
+      } else {
+        _end = clean;
+      }
+    });
+  }
+
+  void _moveMonth(int offset) {
+    final next = DateTime(_visibleMonth.year, _visibleMonth.month + offset);
+    final earliest = DateTime(widget.firstDate.year, widget.firstDate.month);
+    final latest = DateTime(widget.lastDate.year, widget.lastDate.month);
+    if (next.isBefore(earliest) || next.isAfter(latest)) return;
+    setState(() => _visibleMonth = next);
+  }
+
+  bool get _canMoveBack {
+    final earliest = DateTime(widget.firstDate.year, widget.firstDate.month);
+    return _visibleMonth.isAfter(earliest);
+  }
+
+  bool get _canMoveForward {
+    final latest = DateTime(widget.lastDate.year, widget.lastDate.month);
+    return _visibleMonth.isBefore(latest);
+  }
+
+  String get _rangeLabel {
+    if (_start == null) return 'Choose a start date';
+    if (_end == null) {
+      return '${DateFormat('d MMM yyyy').format(_start!)} – choose end date';
+    }
+    return '${DateFormat('d MMM yyyy').format(_start!)} – ${DateFormat('d MMM yyyy').format(_end!)}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final firstDay = DateTime(_visibleMonth.year, _visibleMonth.month, 1);
+    final gridStart = firstDay.subtract(Duration(days: firstDay.weekday % 7));
+    final days = List.generate(
+      42,
+      (index) => gridStart.add(Duration(days: index)),
+    );
+
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 20),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 390),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 34,
+                    height: 34,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5F5),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(
+                      Icons.event_available_outlined,
+                      color: _teal,
+                      size: 19,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  const Expanded(
+                    child: Text(
+                      'Select leave dates',
+                      style: TextStyle(
+                        color: _ink,
+                        fontSize: 17,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    tooltip: 'Close',
+                    icon: const Icon(Icons.close, size: 20),
+                  ),
+                ],
+              ),
+              Container(
+                width: double.infinity,
+                margin: const EdgeInsets.only(top: 8, bottom: 13),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 9,
+                ),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  _rangeLabel,
+                  style: TextStyle(
+                    color: _start == null ? _muted : _teal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      DateFormat('MMMM yyyy').format(_visibleMonth),
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: _canMoveBack ? () => _moveMonth(-1) : null,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.chevron_left),
+                  ),
+                  IconButton(
+                    onPressed: _canMoveForward ? () => _moveMonth(1) : null,
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(Icons.chevron_right),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              const Row(
+                children: [
+                  _LeaveWeekdayLabel('SUN'),
+                  _LeaveWeekdayLabel('MON'),
+                  _LeaveWeekdayLabel('TUE'),
+                  _LeaveWeekdayLabel('WED'),
+                  _LeaveWeekdayLabel('THU'),
+                  _LeaveWeekdayLabel('FRI'),
+                  _LeaveWeekdayLabel('SAT'),
+                ],
+              ),
+              const SizedBox(height: 7),
+              GridView.builder(
+                shrinkWrap: true,
+                physics: const NeverScrollableScrollPhysics(),
+                gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: 7,
+                  mainAxisSpacing: 5,
+                  crossAxisSpacing: 3,
+                ),
+                itemCount: days.length,
+                itemBuilder: (context, index) {
+                  final day = _dateOnly(days[index]);
+                  final selectable = _isSelectable(day);
+                  final inMonth = day.month == _visibleMonth.month;
+                  final isStart = _sameDate(_start, day);
+                  final isEnd = _sameDate(_end, day);
+                  final inRange =
+                      _start != null &&
+                      _end != null &&
+                      day.isAfter(_start!) &&
+                      day.isBefore(_end!);
+                  final selected = isStart || isEnd;
+
+                  return InkWell(
+                    onTap: selectable ? () => _select(day) : null,
+                    borderRadius: BorderRadius.circular(20),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 120),
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: selected
+                            ? _teal
+                            : inRange
+                            ? const Color(0xFFD9EEEE)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        '${day.day}',
+                        style: TextStyle(
+                          color: selected
+                              ? Colors.white
+                              : !selectable || !inMonth
+                              ? const Color(0xFFCBD5E1)
+                              : _ink,
+                          fontSize: 12,
+                          fontWeight: selected || inRange
+                              ? FontWeight.w800
+                              : FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              const SizedBox(height: 13),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Cancel'),
+                  ),
+                  const Spacer(),
+                  FilledButton(
+                    onPressed: _start != null && _end != null
+                        ? () => Navigator.pop(
+                            context,
+                            DateTimeRange(start: _start!, end: _end!),
+                          )
+                        : null,
+                    style: FilledButton.styleFrom(backgroundColor: _teal),
+                    child: const Text('Continue'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _LeaveWeekdayLabel extends StatelessWidget {
+  final String label;
+  const _LeaveWeekdayLabel(this.label);
+
+  @override
+  Widget build(BuildContext context) => Expanded(
+    child: Text(
+      label,
+      textAlign: TextAlign.center,
+      style: const TextStyle(
+        color: Color(0xFF94A3B8),
+        fontSize: 9,
+        fontWeight: FontWeight.w800,
+      ),
+    ),
+  );
+}
+
+class _CompactTimeButton extends StatelessWidget {
+  final String label;
+  final String value;
+  final VoidCallback onTap;
+  const _CompactTimeButton({
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(10),
+    child: InputDecorator(
+      decoration: InputDecoration(
+        labelText: label,
+        border: const OutlineInputBorder(),
+      ),
+      child: Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
+    ),
+  );
+}
+
+class _EmptyLeaveCard extends StatelessWidget {
+  const _EmptyLeaveCard();
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 22),
+    decoration: BoxDecoration(
+      color: const Color(0xFFF8FAFC),
+      borderRadius: BorderRadius.circular(10),
+      border: Border.all(color: const Color(0xFFE2E8F0)),
+    ),
+    child: const Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        CircleAvatar(
+          radius: 24,
+          backgroundColor: Color(0xFFE8F5F5),
+          child: Icon(Icons.beach_access_outlined, color: _teal, size: 22),
+        ),
+        SizedBox(width: 13),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'No planned leave yet.',
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              SizedBox(height: 3),
+              Text(
+                'Add leave to automatically mark this staff member unavailable.',
+                style: TextStyle(color: _muted, fontSize: 11),
+              ),
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _LeaveRow extends StatelessWidget {
+  final String dates;
+  final String reason;
+  final VoidCallback onDelete;
+  const _LeaveRow({
+    required this.dates,
+    required this.reason,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.only(bottom: 8),
+    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+    decoration: BoxDecoration(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: const Color(0xFFE5E7EB)),
+    ),
+    child: Row(
+      children: [
+        const Icon(
+          Icons.event_busy_outlined,
+          color: Color(0xFFD97706),
+          size: 20,
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                dates,
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700,
+                  color: _ink,
+                ),
+              ),
+              if (reason.isNotEmpty)
+                Text(
+                  reason,
+                  style: const TextStyle(fontSize: 12, color: _muted),
+                ),
+            ],
+          ),
+        ),
+        IconButton(
+          onPressed: onDelete,
+          tooltip: 'Delete leave',
+          icon: const Icon(
+            Icons.delete_outline,
+            color: Color(0xFFB91C1C),
+            size: 20,
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+class _TherapistAvailabilityCard extends StatelessWidget {
+  final _ManagedTherapist therapist;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _TherapistAvailabilityCard({
+    required this.therapist,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final effectivelyAvailable = therapist.available && !therapist.onLeave;
+    final statusColor = therapist.onLeave
+        ? const Color(0xFFD97706)
+        : effectivelyAvailable
+        ? const Color(0xFF10B981)
+        : const Color(0xFF9CA3AF);
+    final isCompact = MediaQuery.of(context).size.width < 600;
+    final avatarRadius = isCompact ? 20.0 : 21.0;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: selected ? const Color(0xFFF0FDFA) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: selected ? _teal : const Color(0xFFE5E7EB),
+            width: selected ? 1.5 : 1,
+          ),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    CircleAvatar(
+                      radius: avatarRadius,
+                      backgroundColor: _avatarColor(therapist.name),
+                      child: Text(
+                        _initials(therapist.name),
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: isCompact ? 15 : 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 11),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            therapist.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: isCompact ? 15 : 16,
+                              color: _ink,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            therapist.role,
+                            style: const TextStyle(
+                              color: _muted,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            '${therapist.doneToday} services today',
+                            style: const TextStyle(
+                              color: Color(0xFF64748B),
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Container(
+                      width: 8,
+                      height: 8,
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        therapist.onLeave
+                            ? 'On Leave'
+                            : effectivelyAvailable
+                            ? 'Available'
+                            : 'Unavailable',
+                        style: TextStyle(
+                          color: statusColor,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: Color(0xFF94A3B8),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );

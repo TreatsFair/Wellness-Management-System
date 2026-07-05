@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../data/repositories/image_upload_repository.dart';
@@ -1297,11 +1297,12 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
     try {
       final rows = await _serviceRepository.getServices();
       final staffRow = await _therapistRepository.getTherapist(widget.staff.id);
-      final services = rows
-          .map(_StaffServiceCommission.fromMap)
-          .where((service) => service.id.isNotEmpty)
-          .toList()
-        ..sort((a, b) => a.name.compareTo(b.name));
+      final services =
+          rows
+              .map(_StaffServiceCommission.fromMap)
+              .where((service) => service.id.isNotEmpty)
+              .toList()
+            ..sort((a, b) => a.name.compareTo(b.name));
       if (!mounted) return;
       setState(() {
         _services = services;
@@ -1897,7 +1898,9 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
     _nameController = TextEditingController(text: therapist?.name ?? '');
     _phoneController = TextEditingController(text: therapist?.phone ?? '');
     _genderController = TextEditingController(text: therapist?.gender ?? '');
-    _roleController = TextEditingController(text: therapist?.role ?? 'Therapist');
+    _roleController = TextEditingController(
+      text: therapist?.role ?? 'Therapist',
+    );
     _joinDateController = TextEditingController(
       text: therapist?.joinDate ?? widget.defaultJoinDate,
     );
@@ -1946,10 +1949,11 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
         therapistId = savedRow['id']?.toString() ?? '';
       }
 
-      var profileImageUrl = (savedRow['profileImageUrl'] ??
-              widget.therapist?.profileImageUrl ??
-              '')
-          .toString();
+      var profileImageUrl =
+          (savedRow['profileImageUrl'] ??
+                  widget.therapist?.profileImageUrl ??
+                  '')
+              .toString();
       final previousUrl = widget.therapist?.profileImageUrl ?? '';
       if (_imagePreview != null && therapistId.isNotEmpty) {
         profileImageUrl = await _imageUploadRepository.uploadImage(
@@ -1958,10 +1962,9 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
           id: therapistId,
           previousUrl: previousUrl,
         );
-        savedRow = await _therapistRepository.updateTherapist(
-          therapistId,
-          {'profileImageUrl': profileImageUrl},
-        );
+        savedRow = await _therapistRepository.updateTherapist(therapistId, {
+          'profileImageUrl': profileImageUrl,
+        });
       } else if (_imageRemoved && previousUrl.trim().isNotEmpty) {
         await _imageUploadRepository.removePublicUrl(previousUrl);
       }
@@ -2103,7 +2106,8 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                               icon: const Icon(Icons.upload_outlined),
                               label: Text(
                                 _imagePreview == null &&
-                                        (widget.therapist?.profileImageUrl ?? '')
+                                        (widget.therapist?.profileImageUrl ??
+                                                '')
                                             .trim()
                                             .isEmpty
                                     ? 'Upload Photo'
@@ -2149,7 +2153,10 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                     controller: _genderController,
                   ),
                   const SizedBox(height: 14),
-                  _StaffRoleDropdown(label: 'Role', controller: _roleController),
+                  _StaffRoleDropdown(
+                    label: 'Role',
+                    controller: _roleController,
+                  ),
                   const SizedBox(height: 14),
                   _TherapistFormField(
                     label: 'Join Date',
@@ -2215,9 +2222,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
                                     color: Colors.white,
                                   ),
                                 )
-                              : Text(
-                                  _isEditing ? 'Save Changes' : 'Add Staff',
-                                ),
+                              : Text(_isEditing ? 'Save Changes' : 'Add Staff'),
                         ),
                       ),
                     ],
@@ -2318,7 +2323,6 @@ class _TherapistGenderDropdown extends StatelessWidget {
       ),
     );
   }
-
 }
 
 class _StaffRoleDropdown extends StatelessWidget {
@@ -2379,11 +2383,7 @@ class _SearchBar extends StatelessWidget {
             color: Color(0xFF64748B),
             fontWeight: FontWeight.w700,
           ),
-          prefixIcon: Icon(
-            Icons.search,
-            color: Color(0xFF475569),
-            size: 20,
-          ),
+          prefixIcon: Icon(Icons.search, color: Color(0xFF475569), size: 20),
           border: InputBorder.none,
           enabledBorder: InputBorder.none,
           focusedBorder: InputBorder.none,
@@ -2399,11 +2399,7 @@ class _Avatar extends StatelessWidget {
   final double radius;
   final SelectedImage? preview;
 
-  const _Avatar({
-    required this.therapist,
-    required this.radius,
-    this.preview,
-  });
+  const _Avatar({required this.therapist, required this.radius, this.preview});
 
   @override
   Widget build(BuildContext context) {
@@ -2428,14 +2424,10 @@ class _Avatar extends StatelessWidget {
                 width: radius * 2,
                 height: radius * 2,
                 fit: BoxFit.cover,
-                placeholder: (_, _) => _AvatarInitials(
-                  therapist: therapist,
-                  radius: radius,
-                ),
-                errorWidget: (_, _, _) => _AvatarInitials(
-                  therapist: therapist,
-                  radius: radius,
-                ),
+                placeholder: (_, _) =>
+                    _AvatarInitials(therapist: therapist, radius: radius),
+                errorWidget: (_, _, _) =>
+                    _AvatarInitials(therapist: therapist, radius: radius),
               )
             : _AvatarInitials(therapist: therapist, radius: radius),
       ),
@@ -2596,5 +2588,3 @@ class _InfoRow extends StatelessWidget {
     );
   }
 }
-
-

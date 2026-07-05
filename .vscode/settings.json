@@ -4,4 +4,9 @@
     "liveServer.settings.root": "/thebest-website",
     "java.import.gradle.enabled": false,
     "java.import.maven.enabled": false,
+    "deno.enablePaths": [
+        "./thebest-app/supabase/functions/booking-api"
+    ],
+    "deno.importMap": "./thebest-app/supabase/functions/booking-api/deno.json",
+    "deno.path": "C:/Users/chinh/AppData/Local/Microsoft/WinGet/Links/deno.exe"
 }

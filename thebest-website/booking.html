@@ -12,7 +12,7 @@
       href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" href="./pics/transparent logo.png" />
+    <link rel="icon" href="./pics/FB profile-180x180px-02.jpg" />
     <link rel="stylesheet" href="./styles/modern-normalise.css" />
     <link rel="stylesheet" href="./styles/booking-page.css" />
     <link rel="stylesheet" href="./styles/booking-responsive.css" />
@@ -148,7 +148,7 @@
             <fieldset class="preference-fieldset">
               <legend>Therapist preference</legend>
               <div class="preference-grid" id="therapist-options">
-                <button class="preference-card is-selected" type="button" data-therapist="No preference">
+                <button class="preference-card" type="button" data-therapist="No preference">
                   <span class="avatar avatar-any">
                     <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1.5A3.5 3.5 0 0 0 12.5 14h-5A3.5 3.5 0 0 0 4 17.5V19m14-8a3 3 0 1 0 0-6m2 14v-1.5a3.5 3.5 0 0 0-2.5-3.35M10 10a3 3 0 1 0-6 0 3 3 0 0 0 6 0Z" /></svg>
                   </span>
@@ -226,6 +226,10 @@
                 <span>Anything we should know? <small>Optional</small></span>
                 <textarea name="notes" rows="3" placeholder="Preferences, accessibility needs or special requests"></textarea>
               </label>
+              <label class="booking-honeypot" aria-hidden="true">
+                Website
+                <input name="website" tabindex="-1" autocomplete="off" />
+              </label>
               <label class="consent field-wide">
                 <input type="checkbox" required />
                 <span>I agree to the booking and cancellation terms and understand that changes are handled by the selected outlet.</span>
@@ -265,7 +269,7 @@
             <dl class="review-details">
               <div><dt>Outlet</dt><dd id="review-outlet">&mdash;</dd></div>
               <div><dt>Treatment</dt><dd id="review-services">&mdash;</dd></div>
-              <div><dt>Therapist</dt><dd id="review-therapist">No preference</dd></div>
+              <div><dt>Therapist</dt><dd id="review-therapist">&mdash;</dd></div>
               <div><dt>Date & time</dt><dd id="review-datetime">&mdash;</dd></div>
             </dl>
             <div class="review-total">
@@ -292,14 +296,14 @@
       <div class="success-mark">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>
       </div>
-      <p class="eyebrow">Preview complete</p>
-      <h2>Your booking flow is ready.</h2>
-      <p>
-        In the live version, this button will create a 15-minute hold and take the customer to Billplz. No payment has been created in this preview.
-      </p>
+      <p class="eyebrow" id="confirmation-eyebrow">Preview complete</p>
+      <h2 id="confirmation-title">Your booking flow is ready.</h2>
+      <p id="confirmation-message">No payment or confirmed appointment has been created.</p>
       <button class="primary-button" id="close-dialog" type="button">Return to booking</button>
     </dialog>
 
+    <script src="./js/booking-config.js"></script>
+    <script src="./js/booking-api.js"></script>
     <script src="./js/booking-page.js"></script>
   </body>
 </html>
