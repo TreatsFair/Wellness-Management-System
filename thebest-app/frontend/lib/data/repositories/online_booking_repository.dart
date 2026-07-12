@@ -20,7 +20,7 @@ class OnlineBookingRepository {
           .order('display_order'),
       _client
           .from('services')
-          .select('id,name,duration,is_active')
+          .select('id,name,duration,buffer_after_minutes,is_active')
           .eq('outlet_id', outletId)
           .order('name'),
       _client

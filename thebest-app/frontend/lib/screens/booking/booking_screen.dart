@@ -1,7 +1,8 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/services/csp_service.dart';
+import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
@@ -13,8 +14,7 @@ DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 int _bookingTimeToMinutes(String time) {
   final parts = time.split(':');
   if (parts.length < 2) return 0;
-  return (int.tryParse(parts[0]) ?? 0) * 60 +
-      (int.tryParse(parts[1]) ?? 0);
+  return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }
 
 String _bookingMinutesToTime(int minutes) {
@@ -32,9 +32,9 @@ String _bookingCleanTime(String value) {
 
 String _bookingTimeLabel(String value) {
   final minutes = _bookingTimeToMinutes(value);
-  return DateFormat('h:mm a').format(
-    DateTime(2026, 1, 1, (minutes ~/ 60) % 24, minutes % 60),
-  );
+  return DateFormat(
+    'h:mm a',
+  ).format(DateTime(2026, 1, 1, (minutes ~/ 60) % 24, minutes % 60));
 }
 
 String _normalizeRoomType(Object? value) {
@@ -51,6 +51,7 @@ String _normalizeRoomType(Object? value) {
 class _Service {
   final String id, name, imageUrl, roomType, category;
   final int duration;
+  final int bufferAfterMinutes;
   final double price;
   final double therapistCommission;
   final double counterCommission;
@@ -62,6 +63,7 @@ class _Service {
     required this.roomType,
     required this.category,
     required this.duration,
+    required this.bufferAfterMinutes,
     required this.price,
     required this.therapistCommission,
     required this.counterCommission,
@@ -75,6 +77,7 @@ class _Service {
       roomType: _normalizeRoomType(d['roomType']),
       category: d['category']?.toString().trim() ?? 'Services',
       duration: _parseInt(d['duration'], fallback: 60),
+      bufferAfterMinutes: _parseInt(d['bufferAfterMinutes'], fallback: 0),
       price: _parseDouble(d['price']),
       therapistCommission: _parseDouble(d['therapistCommission']),
       counterCommission: _parseDouble(d['counterCommission']),
@@ -115,21 +118,6 @@ class _Therapist {
     required this.isFree,
     required this.busyUntil,
   });
-
-  factory _Therapist.fromMap(Map<String, dynamic> d) {
-    return _Therapist(
-      id: d['id']?.toString() ?? '',
-      name: d['name']?.toString() ?? '',
-      gender: d['gender']?.toString().trim().toLowerCase() ?? '',
-      imageUrl:
-          (d['imageUrl'] ?? d['photoUrl'] ?? d['profileImageUrl'])
-              ?.toString()
-              .trim() ??
-          '',
-      isFree: _isActiveDoc({'isActive': d['availabilityStatus'] ?? true}),
-      busyUntil: d['busyUntil']?.toString() ?? '',
-    );
-  }
 
   bool get isFemale => gender.startsWith('f');
   bool get isMale => gender.startsWith('m');
@@ -403,7 +391,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       final therapistMatches = _therapists.where(
         (therapist) => therapist.id == editAllocation.therapistId,
       );
-      final roomMatches = _rooms.where((room) => room.id == editAllocation.roomId);
+      final roomMatches = _rooms.where(
+        (room) => room.id == editAllocation.roomId,
+      );
       if (services.isEmpty || therapistMatches.isEmpty || roomMatches.isEmpty) {
         allocations.add(null);
         continue;
@@ -423,10 +413,13 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       );
     }
 
-    final matchedCustomers = _customers.where((c) => c.id == payload.customerId);
+    final matchedCustomers = _customers.where(
+      (c) => c.id == payload.customerId,
+    );
     final customer = matchedCustomers.isNotEmpty
         ? matchedCustomers.first
-        : payload.customerId.trim().isEmpty || payload.customerId == 'walk_in_guest'
+        : payload.customerId.trim().isEmpty ||
+              payload.customerId == 'walk_in_guest'
         ? _Customer.guest
         : _Customer(
             id: payload.customerId,
@@ -476,18 +469,78 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   Future<void> _loadTherapists() async {
     final rows = await _therapistRepository.getActiveTherapists();
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    final nowMinutes = now.hour * 60 + now.minute;
+    final therapists = <_Therapist>[];
+    for (final row in rows) {
+      var isFree = _isActiveDoc({
+        'isActive': row['availabilityStatus'] ?? true,
+      });
+      var busyUntil = '';
+      final appointments = await _appointmentRepository
+          .getActiveAppointmentsForTherapist(
+            row['id']?.toString() ?? '',
+            today,
+          );
+      for (final appointment in appointments) {
+        final start = _bookingTimeToMinutes(
+          appointment['startTime']?.toString() ?? '00:00',
+        );
+        final end =
+            _bookingTimeToMinutes(
+              appointment['endTime']?.toString() ?? '00:00',
+            ) +
+            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
+        if (start <= nowMinutes && end > nowMinutes) {
+          isFree = false;
+          busyUntil = _bookingMinutesToTime(end);
+          break;
+        }
+      }
+      therapists.add(
+        _Therapist(
+          id: row['id']?.toString() ?? '',
+          name: row['name']?.toString() ?? '',
+          gender: row['gender']?.toString().trim().toLowerCase() ?? '',
+          imageUrl:
+              (row['imageUrl'] ?? row['photoUrl'] ?? row['profileImageUrl'])
+                  ?.toString()
+                  .trim() ??
+              '',
+          isFree: isFree,
+          busyUntil: busyUntil,
+        ),
+      );
+    }
     setState(() {
-      _therapists = rows.map((d) => _Therapist.fromMap(d)).toList();
+      _therapists = therapists;
     });
   }
 
   Future<void> _loadRooms() async {
     final rows = await _roomRepository.getActiveRooms();
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    final nowMinutes = now.hour * 60 + now.minute;
 
     final zones = <_RoomZone>[];
     for (final d in rows) {
       if (!_isActiveDoc(d)) continue;
       final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
+      final appointments = await _appointmentRepository
+          .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', today);
+      final occupied = appointments.where((appointment) {
+        final start = _bookingTimeToMinutes(
+          appointment['startTime']?.toString() ?? '00:00',
+        );
+        final end =
+            _bookingTimeToMinutes(
+              appointment['endTime']?.toString() ?? '00:00',
+            ) +
+            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
+        return start <= nowMinutes && end > nowMinutes;
+      }).length;
       zones.add(
         _RoomZone(
           id: d['id']?.toString() ?? '',
@@ -496,7 +549,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           floor: d['floor'] ?? '',
           imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
           totalSlots: totalSlots,
-          freeSlots: totalSlots,
+          freeSlots: (totalSlots - occupied).clamp(0, totalSlots),
         ),
       );
     }
@@ -665,7 +718,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _slots = [];
       _loadingSlots = false;
       _paxAllocations[_activePaxIndex] = null;
-      shouldGenerateSlots = _selectedServices.isNotEmpty &&
+      shouldGenerateSlots =
+          _selectedServices.isNotEmpty &&
           _selectedTherapist != null &&
           _selectedRoom != null;
     });
@@ -676,7 +730,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     final start = _bookingCleanTime(slot.start);
     return _TimeSlot(
       start: start,
-      end: _bookingMinutesToTime(_bookingTimeToMinutes(start) + _serviceDuration),
+      end: _bookingMinutesToTime(
+        _bookingTimeToMinutes(start) + _serviceDuration,
+      ),
       isRecommended: slot.isRecommended,
       isAvailable: slot.isAvailable,
     );
@@ -731,10 +787,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     }
   }
 
-  int get _serviceDuration => _selectedServices.fold(
-    0,
-    (total, service) => total + service.duration,
-  );
+  int get _serviceDuration =>
+      _selectedServices.fold(0, (total, service) => total + service.duration);
 
   double get _servicePrice =>
       _selectedServices.fold(0, (total, service) => total + service.price);
@@ -821,6 +875,18 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     var bEnd = _bookingTimeToMinutes(b.endTime);
     if (aEnd <= aStart) aEnd += 24 * 60;
     if (bEnd <= bStart) bEnd += 24 * 60;
+    aEnd += a.services.fold<int>(
+      0,
+      (buffer, service) => service.bufferAfterMinutes > buffer
+          ? service.bufferAfterMinutes
+          : buffer,
+    );
+    bEnd += b.services.fold<int>(
+      0,
+      (buffer, service) => service.bufferAfterMinutes > buffer
+          ? service.bufferAfterMinutes
+          : buffer,
+    );
     return aStart < bEnd && aEnd > bStart;
   }
 
@@ -957,7 +1023,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     final selected = _selectedSlot;
     if (selected == null) return false;
     if (_slots.isEmpty || _loadingSlots) return true;
-    return _slots.any((slot) => slot.isAvailable && slot.start == selected.start);
+    return _slots.any(
+      (slot) => slot.isAvailable && slot.start == selected.start,
+    );
   }
 
   List<String> get _missingSlotRequirements {
@@ -1021,18 +1089,16 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           endTime: allocation.endTime,
         );
         if (result.success) {
-          await _appointmentRepository.updateAppointment(
-            widget.editPayload!.appointmentId!,
-            {
-              'customerId': _selectedCustomer!.id,
-              'serviceId': allocation.primaryService.id,
-              'serviceName': allocation.serviceNameSummary,
-              'serviceItems': allocation.serviceItems,
-              'itemCount': allocation.services.length,
-              'totalPrice': allocation.price,
-              'type': 'appointment',
-            },
-          );
+          await _appointmentRepository
+              .updateAppointment(widget.editPayload!.appointmentId!, {
+                'customerId': _selectedCustomer!.id,
+                'serviceId': allocation.primaryService.id,
+                'serviceName': allocation.serviceNameSummary,
+                'serviceItems': allocation.serviceItems,
+                'itemCount': allocation.services.length,
+                'totalPrice': allocation.price,
+                'type': 'appointment',
+              });
         }
       } else if (allocations.length == 1) {
         final allocation = allocations.first;
@@ -1093,7 +1159,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error: $e'),
+            content: Text('Error: ${friendlyErrorMessage(e)}'),
             backgroundColor: const Color(0xFFE53935),
             behavior: SnackBarBehavior.floating,
           ),
@@ -1253,7 +1319,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             canConfirm: _canConfirm,
             isConfirming: _isConfirming,
             onConfirm: () => _confirmAppointment(),
-            confirmLabel: _isEditing ? 'Save Appointment' : 'Confirm Appointment',
+            confirmLabel: _isEditing
+                ? 'Save Appointment'
+                : 'Confirm Appointment',
             onSecondaryConfirm: _isEditing && widget.editPayload!.isGroup
                 ? _saveAndConfirmGroupPayment
                 : null,
@@ -1542,9 +1610,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   Widget _buildTherapistRoomSection({required bool isTablet}) {
     final compatibleRooms = _rooms
-        .where(
-          (r) => _requiredRoomType.isEmpty || r.type == _requiredRoomType,
-        )
+        .where((r) => _requiredRoomType.isEmpty || r.type == _requiredRoomType)
         .toList();
 
     if (isTablet) {
@@ -1796,7 +1862,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                 allocation: _allocationSlots[i],
                 selected: i == _activePaxIndex,
                 onTap: () => _selectPax(i),
-                onClear: _allocationSlots[i] == null ? null : () => _clearPax(i),
+                onClear: _allocationSlots[i] == null
+                    ? null
+                    : () => _clearPax(i),
               ),
               const SizedBox(height: 8),
             ],
@@ -2052,12 +2120,16 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
+    final dateOfBirth = _dobController.text.trim();
+    final joinDate = _joinDateController.text.trim();
     final data = {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
       'gender': _genderController.text.trim(),
-      'dateOfBirth': _dobController.text.trim(),
-      'joinDate': _joinDateController.text.trim(),
+      // date_of_birth/join_date are DATE columns — an empty string is not a
+      // valid date and Postgres rejects it, so omit rather than send ''.
+      if (dateOfBirth.isNotEmpty) 'dateOfBirth': dateOfBirth,
+      if (joinDate.isNotEmpty) 'joinDate': joinDate,
       'notes': _notesController.text.trim(),
     };
 
@@ -2066,13 +2138,13 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
       final customerId = savedRow['id']?.toString() ?? '';
       if (!mounted) return;
       Navigator.of(context).pop(widget.customerBuilder(customerId, data));
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to save customer'),
-          backgroundColor: Color(0xFFE53935),
+        SnackBar(
+          content: Text('Unable to save customer: ${friendlyErrorMessage(e)}'),
+          backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -2273,10 +2345,7 @@ class _QuickGenderDropdown extends StatelessWidget {
   final String label;
   final TextEditingController controller;
 
-  const _QuickGenderDropdown({
-    required this.label,
-    required this.controller,
-  });
+  const _QuickGenderDropdown({required this.label, required this.controller});
 
   String? get _value {
     final normalized = controller.text.trim().toLowerCase();
@@ -2387,10 +2456,7 @@ class _PaxStepperButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback? onTap;
 
-  const _PaxStepperButton({
-    required this.icon,
-    required this.onTap,
-  });
+  const _PaxStepperButton({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -3562,7 +3628,8 @@ class _PreviousTimeReferenceCard extends StatelessWidget {
     final current = currentSlot;
     final hasChanged =
         current != null &&
-        (current.start != previousSlot.start || current.end != previousSlot.end);
+        (current.start != previousSlot.start ||
+            current.end != previousSlot.end);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12),
@@ -3908,76 +3975,76 @@ class _BookingPaxSummaryCard extends StatelessWidget {
           ),
         ),
         child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 30,
-            height: 30,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFFE8F5F5),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '$index',
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1B6B72),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F5F5),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '$index',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF1B6B72),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item?.serviceNameSummary ?? 'Pax $index',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1A1A2E),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item?.serviceNameSummary ?? 'Pax $index',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A2E),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  item == null
-                      ? 'Tap to configure service, therapist, room, and time'
-                      : '${item.therapist.name} - ${item.room.name}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Color(0xFF64748B),
+                  const SizedBox(height: 4),
+                  Text(
+                    item == null
+                        ? 'Tap to configure service, therapist, room, and time'
+                        : '${item.therapist.name} - ${item.room.name}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF64748B),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  item == null
-                      ? (selected ? 'Editing' : 'Not configured')
-                      : '${item.slot.start} - ${item.endTime} - RM ${item.price.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1B6B72),
+                  const SizedBox(height: 2),
+                  Text(
+                    item == null
+                        ? (selected ? 'Editing' : 'Not configured')
+                        : '${item.slot.start} - ${item.endTime} - RM ${item.price.toStringAsFixed(2)}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1B6B72),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          if (onClear != null)
-            IconButton(
-              onPressed: onClear,
-              icon: const Icon(Icons.close, size: 18),
-              color: const Color(0xFFE53935),
-              tooltip: 'Clear pax',
-            ),
-        ],
-      ),
+            if (onClear != null)
+              IconButton(
+                onPressed: onClear,
+                icon: const Icon(Icons.close, size: 18),
+                color: const Color(0xFFE53935),
+                tooltip: 'Clear pax',
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -4061,9 +4128,7 @@ class _PhoneBottomBar extends StatelessWidget {
                   _MiniRow('Customer', selectedCustomer?.name ?? '—'),
                   _MiniRow(
                     'Service',
-                    hasServices
-                        ? '$serviceName - $serviceDuration min'
-                        : '—',
+                    hasServices ? '$serviceName - $serviceDuration min' : '—',
                   ),
                   _MiniRow('Therapist', selectedTherapist?.name ?? '—'),
                   _MiniRow('Zone', selectedRoom?.name ?? '—'),

@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/commission_repository.dart';
+import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/transaction_repository.dart';
 
@@ -66,6 +69,8 @@ String _normalizeOrderSource({
   return 'walkin';
 }
 
+enum _HistoryPane { bill, services, customers, staff }
+
 class SalesHistoryScreen extends StatefulWidget {
   final String userRole;
 
@@ -78,9 +83,12 @@ class SalesHistoryScreen extends StatefulWidget {
 class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
   final _dashboardRepository = DashboardRepository();
   final _transactionRepository = TransactionRepository();
+  final _appointmentRepository = AppointmentRepository();
   DateTime _selectedDate = _stripDate(DateTime.now());
   List<_HistoryOrder> _orders = [];
   _HistorySummary _summary = _HistorySummary.empty;
+  Map<String, Map<String, dynamic>> _therapists = {};
+  _HistoryPane _activePane = _HistoryPane.bill;
   bool _loading = true;
   String? _error;
   bool _showOrdersOnPhone = false;
@@ -115,7 +123,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
       final transactionDocs = transactionRows.where((row) {
         final status = _asString(row['paymentStatus']).toLowerCase();
-        return status.isEmpty || status == 'paid';
+        return status.isEmpty || status == 'paid' || status == 'voided';
       }).toList();
 
       final transactionData = transactionDocs;
@@ -133,6 +141,11 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       final serviceIds = [
         ...transactionData.map((d) => _asString(d['serviceId'])),
         ...appointments.values.map((d) => _asString(d['serviceId'])),
+        ...transactionData.expand(
+          (d) => _asMapList(
+            d['serviceItems'] ?? d['service_items'] ?? d['items'],
+          ).map((item) => _asString(item['id'], _asString(item['serviceId']))),
+        ),
       ].where((id) => id.isNotEmpty);
       final therapistIds = [
         ...transactionData.map((d) => _asString(d['therapistId'])),
@@ -168,6 +181,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       setState(() {
         _orders = orders;
         _summary = _HistorySummary.fromOrders(orders);
+        _therapists = therapists;
         _loading = false;
       });
     } catch (e) {
@@ -175,6 +189,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       setState(() {
         _orders = [];
         _summary = _HistorySummary.empty;
+        _therapists = {};
         _loading = false;
         _error = e.toString();
       });
@@ -206,12 +221,66 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     await _loadHistory();
   }
 
+  void _openServicesBreakdown() {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _activePane = _HistoryPane.services);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _ServicesBreakdownScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+        ),
+      ),
+    );
+  }
+
+  void _openCustomerBreakdown() {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _activePane = _HistoryPane.customers);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _CustomerBreakdownScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+        ),
+      ),
+    );
+  }
+
+  void _openStaffCommission() {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _activePane = _HistoryPane.staff);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _StaffCommissionScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+          therapists: _therapists,
+          onTapOrder: _openOrderDetail,
+        ),
+      ),
+    );
+  }
+
+  void _openBillList() {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _activePane = _HistoryPane.bill);
+      return;
+    }
+    setState(() => _showOrdersOnPhone = true);
+  }
+
   void _openOrderDetail(_HistoryOrder order) {
-    showModalBottomSheet<void>(
+    _showDetailDrawer(
       context: context,
-      isScrollControlled: true,
-      showDragHandle: true,
-      builder: (context) => _OrderDetailSheet(
+      title: 'Bill Details',
+      child: _OrderDetailSheet(
         order: order,
         isAdmin: _isAdmin,
         onVoid: () => _voidOrder(order),
@@ -221,26 +290,37 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
   Future<void> _voidOrder(_HistoryOrder order) async {
     if (!_isAdmin) return;
+    if (order.isVoided) return;
 
     final firstConfirm = await _confirmVoidOrder(
-      title: 'Void this order?',
+      title: 'Void this bill?',
       message:
-          'This will remove ${order.receiptNumber} from order history and reports.',
+          'This will mark ${order.receiptNumber} as voided and remove it from paid totals.',
       actionLabel: 'Continue',
     );
     if (firstConfirm != true || !mounted) return;
 
     final finalConfirm = await _confirmVoidOrder(
-      title: 'Confirm void order',
+      title: 'Confirm void bill',
       message:
-          'This action cannot be undone. Void ${order.receiptNumber} permanently?',
-      actionLabel: 'Void Order',
+          'This action cannot be undone. The bill card will remain as voided for audit history.',
+      actionLabel: 'Void Bill',
       destructive: true,
     );
     if (finalConfirm != true || !mounted) return;
 
     try {
-      await _transactionRepository.deleteTransaction(order.id);
+      await _transactionRepository.updateTransaction(order.id, {
+        'paymentStatus': 'voided',
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      });
+      if (order.appointmentGroupId.isNotEmpty) {
+        await _appointmentRepository.voidAppointmentGroup(
+          order.appointmentGroupId,
+        );
+      } else if (order.appointmentId.isNotEmpty) {
+        await _appointmentRepository.voidAppointment(order.appointmentId);
+      }
       if (!mounted) return;
       Navigator.of(context).pop();
       await _loadHistory();
@@ -256,7 +336,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to void order: $e'),
+          content: Text('Unable to void bill: $e'),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -322,28 +402,57 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
             summary: _summary,
             loading: _loading,
             isAdmin: _isAdmin,
+            selectedPane: _activePane,
             onBack: () => Navigator.pop(context),
             onPickDate: _openDatePicker,
             onPreviousDate: () => _moveDate(-1),
             onNextDate: () => _moveDate(1),
             canGoNextDate: _canGoNextDay,
-            onOpenOrders: null,
+            onOpenOrders: _openBillList,
+            onOpenServices: _openServicesBreakdown,
+            onOpenCustomers: _openCustomerBreakdown,
+            onOpenStaff: _openStaffCommission,
           ),
         ),
         const VerticalDivider(width: 1, color: _line),
-        Expanded(
-          child: _HistoryOrderPane(
-            selectedDate: _selectedDate,
-            orders: _orders,
-            summary: _summary,
-            loading: _loading,
-            error: _error,
-            onRefresh: _loadHistory,
-            onTapOrder: _openOrderDetail,
-          ),
-        ),
+        Expanded(child: _buildActivePane()),
       ],
     );
+  }
+
+  Widget _buildActivePane() {
+    switch (_activePane) {
+      case _HistoryPane.services:
+        return _ServicesBreakdownScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+          embedded: true,
+        );
+      case _HistoryPane.customers:
+        return _CustomerBreakdownScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+          embedded: true,
+        );
+      case _HistoryPane.staff:
+        return _StaffCommissionScreen(
+          selectedDate: _selectedDate,
+          orders: _orders,
+          therapists: _therapists,
+          onTapOrder: _openOrderDetail,
+          embedded: true,
+        );
+      case _HistoryPane.bill:
+        return _HistoryOrderPane(
+          selectedDate: _selectedDate,
+          orders: _orders,
+          summary: _summary,
+          loading: _loading,
+          error: _error,
+          onRefresh: _loadHistory,
+          onTapOrder: _openOrderDetail,
+        );
+    }
   }
 
   Widget _buildPhoneSummary() {
@@ -352,12 +461,16 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       summary: _summary,
       loading: _loading,
       isAdmin: _isAdmin,
+      selectedPane: _HistoryPane.bill,
       onBack: () => Navigator.pop(context),
       onPickDate: _openDatePicker,
       onPreviousDate: () => _moveDate(-1),
       onNextDate: () => _moveDate(1),
       canGoNextDate: _canGoNextDay,
-      onOpenOrders: () => setState(() => _showOrdersOnPhone = true),
+      onOpenOrders: _openBillList,
+      onOpenServices: _openServicesBreakdown,
+      onOpenCustomers: _openCustomerBreakdown,
+      onOpenStaff: _openStaffCommission,
     );
   }
 
@@ -378,7 +491,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     const Text(
-                      'Order History',
+                      'Bill History',
                       style: TextStyle(
                         color: _ink,
                         fontSize: 18,
@@ -435,12 +548,17 @@ class _HistoryOrder {
   final String therapistName;
   final String roomName;
   final String paymentMethod;
+  final String paymentStatus;
   final int itemCount;
   final List<_HistoryServiceGroup> serviceGroups;
+  final List<Map<String, dynamic>> rawServiceItems;
   final double servicePrice;
   final double sstAmount;
   final double totalAmount;
+  final double therapistCommissionAmount;
+  final double counterCommissionAmount;
   final DateTime createdAt;
+  final DateTime updatedAt;
 
   const _HistoryOrder({
     required this.id,
@@ -455,12 +573,17 @@ class _HistoryOrder {
     required this.therapistName,
     required this.roomName,
     required this.paymentMethod,
+    required this.paymentStatus,
     required this.itemCount,
     required this.serviceGroups,
+    required this.rawServiceItems,
     required this.servicePrice,
     required this.sstAmount,
     required this.totalAmount,
+    required this.therapistCommissionAmount,
+    required this.counterCommissionAmount,
     required this.createdAt,
+    required this.updatedAt,
   });
 
   factory _HistoryOrder.fromTransaction(
@@ -496,9 +619,41 @@ class _HistoryOrder {
     final service = services[serviceId] ?? {};
     final therapist = therapists[therapistId] ?? {};
     final room = rooms[roomId] ?? {};
-    final rawItems = _asMapList(
-      tx['serviceItems'] ?? tx['service_items'] ?? tx['items'],
-    );
+    final rawItems =
+        _asMapList(tx['serviceItems'] ?? tx['service_items'] ?? tx['items'])
+            .map((item) {
+              final itemId = _asString(
+                item['id'],
+                _asString(item['serviceId']),
+              );
+              final linkedService = services[itemId] ?? {};
+              return {
+                ...linkedService,
+                ...item,
+                'id': itemId.isEmpty
+                    ? _asString(item['name'], _asString(linkedService['id']))
+                    : itemId,
+                'name': _asString(
+                  item['name'],
+                  _asString(linkedService['name'], 'Service'),
+                ),
+                'category': _asString(
+                  item['category'],
+                  _asString(linkedService['category'], 'Services'),
+                ),
+                'imageUrl': _asString(
+                  item['imageUrl'],
+                  _asString(
+                    item['image'],
+                    _asString(
+                      linkedService['imageUrl'],
+                      _asString(linkedService['image']),
+                    ),
+                  ),
+                ),
+              };
+            })
+            .toList();
     final itemCount = rawItems.isNotEmpty
         ? rawItems.length
         : _asInt(tx['itemCount'], 1);
@@ -545,56 +700,42 @@ class _HistoryOrder {
       therapistName: therapistName,
       roomName: roomName,
       paymentMethod: _asString(tx['paymentMethod'], 'unknown'),
+      paymentStatus: _asString(tx['paymentStatus'], 'paid').toLowerCase(),
       itemCount: itemCount <= 0 ? 1 : itemCount,
       serviceGroups: serviceGroups,
+      rawServiceItems: rawItems,
       servicePrice: servicePrice,
       sstAmount: _asDouble(tx['sstAmount']),
       totalAmount: _asDouble(
         tx['totalAmount'],
         _asDouble(appointment['totalPrice']),
       ),
+      therapistCommissionAmount: _asDouble(tx['therapistCommissionAmount']),
+      counterCommissionAmount: _asDouble(tx['counterCommissionAmount']),
       createdAt: _asDateTime(tx['createdAt']),
+      updatedAt: _asDateTime(tx['updatedAt'] ?? tx['createdAt']),
     );
   }
 
   bool get isAppointmentBooking => source == 'appointment' || source == 'online';
   bool get isWalkIn => source == 'walkin';
+  bool get isVoided => paymentStatus == 'voided';
   String get sourceLabel {
     if (isAppointmentBooking) return 'Appointment booking';
     if (isWalkIn) return 'Walk-in';
     return source.isEmpty ? 'Walk-in' : source;
   }
-  int get paxCount => serviceGroups.isEmpty ? 1 : serviceGroups.length;
-
-  String get serviceSummaryLabel =>
-      '$itemCount service${itemCount == 1 ? '' : 's'}';
-
-  String get staffSummaryLabel {
-    final names = serviceGroups
-        .map((group) => group.therapistName)
-        .where((name) => name.trim().isNotEmpty && name != '-')
-        .toSet();
-    if (names.isEmpty) return therapistName;
-    return '${names.length} therapist${names.length == 1 ? '' : 's'}';
-  }
-
-  String get resourceSummaryLabel {
-    final names = serviceGroups
-        .map((group) => group.roomName)
-        .where((name) => name.trim().isNotEmpty && name != '-')
-        .toSet();
-    if (names.isEmpty) return roomName;
-    return '${names.length} room${names.length == 1 ? '' : 's'}/zone${names.length == 1 ? '' : 's'}';
-  }
-
   String get paymentLabel {
     switch (paymentMethod) {
       case 'cash':
         return 'Cash';
       case 'qr_code':
         return 'QR Code';
+      case 'credit_card':
       case 'card':
-        return 'Card';
+        return 'Credit Card';
+      case 'debit_card':
+        return 'Debit Card';
       default:
         return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
     }
@@ -606,8 +747,11 @@ class _HistoryOrder {
         return Icons.payments_outlined;
       case 'qr_code':
         return Icons.qr_code_2_outlined;
+      case 'credit_card':
       case 'card':
         return Icons.credit_card_outlined;
+      case 'debit_card':
+        return Icons.credit_card;
       default:
         return Icons.receipt_long_outlined;
     }
@@ -718,6 +862,7 @@ class _HistorySummary {
   final int itemCount;
   final int customerCount;
   final Map<String, double> paymentTotals;
+  final double totalTherapistCommission;
 
   const _HistorySummary({
     required this.collection,
@@ -727,6 +872,7 @@ class _HistorySummary {
     required this.itemCount,
     required this.customerCount,
     required this.paymentTotals,
+    required this.totalTherapistCommission,
   });
 
   static const empty = _HistorySummary(
@@ -736,14 +882,17 @@ class _HistorySummary {
     orderCount: 0,
     itemCount: 0,
     customerCount: 0,
-    paymentTotals: {'cash': 0, 'qr_code': 0, 'card': 0},
+    paymentTotals: {'cash': 0, 'qr_code': 0, 'credit_card': 0, 'debit_card': 0},
+    totalTherapistCommission: 0,
   );
 
   factory _HistorySummary.fromOrders(List<_HistoryOrder> orders) {
+    final paidOrders = orders.where((order) => !order.isVoided).toList();
     final paymentTotals = {
       'cash': 0.0,
       'qr_code': 0.0,
-      'card': 0.0,
+      'credit_card': 0.0,
+      'debit_card': 0.0,
       'other': 0.0,
     };
     final customers = <String>{};
@@ -751,12 +900,14 @@ class _HistorySummary {
     var serviceNet = 0.0;
     var sst = 0.0;
     var itemCount = 0;
+    var totalTherapistCommission = 0.0;
 
-    for (final order in orders) {
+    for (final order in paidOrders) {
       collection += order.totalAmount;
       serviceNet += order.servicePrice;
       sst += order.sstAmount;
       itemCount += order.itemCount;
+      totalTherapistCommission += order.therapistCommissionAmount;
       customers.add(
         order.customerId.isNotEmpty ? order.customerId : order.customerName,
       );
@@ -772,10 +923,11 @@ class _HistorySummary {
       collection: collection,
       serviceNet: serviceNet,
       sst: sst,
-      orderCount: orders.length,
+      orderCount: paidOrders.length,
       itemCount: itemCount,
       customerCount: customers.where((id) => id.trim().isNotEmpty).length,
       paymentTotals: paymentTotals,
+      totalTherapistCommission: totalTherapistCommission,
     );
   }
 
@@ -787,23 +939,31 @@ class _HistorySidePanel extends StatelessWidget {
   final _HistorySummary summary;
   final bool loading;
   final bool isAdmin;
+  final _HistoryPane selectedPane;
   final VoidCallback onBack;
   final VoidCallback onPickDate;
   final VoidCallback onPreviousDate;
   final VoidCallback onNextDate;
   final bool canGoNextDate;
   final VoidCallback? onOpenOrders;
+  final VoidCallback onOpenServices;
+  final VoidCallback onOpenCustomers;
+  final VoidCallback onOpenStaff;
 
   const _HistorySidePanel({
     required this.selectedDate,
     required this.summary,
     required this.loading,
     required this.isAdmin,
+    required this.selectedPane,
     required this.onBack,
     required this.onPickDate,
     required this.onPreviousDate,
     required this.onNextDate,
     required this.canGoNextDate,
+    required this.onOpenServices,
+    required this.onOpenCustomers,
+    required this.onOpenStaff,
     this.onOpenOrders,
   });
 
@@ -871,8 +1031,14 @@ class _HistorySidePanel extends StatelessWidget {
               _SideMetricRow(
                 icon: Icons.credit_card_outlined,
                 iconColor: const Color(0xFF2563EB),
-                label: 'Card',
-                value: _money(summary.paymentTotals['card'] ?? 0),
+                label: 'Credit Card',
+                value: _money(summary.paymentTotals['credit_card'] ?? 0),
+              ),
+              _SideMetricRow(
+                icon: Icons.credit_card,
+                iconColor: const Color(0xFFF59E0B),
+                label: 'Debit Card',
+                value: _money(summary.paymentTotals['debit_card'] ?? 0),
               ),
               if ((summary.paymentTotals['other'] ?? 0) > 0)
                 _SideMetricRow(
@@ -886,9 +1052,9 @@ class _HistorySidePanel extends StatelessWidget {
               _SideMetricRow(
                 icon: Icons.shopping_cart_outlined,
                 iconColor: const Color(0xFF2563EB),
-                label: 'Orders',
+                label: 'Bill',
                 value: '${summary.orderCount}',
-                selected: true,
+                selected: selectedPane == _HistoryPane.bill,
                 onTap: onOpenOrders,
               ),
               _SideMetricRow(
@@ -896,18 +1062,24 @@ class _HistorySidePanel extends StatelessWidget {
                 iconColor: const Color(0xFF10B981),
                 label: 'Services',
                 value: '${summary.itemCount}',
+                selected: selectedPane == _HistoryPane.services,
+                onTap: onOpenServices,
               ),
               _SideMetricRow(
                 icon: Icons.people_outline,
                 iconColor: const Color(0xFF1B6B72),
                 label: 'Customers',
                 value: '${summary.customerCount}',
+                selected: selectedPane == _HistoryPane.customers,
+                onTap: onOpenCustomers,
               ),
               _SideMetricRow(
-                icon: Icons.trending_up_outlined,
+                icon: Icons.badge_outlined,
                 iconColor: const Color(0xFFF59E0B),
-                label: 'Avg. Order',
-                value: _money(summary.averageOrder),
+                label: 'Staff',
+                value: _money(summary.totalTherapistCommission),
+                selected: selectedPane == _HistoryPane.staff,
+                onTap: onOpenStaff,
               ),
               const SizedBox(height: 22),
               const _SideSectionLabel('Tax & Settlement'),
@@ -1120,7 +1292,7 @@ class _CollectionTile extends StatelessWidget {
                 Text(
                   loading
                       ? 'Loading paid sales'
-                      : '$orderCount paid order${orderCount == 1 ? '' : 's'}',
+                      : '$orderCount paid bill${orderCount == 1 ? '' : 's'}',
                   style: const TextStyle(
                     color: Color(0xFF2563EB),
                     fontSize: 11,
@@ -1264,7 +1436,7 @@ class _HistoryOrderPane extends StatelessWidget {
                 children: [
                   Expanded(
                     child: Text(
-                      'Daily Order Sales - ${DateFormat('EEE, d MMM yyyy').format(selectedDate)}',
+                      'Daily Bill Sales - ${DateFormat('EEE, d MMM yyyy').format(selectedDate)}',
                       style: const TextStyle(
                         color: _ink,
                         fontSize: 18,
@@ -1272,7 +1444,7 @@ class _HistoryOrderPane extends StatelessWidget {
                       ),
                     ),
                   ),
-                  _HeaderStat(label: 'Orders', value: '${summary.orderCount}'),
+                  _HeaderStat(label: 'Bill', value: '${summary.orderCount}'),
                   const SizedBox(width: 10),
                   _HeaderStat(
                     label: 'Collection',
@@ -1321,7 +1493,7 @@ class _HistoryOrderPane extends StatelessWidget {
         children: const [
           _HistoryMessage(
             icon: Icons.receipt_long_outlined,
-            title: 'No paid orders for this day',
+            title: 'No paid bills for this day',
             subtitle: 'Completed walk-in transactions will appear here.',
           ),
         ],
@@ -1456,9 +1628,9 @@ class _HistoryOrderCard extends StatelessWidget {
               flex: 2,
               child: _OrderTextBlock(
                 title: order.receiptNumber,
-                subtitle: DateFormat(
-                  'hh:mm a, dd/MM/yyyy',
-                ).format(order.createdAt),
+                subtitle: order.isVoided
+                    ? 'Voided · ${DateFormat('hh:mm a, dd/MM/yyyy').format(order.createdAt)}'
+                    : DateFormat('hh:mm a, dd/MM/yyyy').format(order.createdAt),
               ),
             ),
             Expanded(
@@ -1482,21 +1654,29 @@ class _HistoryOrderCard extends StatelessWidget {
               children: [
                 Text(
                   _money(order.totalAmount),
-                  style: const TextStyle(
-                    color: Color(0xFF2563EB),
+                  style: TextStyle(
+                    color: order.isVoided
+                        ? const Color(0xFF9CA3AF)
+                        : const Color(0xFF2563EB),
                     fontSize: 14,
                     fontWeight: FontWeight.w900,
+                    decoration: order.isVoided
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
                   ),
                 ),
                 const SizedBox(height: 4),
-                Text(
-                  '${order.itemCount} item${order.itemCount == 1 ? '' : 's'}',
-                  style: const TextStyle(
-                    color: _ink,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+                if (order.isVoided)
+                  const _VoidedChip()
+                else
+                  Text(
+                    '${order.itemCount} item${order.itemCount == 1 ? '' : 's'}',
+                    style: const TextStyle(
+                      color: _ink,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                ),
               ],
             ),
           ],
@@ -1539,10 +1719,15 @@ class _HistoryOrderCard extends StatelessWidget {
             ),
             Text(
               _money(order.totalAmount),
-              style: const TextStyle(
-                color: Color(0xFF2563EB),
+              style: TextStyle(
+                color: order.isVoided
+                    ? const Color(0xFF9CA3AF)
+                    : const Color(0xFF2563EB),
                 fontSize: 13,
                 fontWeight: FontWeight.w900,
+                decoration: order.isVoided
+                    ? TextDecoration.lineThrough
+                    : TextDecoration.none,
               ),
             ),
           ],
@@ -1570,7 +1755,15 @@ class _HistoryOrderCard extends StatelessWidget {
           ),
         ),
         const SizedBox(height: 10),
-        _PaymentChip(order: order),
+        Row(
+          children: [
+            _PaymentChip(order: order),
+            if (order.isVoided) ...[
+              const SizedBox(width: 8),
+              const _VoidedChip(),
+            ],
+          ],
+        ),
       ],
     );
   }
@@ -1620,26 +1813,59 @@ class _PaymentChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final color = order.isVoided ? const Color(0xFF6B7280) : _ink;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
-        color: const Color(0xFFF3F4F6),
+        color: order.isVoided
+            ? const Color(0xFFF3F4F6)
+            : const Color(0xFFF3F4F6),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(order.paymentIcon, size: 14, color: _muted),
+          Icon(
+            order.isVoided ? Icons.block_rounded : order.paymentIcon,
+            size: 14,
+            color: _muted,
+          ),
           const SizedBox(width: 6),
           Text(
-            '${order.paymentLabel} : ${_money(order.totalAmount)}',
-            style: const TextStyle(
-              color: _ink,
+            order.isVoided
+                ? 'Voided : ${_money(order.totalAmount)}'
+                : '${order.paymentLabel} : ${_money(order.totalAmount)}',
+            style: TextStyle(
+              color: color,
               fontSize: 12,
               fontWeight: FontWeight.w900,
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _VoidedChip extends StatelessWidget {
+  const _VoidedChip();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEE2E2),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: const Text(
+        'VOIDED',
+        style: TextStyle(
+          color: Color(0xFFB91C1C),
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
+          letterSpacing: 0.4,
+        ),
       ),
     );
   }
@@ -1734,10 +1960,13 @@ class _OrderDetailSheet extends StatelessWidget {
                 ),
                 Text(
                   _money(order.totalAmount),
-                  style: const TextStyle(
-                    color: _teal,
+                  style: TextStyle(
+                    color: order.isVoided ? const Color(0xFF9CA3AF) : _teal,
                     fontSize: 20,
                     fontWeight: FontWeight.w900,
+                    decoration: order.isVoided
+                        ? TextDecoration.lineThrough
+                        : TextDecoration.none,
                   ),
                 ),
               ],
@@ -1752,37 +1981,33 @@ class _OrderDetailSheet extends StatelessWidget {
               ),
             ),
             const SizedBox(height: 18),
-            _DetailRow('Source', order.sourceLabel),
-            _DetailRow('Customer', order.customerName),
-            _DetailRow('Phone', order.customerPhone),
-            _DetailRow('Pax', '${order.paxCount}'),
-            _DetailRow('Services', order.serviceSummaryLabel),
-            _DetailRow('Staff', order.staffSummaryLabel),
-            _DetailRow('Resources', order.resourceSummaryLabel),
-            _DetailRow('Payment', order.paymentLabel),
-            const Divider(height: 28, color: _line),
             const _DetailSectionTitle('Service Details'),
             const SizedBox(height: 10),
             for (var i = 0; i < order.serviceGroups.length; i++) ...[
-              _ServiceGroupCard(
-                group: order.serviceGroups[i],
-                expanded: order.serviceGroups.length == 1,
-              ),
+              _ServiceGroupCard(group: order.serviceGroups[i]),
               if (i != order.serviceGroups.length - 1)
                 const SizedBox(height: 8),
             ],
             const Divider(height: 28, color: _line),
+            _DetailRow('Source', order.sourceLabel),
+            _DetailRow('Customer', order.customerName),
+            _DetailRow('Phone', order.customerPhone),
+            _DetailRow(
+              'Payment',
+              order.isVoided ? '${order.paymentLabel} · Voided' : order.paymentLabel,
+            ),
+            const Divider(height: 28, color: _line),
             _DetailRow('Service Net', _money(order.servicePrice)),
             _DetailRow('SST', _money(order.sstAmount)),
             _DetailRow('Total', _money(order.totalAmount), strong: true),
-            if (isAdmin) ...[
+            if (isAdmin && !order.isVoided) ...[
               const SizedBox(height: 18),
               SizedBox(
                 width: double.infinity,
                 child: OutlinedButton.icon(
                   onPressed: onVoid,
                   icon: const Icon(Icons.block_rounded, size: 18),
-                  label: const Text('Void Order'),
+                  label: const Text('Void Bill'),
                   style: OutlinedButton.styleFrom(
                     foregroundColor: const Color(0xFFE53935),
                     side: const BorderSide(color: Color(0xFFE53935)),
@@ -1865,30 +2090,26 @@ class _DetailSectionTitle extends StatelessWidget {
   }
 }
 
+/// Always fully expanded (no collapse/expand toggle) — every pax's service
+/// details should be visible immediately, on both tablet and phone.
 class _ServiceGroupCard extends StatelessWidget {
   final _HistoryServiceGroup group;
-  final bool expanded;
 
-  const _ServiceGroupCard({
-    required this.group,
-    required this.expanded,
-  });
+  const _ServiceGroupCard({required this.group});
 
   @override
   Widget build(BuildContext context) {
     return Container(
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
       decoration: BoxDecoration(
         color: const Color(0xFFF8FAFC),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: _line),
       ),
-      child: Theme(
-        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-        child: ExpansionTile(
-          initiallyExpanded: expanded,
-          tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-          childrenPadding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
-          title: Text(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
             'Pax ${group.paxNumber} - ${group.customerName}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -1898,7 +2119,8 @@ class _ServiceGroupCard extends StatelessWidget {
               fontWeight: FontWeight.w900,
             ),
           ),
-          subtitle: Text(
+          const SizedBox(height: 2),
+          Text(
             '${group.serviceLabel} - ${_money(group.amount)}',
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
@@ -1908,36 +2130,34 @@ class _ServiceGroupCard extends StatelessWidget {
               fontWeight: FontWeight.w700,
             ),
           ),
-          children: [
+          _ServiceDetailLine(
+            icon: Icons.spa_outlined,
+            label: 'Service',
+            value: group.serviceLabel,
+          ),
+          _ServiceDetailLine(
+            icon: Icons.person_outline,
+            label: 'Therapist',
+            value: group.therapistName,
+          ),
+          _ServiceDetailLine(
+            icon: Icons.meeting_room_outlined,
+            label: 'Room / Zone',
+            value: group.roomName,
+          ),
+          if (group.timeLabel.isNotEmpty)
             _ServiceDetailLine(
-              icon: Icons.spa_outlined,
-              label: 'Service',
-              value: group.serviceLabel,
+              icon: Icons.schedule_outlined,
+              label: 'Time',
+              value: group.timeLabel,
             ),
-            _ServiceDetailLine(
-              icon: Icons.person_outline,
-              label: 'Therapist',
-              value: group.therapistName,
-            ),
-            _ServiceDetailLine(
-              icon: Icons.meeting_room_outlined,
-              label: 'Room / Zone',
-              value: group.roomName,
-            ),
-            if (group.timeLabel.isNotEmpty)
-              _ServiceDetailLine(
-                icon: Icons.schedule_outlined,
-                label: 'Time',
-                value: group.timeLabel,
-              ),
-            _ServiceDetailLine(
-              icon: Icons.payments_outlined,
-              label: 'Amount',
-              value: _money(group.amount),
-              strong: true,
-            ),
-          ],
-        ),
+          _ServiceDetailLine(
+            icon: Icons.payments_outlined,
+            label: 'Amount',
+            value: _money(group.amount),
+            strong: true,
+          ),
+        ],
       ),
     );
   }
@@ -2209,3 +2429,1463 @@ class _WeekdayLabel extends StatelessWidget {
 }
 
 String _money(double value) => value.toStringAsFixed(2);
+
+String _maskedPhone(String value) {
+  final digits = value.replaceAll(RegExp(r'\D'), '');
+  if (digits.length >= 4) return '......${digits.substring(digits.length - 4)}';
+  return value.trim().isEmpty || value == '-' ? '-' : value;
+}
+
+// ── Shared breakdown-page header ─────────────────────────────────
+
+class _BreakdownHeader extends StatelessWidget {
+  final String title;
+  final DateTime date;
+  final List<Widget> trailing;
+  final bool showBack;
+
+  const _BreakdownHeader({
+    required this.title,
+    required this.date,
+    this.trailing = const [],
+    this.showBack = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(4, 10, 16, 12),
+      color: Colors.white,
+      child: Row(
+        children: [
+          if (showBack)
+            BackButton(
+              color: _teal,
+              onPressed: () => Navigator.of(context).pop(),
+            )
+          else
+            const SizedBox(width: 20),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  DateFormat('EEE, d MMM yyyy').format(date),
+                  style: const TextStyle(
+                    color: _muted,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          ...trailing,
+        ],
+      ),
+    );
+  }
+}
+
+/// Opens centered drill-down detail for bills, customers, and staff.
+Future<void> _showDetailDrawer({
+  required BuildContext context,
+  required String title,
+  required Widget child,
+}) {
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Close',
+    barrierColor: const Color(0x66000000),
+    transitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (context, animation, secondaryAnimation) {
+      final size = MediaQuery.of(context).size;
+      final dialogWidth = size.width < 620 ? size.width - 28 : 560.0;
+      final dialogHeight = size.height * 0.82;
+      return Center(
+        child: Material(
+          color: Colors.transparent,
+          child: SafeArea(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxWidth: dialogWidth,
+                maxHeight: dialogHeight.clamp(360.0, 760.0),
+              ),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.18),
+                      blurRadius: 30,
+                      offset: const Offset(0, 18),
+                    ),
+                  ],
+                ),
+                clipBehavior: Clip.antiAlias,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Container(
+                      width: 52,
+                      height: 4,
+                      margin: const EdgeInsets.only(top: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFCBD5E1),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(22, 14, 12, 14),
+                      child: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 20,
+                                fontWeight: FontWeight.w900,
+                                color: _ink,
+                              ),
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            icon: const Icon(Icons.close_rounded),
+                            color: _ink,
+                            tooltip: 'Close',
+                          ),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1, color: _line),
+                    Expanded(child: child),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+    transitionBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+      );
+      return FadeTransition(
+        opacity: curved,
+        child: ScaleTransition(
+          scale: Tween<double>(begin: 0.96, end: 1).animate(curved),
+          child: child,
+        ),
+      );
+    },
+  );
+}
+
+// ── Services breakdown ───────────────────────────────────────────
+
+class _ServiceBreakdownItem {
+  final String id;
+  final String name;
+  final String category;
+  final String imageUrl;
+  int count = 0;
+  double amount = 0;
+
+  _ServiceBreakdownItem({
+    required this.id,
+    required this.name,
+    required this.category,
+    required this.imageUrl,
+  });
+}
+
+class _ServicesBreakdownScreen extends StatefulWidget {
+  final DateTime selectedDate;
+  final List<_HistoryOrder> orders;
+  final bool embedded;
+
+  const _ServicesBreakdownScreen({
+    required this.selectedDate,
+    required this.orders,
+    this.embedded = false,
+  });
+
+  @override
+  State<_ServicesBreakdownScreen> createState() =>
+      _ServicesBreakdownScreenState();
+}
+
+class _ServicesBreakdownScreenState extends State<_ServicesBreakdownScreen> {
+  String _tab = 'All';
+
+  static const _tabs = [
+    'All',
+    'Services',
+    'Packages',
+    'Add-ons',
+    'Online Booking',
+  ];
+
+  List<_ServiceBreakdownItem> get _filteredItems {
+    final paidOrders = widget.orders.where((order) => !order.isVoided);
+    final grouped = <String, _ServiceBreakdownItem>{};
+
+    for (final order in paidOrders) {
+      if (_tab == 'Online Booking' && order.source != 'online') continue;
+
+      final items = order.rawServiceItems.isNotEmpty
+          ? order.rawServiceItems
+          : [
+              {
+                'id': order.serviceName,
+                'name': order.serviceName,
+                'category': 'Services',
+                'price': order.servicePrice,
+              },
+            ];
+
+      for (final item in items) {
+        final category = _asString(item['category'], 'Services');
+        if (_tab != 'All' && _tab != 'Online Booking' && category != _tab) {
+          continue;
+        }
+        final id = _asString(item['id'], _asString(item['name'], 'service'));
+        final name = _asString(item['name'], 'Service');
+        final price = _asDouble(item['price']);
+        final entry = grouped.putIfAbsent(
+          id,
+          () => _ServiceBreakdownItem(
+            id: id,
+            name: name,
+            category: category,
+            imageUrl: _asString(
+              item['imageUrl'],
+              _asString(item['image'], _asString(item['publicImageUrl'])),
+            ),
+          ),
+        );
+        entry.count += 1;
+        entry.amount += price;
+      }
+    }
+
+    final list = grouped.values.toList()
+      ..sort((a, b) => b.amount.compareTo(a.amount));
+    return list;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final items = _filteredItems;
+    final totalAmount = items.fold<double>(
+      0,
+      (total, item) => total + item.amount,
+    );
+    final totalCount = items.fold<int>(0, (total, item) => total + item.count);
+
+    final content = Container(
+      color: _page,
+      child: Column(
+          children: [
+            _BreakdownHeader(
+              title: 'Services',
+              date: widget.selectedDate,
+              showBack: !widget.embedded,
+              trailing: [
+                _HeaderStat(label: 'Items', value: '$totalCount'),
+                const SizedBox(width: 10),
+                _HeaderStat(label: 'Total', value: _money(totalAmount)),
+              ],
+            ),
+            _ServiceBreakdownTabs(
+              tabs: _tabs,
+              selected: _tab,
+              onSelected: (tab) => setState(() => _tab = tab),
+            ),
+            const Divider(height: 1, color: _line),
+            Expanded(
+              child: items.isEmpty
+                  ? ListView(
+                      padding: const EdgeInsets.all(18),
+                      children: const [
+                        _HistoryMessage(
+                          icon: Icons.spa_outlined,
+                          title: 'No services sold for this day',
+                          subtitle: 'Completed services will appear here.',
+                        ),
+                      ],
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 22),
+                      itemCount: items.length,
+                      itemBuilder: (context, index) => Padding(
+                        padding: const EdgeInsets.only(bottom: 10),
+                        child: _ServiceBreakdownCard(item: items[index]),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+    );
+    if (widget.embedded) return content;
+    return Scaffold(
+      backgroundColor: _page,
+      body: SafeArea(child: content),
+    );
+  }
+}
+
+class _ServiceBreakdownCard extends StatelessWidget {
+  final _ServiceBreakdownItem item;
+
+  const _ServiceBreakdownCard({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFF1F5F9)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          _ServiceBreakdownImage(imageUrl: item.imageUrl),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  item.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 4,
+                  ),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF1F5F9),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    item.category,
+                    style: const TextStyle(
+                      color: _muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 14),
+          Container(
+            width: 96,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5F5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  '${item.count} sold',
+                  style: const TextStyle(
+                    color: _teal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  _money(item.amount),
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ServiceBreakdownTabs extends StatelessWidget {
+  final List<String> tabs;
+  final String selected;
+  final ValueChanged<String> onSelected;
+
+  const _ServiceBreakdownTabs({
+    required this.tabs,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Center(
+        child: SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: tabs.map((tab) {
+              final active = selected == tab;
+              return Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: InkWell(
+                  onTap: () => onSelected(tab),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(4, 8, 4, 10),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          tab,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                            color: active ? _teal : const Color(0xFF9E9E9E),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        AnimatedContainer(
+                          duration: const Duration(milliseconds: 160),
+                          height: 3,
+                          width: active ? 40 : 0,
+                          decoration: BoxDecoration(
+                            color: _teal,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ServiceBreakdownImage extends StatelessWidget {
+  final String imageUrl;
+
+  const _ServiceBreakdownImage({required this.imageUrl});
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 64,
+        height: 64,
+        color: const Color(0xFFE8F5F5),
+        child: imageUrl.isEmpty
+            ? const Icon(Icons.spa_outlined, size: 22, color: _teal)
+            : Image.network(
+                imageUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    const Icon(Icons.spa_outlined, size: 22, color: _teal),
+              ),
+      ),
+    );
+  }
+}
+
+// ── Customer breakdown ───────────────────────────────────────────
+
+class _CustomerBreakdownScreen extends StatelessWidget {
+  final DateTime selectedDate;
+  final List<_HistoryOrder> orders;
+  final bool embedded;
+
+  const _CustomerBreakdownScreen({
+    required this.selectedDate,
+    required this.orders,
+    this.embedded = false,
+  });
+
+  Map<String, List<_HistoryOrder>> get _byCustomer {
+    final map = <String, List<_HistoryOrder>>{};
+    for (final order in orders.where((order) => !order.isVoided)) {
+      final key = order.customerId.isNotEmpty
+          ? order.customerId
+          : order.customerName;
+      if (key.trim().isEmpty) continue;
+      map.putIfAbsent(key, () => []).add(order);
+    }
+    return map;
+  }
+
+  DateTime _latestUpdateFor(List<_HistoryOrder> customerOrders) {
+    return customerOrders
+        .map((order) => order.updatedAt)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final grouped = _byCustomer;
+    final entries = grouped.entries.toList()
+      ..sort((a, b) => _latestUpdateFor(b.value).compareTo(_latestUpdateFor(a.value)));
+    final totalRevenue = orders
+        .where((order) => !order.isVoided)
+        .fold<double>(0, (total, order) => total + order.totalAmount);
+
+    final content = Container(
+      color: _page,
+      child: Column(
+          children: [
+            _BreakdownHeader(
+              title: 'Customers',
+              date: selectedDate,
+              showBack: !embedded,
+              trailing: [
+                _HeaderStat(label: 'Customers', value: '${entries.length}'),
+                const SizedBox(width: 10),
+                _HeaderStat(label: 'Total', value: _money(totalRevenue)),
+              ],
+            ),
+            Expanded(
+              child: entries.isEmpty
+                  ? ListView(
+                      padding: const EdgeInsets.all(18),
+                      children: const [
+                        _HistoryMessage(
+                          icon: Icons.people_outline,
+                          title: 'No customers for this day',
+                          subtitle: 'Customers who visit will appear here.',
+                        ),
+                      ],
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.all(18),
+                      itemCount: entries.length,
+                      itemBuilder: (context, index) {
+                        final customerOrders = entries[index].value;
+                        return Padding(
+                          padding: const EdgeInsets.only(bottom: 12),
+                          child: _CustomerBreakdownCard(
+                            customerOrders: customerOrders,
+                            onTap: () => _showDetailDrawer(
+                              context: context,
+                              title: '${customerOrders.first.customerName} Bills',
+                              child: _CustomerDetailSheet(
+                                customerOrders: customerOrders,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
+    );
+    if (embedded) return content;
+    return Scaffold(
+      backgroundColor: _page,
+      body: SafeArea(child: content),
+    );
+  }
+}
+
+class _CustomerBreakdownCard extends StatelessWidget {
+  final List<_HistoryOrder> customerOrders;
+  final VoidCallback onTap;
+
+  const _CustomerBreakdownCard({
+    required this.customerOrders,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final first = customerOrders.first;
+    final total = customerOrders.fold<double>(
+      0,
+      (total, order) => total + order.totalAmount,
+    );
+    final paymentTotals = <String, double>{};
+    for (final order in customerOrders) {
+      paymentTotals.update(
+        order.paymentLabel,
+        (value) => value + order.totalAmount,
+        ifAbsent: () => order.totalAmount,
+      );
+    }
+
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFF1F5F9)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.03),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 22,
+                    backgroundColor: const Color(0xFFFFE4D6),
+                    child: Text(
+                      first.customerName.isEmpty
+                          ? '?'
+                          : first.customerName[0].toUpperCase(),
+                      style: const TextStyle(
+                        color: Color(0xFF9A3412),
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          first.customerName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: _ink,
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          _maskedPhone(first.customerPhone),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: _muted,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        _money(total),
+                        style: const TextStyle(
+                          color: Color(0xFF1D4ED8),
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${customerOrders.length} Bill${customerOrders.length == 1 ? '' : 's'}',
+                        style: const TextStyle(
+                          color: _ink,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+              const Divider(height: 22, color: Color(0xFFF1F5F9)),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  children: paymentTotals.entries
+                      .map(
+                        (entry) => Text(
+                          '${entry.key} : ${_money(entry.value)}',
+                          style: const TextStyle(
+                            color: _ink,
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      )
+                      .toList(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomerDetailSheet extends StatefulWidget {
+  final List<_HistoryOrder> customerOrders;
+
+  const _CustomerDetailSheet({required this.customerOrders});
+
+  @override
+  State<_CustomerDetailSheet> createState() => _CustomerDetailSheetState();
+}
+
+class _CustomerDetailSheetState extends State<_CustomerDetailSheet> {
+  final _customerRepository = CustomerRepository();
+  bool _loadingHistory = true;
+  List<Map<String, dynamic>> _previousOrders = [];
+
+  _HistoryOrder get _first => widget.customerOrders.first;
+  String get _customerId => _first.customerId;
+
+  @override
+  void initState() {
+    super.initState();
+    if (_customerId.isNotEmpty) {
+      _loadHistory();
+    } else {
+      _loadingHistory = false;
+    }
+  }
+
+  Future<void> _loadHistory() async {
+    try {
+      final txs = await _customerRepository.getCustomerOrders(_customerId);
+      final todayIds = widget.customerOrders.map((o) => o.id).toSet();
+      final previous = txs
+          .where((tx) => !todayIds.contains(_asString(tx['id'])))
+          .toList()
+        ..sort(
+          (a, b) => _asString(
+            b['createdAt'],
+          ).compareTo(_asString(a['createdAt'])),
+        );
+      if (!mounted) return;
+      setState(() {
+        _previousOrders = previous;
+        _loadingHistory = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _loadingHistory = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final todayOrders = [...widget.customerOrders]
+      ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+    final latestOrder = todayOrders.first;
+    final earlierToday = todayOrders.skip(1).toList();
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          18,
+          16,
+          18,
+          MediaQuery.of(context).viewInsets.bottom + 18,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '${todayOrders.length} bill${todayOrders.length == 1 ? '' : 's'} today',
+              style: const TextStyle(
+                color: _muted,
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+            const SizedBox(height: 16),
+            const _DetailSectionTitle('Latest Bill'),
+            const SizedBox(height: 10),
+            _TodayBillServicesCard(order: latestOrder),
+            if (earlierToday.isNotEmpty || _customerId.isNotEmpty) ...[
+              const Divider(height: 28, color: _line),
+              const _DetailSectionTitle('Previous Bills'),
+              const SizedBox(height: 10),
+              for (final order in earlierToday)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: _TodayBillServicesCard(order: order),
+                ),
+              if (_loadingHistory)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 24),
+                  child: Center(
+                    child: CircularProgressIndicator(color: _teal),
+                  ),
+                )
+              else ...[
+                if (_previousOrders.isEmpty)
+                  if (earlierToday.isEmpty)
+                    const Text(
+                      'No previous bills',
+                      style: TextStyle(
+                        color: _muted,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    )
+                else
+                  for (final tx in _previousOrders)
+                    _PreviousOrderLine(tx: tx),
+              ],
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TodayBillServicesCard extends StatelessWidget {
+  final _HistoryOrder order;
+
+  const _TodayBillServicesCard({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  order.receiptNumber,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              Text(
+                DateFormat('hh:mm a').format(order.updatedAt),
+                style: const TextStyle(
+                  color: _teal,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          for (final group in order.serviceGroups)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(Icons.spa_outlined, size: 15, color: _muted),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      group.serviceLabel,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    _money(group.amount),
+                    style: const TextStyle(
+                      color: _ink,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          const Divider(height: 14, color: _line),
+          _DetailRow('Bill Total', _money(order.totalAmount), strong: true),
+        ],
+      ),
+    );
+  }
+}
+
+class _PreviousOrderLine extends StatelessWidget {
+  final Map<String, dynamic> tx;
+
+  const _PreviousOrderLine({required this.tx});
+
+  @override
+  Widget build(BuildContext context) {
+    final createdAt = _asDateTime(tx['createdAt']);
+    final serviceName = _asString(tx['serviceName'], 'Service');
+    final amount = _asDouble(tx['totalAmount']);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  serviceName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  DateFormat('d MMM yyyy').format(createdAt),
+                  style: const TextStyle(
+                    color: _muted,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            _money(amount),
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Staff commission ─────────────────────────────────────────────
+
+class _StaffOrderLine {
+  final _HistoryOrder order;
+  final List<Map<String, dynamic>> items;
+  final double commission;
+
+  const _StaffOrderLine({
+    required this.order,
+    required this.items,
+    required this.commission,
+  });
+}
+
+class _StaffEarning {
+  final String id;
+  final String name;
+  double commission = 0;
+  int serviceCount = 0;
+  final List<_StaffOrderLine> lines = [];
+
+  _StaffEarning({required this.id, required this.name});
+}
+
+class _StaffCommissionScreen extends StatelessWidget {
+  final DateTime selectedDate;
+  final List<_HistoryOrder> orders;
+  final Map<String, Map<String, dynamic>> therapists;
+  final ValueChanged<_HistoryOrder> onTapOrder;
+  final bool embedded;
+
+  const _StaffCommissionScreen({
+    required this.selectedDate,
+    required this.orders,
+    required this.therapists,
+    required this.onTapOrder,
+    this.embedded = false,
+  });
+
+  Map<String, _StaffEarning> _computeEarnings() {
+    final earnings = <String, _StaffEarning>{};
+
+    for (final order in orders.where((order) => !order.isVoided)) {
+      final items = order.rawServiceItems.isNotEmpty
+          ? order.rawServiceItems
+          : [
+              {
+                'assignedTherapistId': '',
+                'assignedTherapistName': order.therapistName,
+                'id': order.serviceName,
+                'name': order.serviceName,
+                'price': order.servicePrice,
+                'therapistCommission': order.therapistCommissionAmount,
+              },
+            ];
+
+      final byTherapist = <String, List<Map<String, dynamic>>>{};
+      for (final item in items) {
+        final therapistName = _asString(
+          item['assignedTherapistName'],
+          order.therapistName,
+        );
+        var therapistId = _asString(item['assignedTherapistId']);
+        if (therapistId.isEmpty) {
+          therapistId = therapistName.isNotEmpty ? therapistName : 'unknown';
+        }
+        byTherapist
+            .putIfAbsent(therapistId, () => [])
+            .add({...item, 'assignedTherapistName': therapistName});
+      }
+
+      for (final entry in byTherapist.entries) {
+        final therapistId = entry.key;
+        final therapistItems = entry.value;
+        final therapistName = _asString(
+          therapistItems.first['assignedTherapistName'],
+          '-',
+        );
+        final therapistDoc = therapists[therapistId];
+        final commission = therapistItems.fold<double>(
+          0,
+          (total, item) =>
+              total +
+              CommissionRepository.commissionForService(
+                item,
+                staff: therapistDoc,
+                role: 'Therapist',
+              ),
+        );
+
+        final earning = earnings.putIfAbsent(
+          therapistId,
+          () => _StaffEarning(id: therapistId, name: therapistName),
+        );
+        earning.commission += commission;
+        earning.serviceCount += therapistItems.length;
+        earning.lines.add(
+          _StaffOrderLine(
+            order: order,
+            items: therapistItems,
+            commission: commission,
+          ),
+        );
+      }
+    }
+
+    return earnings;
+  }
+
+  void _openStaffDrawer(BuildContext context, _StaffEarning earning) {
+    _showDetailDrawer(
+      context: context,
+      title: earning.name,
+      child: _StaffDetailContent(
+        earning: earning,
+        onTapOrder: onTapOrder,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final earnings = _computeEarnings().values.toList()
+      ..sort((a, b) => b.commission.compareTo(a.commission));
+    final totalCommission = earnings.fold<double>(
+      0,
+      (total, earning) => total + earning.commission,
+    );
+
+    final content = Container(
+      color: _page,
+      child: Column(
+          children: [
+            _BreakdownHeader(
+              title: 'Staff',
+              date: selectedDate,
+              showBack: !embedded,
+              trailing: [
+                _HeaderStat(label: 'Staff', value: '${earnings.length}'),
+                const SizedBox(width: 10),
+                _HeaderStat(
+                  label: 'Commission',
+                  value: _money(totalCommission),
+                ),
+              ],
+            ),
+            Expanded(
+              child: earnings.isEmpty
+                  ? ListView(
+                      padding: const EdgeInsets.all(18),
+                      children: const [
+                        _HistoryMessage(
+                          icon: Icons.badge_outlined,
+                          title: 'No staff commission for this day',
+                          subtitle: 'Completed services will appear here.',
+                        ),
+                      ],
+                    )
+                  : ListView.builder(
+                      padding: const EdgeInsets.all(18),
+                      itemCount: earnings.length,
+                      itemBuilder: (context, index) => Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _StaffEarningCard(
+                          earning: earnings[index],
+                          onTap: () =>
+                              _openStaffDrawer(context, earnings[index]),
+                        ),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+    );
+    if (embedded) return content;
+    return Scaffold(
+      backgroundColor: _page,
+      body: SafeArea(child: content),
+    );
+  }
+}
+
+class _StaffEarningCard extends StatelessWidget {
+  final _StaffEarning earning;
+  final VoidCallback onTap;
+
+  const _StaffEarningCard({required this.earning, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFF1F5F9)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.03),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 40,
+                height: 40,
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5F5),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(
+                  Icons.badge_outlined,
+                  size: 19,
+                  color: _teal,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      earning.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      '${earning.serviceCount} service${earning.serviceCount == 1 ? '' : 's'} - ${earning.lines.length} bill${earning.lines.length == 1 ? '' : 's'}',
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Text(
+                _money(earning.commission),
+                style: const TextStyle(
+                  color: _teal,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffDetailContent extends StatelessWidget {
+  final _StaffEarning earning;
+  final ValueChanged<_HistoryOrder> onTapOrder;
+
+  const _StaffDetailContent({
+    required this.earning,
+    required this.onTapOrder,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final lines = [...earning.lines]
+      ..sort((a, b) => b.order.updatedAt.compareTo(a.order.updatedAt));
+    return ListView(
+      padding: const EdgeInsets.all(14),
+      children: [
+        Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFE8F5F5),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.badge_outlined, color: _teal, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  '${earning.serviceCount} service${earning.serviceCount == 1 ? '' : 's'} across ${earning.lines.length} bill${earning.lines.length == 1 ? '' : 's'}',
+                  style: const TextStyle(
+                    color: _teal,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              Text(
+                _money(earning.commission),
+                style: const TextStyle(
+                  color: _teal,
+                  fontSize: 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (lines.isEmpty)
+          const _HistoryMessage(
+            icon: Icons.receipt_long_outlined,
+            title: 'No bills for this staff',
+            subtitle: 'Commission-linked bills will appear here.',
+          )
+        else
+          for (final line in lines)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: _StaffOrderLineTile(
+                line: line,
+                onTap: () => onTapOrder(line.order),
+              ),
+            ),
+      ],
+    );
+  }
+}
+
+class _StaffOrderLineTile extends StatelessWidget {
+  final _StaffOrderLine line;
+  final VoidCallback onTap;
+
+  const _StaffOrderLineTile({
+    required this.line,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final services = line.items
+        .map((item) => _asString(item['name'], 'Service'))
+        .where((name) => name.isNotEmpty)
+        .join(', ');
+    return Material(
+      color: const Color(0xFFF8FAFC),
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: _line),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  line.order.receiptNumber,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              Text(
+                DateFormat('hh:mm a').format(line.order.createdAt),
+                style: const TextStyle(
+                  color: _muted,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            services.isEmpty ? line.order.serviceName : services,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  line.order.customerName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1), size: 18),
+            ],
+          ),
+          const Divider(height: 16, color: _line),
+          Row(
+            children: [
+              const Text(
+                'Commission earned',
+                style: TextStyle(
+                  color: _muted,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const Spacer(),
+              Text(
+                _money(line.commission),
+                style: const TextStyle(
+                  color: _teal,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          _DetailRow('Bill Total', _money(line.order.totalAmount)),
+        ],
+          ),
+        ),
+      ),
+    );
+  }
+}

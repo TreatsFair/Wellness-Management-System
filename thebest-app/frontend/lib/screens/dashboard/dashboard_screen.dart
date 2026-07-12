@@ -3,6 +3,7 @@ import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../core/outlets/outlet_context.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
@@ -225,6 +226,11 @@ bool _isCancelled(Map<String, dynamic> data) {
   return status == 'cancelled' || status == 'canceled';
 }
 
+bool _isWalkInAppointment(Map<String, dynamic> data) {
+  final type = _asString(data['type']).toLowerCase().trim();
+  return type == 'walkin' || type == 'walk_in' || type == 'walk-in';
+}
+
 bool _isPendingAppointmentStatus(String status) {
   return status == 'pending' ||
       status == 'confirmed' ||
@@ -309,7 +315,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .recentTransactions(limit: 8);
 
       final activeAppointments = appointments.where(
-        (data) => !_isCancelled(data),
+        (data) => !_isCancelled(data) && !_isWalkInAppointment(data),
       );
       final todayAppointments = activeAppointments
           .where((data) => _asString(data['date']) == todayKey)
@@ -785,7 +791,7 @@ class _TabletLayout extends StatelessWidget {
     return Column(
       children: [
         // ── Top bar ────────────────────────────────────────────
-        _TabletTopBar(
+        _DashboardTopBar(
           profile: profile,
           email: email,
           role: role,
@@ -841,17 +847,19 @@ class _TabletLayout extends StatelessWidget {
                           onRefreshDashboard: onRefreshDashboard,
                         ),
                       ),
-                      const SizedBox(width: 16),
-                      // Therapists card
-                      Expanded(
-                        child: _TabletTherapistsCard(
-                          role: role,
-                          therapists: dashboardData.therapists,
-                          isLoading: isLoadingDashboard,
-                        ),
-                      ),
                     ],
                   ),
+                ),
+
+                const SizedBox(height: 32),
+
+                // Staff availability gets its own full-width section so
+                // every therapist is readable at a glance.
+                const _SectionLabel('Staff Availability'),
+                const SizedBox(height: 12),
+                _TabletStaffAvailabilityCard(
+                  therapists: dashboardData.therapists,
+                  isLoading: isLoadingDashboard,
                 ),
 
                 const SizedBox(height: 32),
@@ -1012,7 +1020,10 @@ class _LogoInitial extends StatelessWidget {
   }
 }
 
-class _TabletTopBar extends StatelessWidget {
+/// Shared dashboard header used by both the tablet and phone layouts:
+/// business identity on the left, role pill + recent-sales bell + settings
+/// on the right. Styled from the app-wide design tokens.
+class _DashboardTopBar extends StatelessWidget {
   final _BusinessProfile profile;
   final String email;
   final String role;
@@ -1021,7 +1032,7 @@ class _TabletTopBar extends StatelessWidget {
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
 
-  const _TabletTopBar({
+  const _DashboardTopBar({
     required this.profile,
     required this.email,
     required this.role,
@@ -1043,56 +1054,95 @@ class _TabletTopBar extends StatelessWidget {
     );
   }
 
+  void _openNotifications(BuildContext context) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => _NotificationDialog(transactions: transactions),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
+      decoration: const BoxDecoration(
+        color: AppColors.surface,
+        border: Border(bottom: BorderSide(color: AppColors.border)),
+      ),
+      padding: const EdgeInsets.symmetric(
+        horizontal: AppSpacing.lg,
+        vertical: AppSpacing.md,
+      ),
       child: Row(
         children: [
-          InkWell(
-            onTap: () => _openBusinessProfile(context),
-            borderRadius: BorderRadius.circular(12),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-              child: Row(
-                children: [
-                  _BusinessLogoAvatar(
-                    profile: profile,
-                    size: 40,
-                    circular: true,
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        profile.name,
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.bold,
-                          color: Color(0xFF1A1A2E),
-                        ),
+          Expanded(
+            child: InkWell(
+              onTap: () => _openBusinessProfile(context),
+              borderRadius: BorderRadius.circular(AppRadius.card),
+              child: Padding(
+                padding: const EdgeInsets.all(AppSpacing.xs),
+                child: Row(
+                  children: [
+                    _BusinessLogoAvatar(
+                      profile: profile,
+                      size: 38,
+                      circular: true,
+                    ),
+                    const SizedBox(width: AppSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            profile.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.label.copyWith(fontSize: 15),
+                          ),
+                          Text(
+                            profile.outletName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: AppText.caption,
+                          ),
+                        ],
                       ),
-                      Text(
-                        profile.location,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF9E9E9E),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-          const Spacer(),
+          const SizedBox(width: AppSpacing.sm),
           _RolePill(role: role, isLoading: isLoadingSettings),
-          const SizedBox(width: 12),
-          _NotificationButton(transactions: transactions),
-          const SizedBox(width: 12),
-          _SettingsButton(onPressed: onOpenSettings),
+          const SizedBox(width: AppSpacing.sm),
+          IconButton.outlined(
+            onPressed: () => _openNotifications(context),
+            tooltip: 'Recent sales',
+            style: IconButton.styleFrom(
+              side: const BorderSide(color: AppColors.border),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+              ),
+            ),
+            icon: Badge(
+              isLabelVisible: transactions.isNotEmpty,
+              label: Text('${transactions.length}'),
+              child: const Icon(Icons.notifications_none_outlined),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.sm),
+          IconButton.filled(
+            onPressed: onOpenSettings,
+            tooltip: 'Business settings',
+            style: IconButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(AppRadius.control),
+              ),
+            ),
+            icon: const Icon(Icons.settings_outlined),
+          ),
         ],
       ),
     );
@@ -1325,78 +1375,104 @@ class _TabletAppointmentCard extends StatelessWidget {
   }
 }
 
-class _TabletTherapistsCard extends StatelessWidget {
-  final String role;
+/// Full-width staff availability board for the tablet dashboard. Shows
+/// every therapist in two readable columns instead of squeezing two rows
+/// into a small card.
+class _TabletStaffAvailabilityCard extends StatelessWidget {
   final List<_TherapistStatus> therapists;
   final bool isLoading;
 
-  const _TabletTherapistsCard({
-    required this.role,
+  const _TabletStaffAvailabilityCard({
     required this.therapists,
     required this.isLoading,
   });
 
   @override
   Widget build(BuildContext context) {
-    final visibleTherapists = therapists.take(2).toList();
-
-    return GestureDetector(
-      onTap: () => Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => const TherapistAvailabilityScreen()),
-      ),
-      child: _TabletCard(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                _IconBox(
-                  icon: Icons.people_outline,
-                  bg: const Color(0xFFF3E8FF),
-                  color: const Color(0xFF7C3AED),
-                ),
-                const SizedBox(width: 12),
-                const Text(
-                  'Staff',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const TherapistAvailabilityScreen(),
+          ),
+        ),
+        borderRadius: BorderRadius.circular(16),
+        child: _TabletCard(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  _IconBox(
+                    icon: Icons.people_outline,
+                    bg: const Color(0xFFF3E8FF),
+                    color: const Color(0xFF7C3AED),
                   ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Staff Availability',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const Spacer(),
+                  const Text(
+                    'View all',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                  const Icon(
+                    Icons.chevron_right,
+                    size: 18,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              if (isLoading)
+                const Text(
+                  'Loading staff status',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+                )
+              else if (therapists.isEmpty)
+                const Text(
+                  'No staff yet',
+                  style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+                )
+              else
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    const gap = 24.0;
+                    final columnWidth = (constraints.maxWidth - gap) / 2;
+                    return Wrap(
+                      spacing: gap,
+                      runSpacing: 14,
+                      children: [
+                        for (final therapist in therapists)
+                          SizedBox(
+                            width: columnWidth,
+                            child: _TherapistRow(
+                              name: therapist.name,
+                              status: therapist.status,
+                              statusColor: therapist.isFree
+                                  ? const Color(0xFF4CAF50)
+                                  : const Color(0xFFF59E0B),
+                              done: '${therapist.doneCount} done',
+                            ),
+                          ),
+                      ],
+                    );
+                  },
                 ),
-              ],
-            ),
-            const SizedBox(height: 16),
-            const Text(
-              'Status Today',
-              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-            ),
-            const SizedBox(height: 10),
-            if (isLoading)
-              const Text(
-                'Loading staff status',
-                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-              )
-            else if (visibleTherapists.isEmpty)
-              const Text(
-                'No staff yet',
-                style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-              )
-            else
-              for (final therapist in visibleTherapists) ...[
-                _TherapistRow(
-                  name: therapist.name,
-                  status: therapist.status,
-                  statusColor: therapist.isFree
-                      ? const Color(0xFF4CAF50)
-                      : const Color(0xFFF59E0B),
-                  done: '${therapist.doneCount} done',
-                ),
-                if (therapist != visibleTherapists.last)
-                  const Divider(height: 16, color: Color(0xFFF0F0F0)),
-              ],
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -1481,7 +1557,7 @@ class _PhoneLayout extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           // ── Top bar ──────────────────────────────────────────
-          _PhoneTopBar(
+          _DashboardTopBar(
             profile: profile,
             email: email,
             role: role,
@@ -1649,101 +1725,6 @@ class _PhoneLayout extends StatelessWidget {
               ],
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-class _PhoneTopBar extends StatelessWidget {
-  final _BusinessProfile profile;
-  final String email;
-  final String role;
-  final bool isLoadingSettings;
-  final List<_TransactionSummary> transactions;
-  final VoidCallback onOpenSettings;
-  final Future<void> Function(String) onSwitchOutlet;
-
-  const _PhoneTopBar({
-    required this.profile,
-    required this.email,
-    required this.role,
-    required this.isLoadingSettings,
-    required this.transactions,
-    required this.onOpenSettings,
-    required this.onSwitchOutlet,
-  });
-
-  void _openBusinessProfile(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => _BusinessProfileDialog(
-        profile: profile,
-        email: email,
-        isAdmin: role == 'admin',
-        onSwitchOutlet: onSwitchOutlet,
-      ),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        children: [
-          Expanded(
-            child: InkWell(
-              onTap: () => _openBusinessProfile(context),
-              borderRadius: BorderRadius.circular(12),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                child: Row(
-                  children: [
-                    _BusinessLogoAvatar(
-                      profile: profile,
-                      size: 36,
-                      circular: true,
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            profile.name,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.bold,
-                              color: Color(0xFF1A1A2E),
-                            ),
-                          ),
-                          Text(
-                            profile.location,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 11,
-                              color: Color(0xFF9E9E9E),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          _RolePill(role: role, isLoading: isLoadingSettings, compact: true),
-          const SizedBox(width: 8),
-          _NotificationButton(transactions: transactions, compact: true),
-          const SizedBox(width: 8),
-          _SettingsButton(onPressed: onOpenSettings, compact: true),
         ],
       ),
     );
@@ -2515,13 +2496,8 @@ class _BusinessProfileRow extends StatelessWidget {
 class _RolePill extends StatelessWidget {
   final String role;
   final bool isLoading;
-  final bool compact;
 
-  const _RolePill({
-    required this.role,
-    this.isLoading = false,
-    this.compact = false,
-  });
+  const _RolePill({required this.role, this.isLoading = false});
 
   @override
   Widget build(BuildContext context) {
@@ -2531,103 +2507,19 @@ class _RolePill extends StatelessWidget {
         : isAdmin
         ? 'Admin'
         : 'Staff';
-    final showIcon = isLoading;
-
     return Container(
-      height: compact ? 38 : 46,
-      padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 22),
-      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: Colors.white,
-        border: Border.all(color: const Color(0xFFE0E0E0)),
-        borderRadius: BorderRadius.circular(compact ? 19 : 14),
+        color: isAdmin ? AppColors.accentSoft : AppColors.primarySoft,
+        borderRadius: BorderRadius.circular(AppRadius.pill),
       ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (showIcon) ...[
-            Icon(
-              Icons.hourglass_empty_outlined,
-              size: compact ? 17 : 20,
-              color: const Color(0xFF1B6B72),
-            ),
-            SizedBox(width: compact ? 4 : 8),
-          ],
-          Text(
-            label,
-            style: TextStyle(
-              fontSize: compact ? 12 : 16,
-              fontWeight: FontWeight.w500,
-              color: const Color(0xFF1A1A2E),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NotificationButton extends StatelessWidget {
-  final List<_TransactionSummary> transactions;
-  final bool compact;
-
-  const _NotificationButton({required this.transactions, this.compact = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final buttonSize = compact ? 38.0 : 48.0;
-    final iconSize = compact ? 20.0 : 24.0;
-
-    return InkWell(
-      onTap: () {
-        showDialog<void>(
-          context: context,
-          builder: (context) => _NotificationDialog(transactions: transactions),
-        );
-      },
-      borderRadius: BorderRadius.circular(compact ? 19 : 14),
-      child: Stack(
-        clipBehavior: Clip.none,
-        children: [
-          Container(
-            width: buttonSize,
-            height: buttonSize,
-            decoration: BoxDecoration(
-              color: compact ? const Color(0xFFC8963E) : Colors.white,
-              border: compact
-                  ? null
-                  : Border.all(color: const Color(0xFFE0E0E0)),
-              borderRadius: BorderRadius.circular(compact ? 19 : 14),
-            ),
-            child: Icon(
-              Icons.notifications_none_outlined,
-              color: compact ? Colors.white : const Color(0xFF5F6B7A),
-              size: iconSize,
-            ),
-          ),
-          if (transactions.isNotEmpty)
-            Positioned(
-              top: compact ? -4 : -6,
-              right: compact ? -2 : -4,
-              child: Container(
-                width: 22,
-                height: 22,
-                alignment: Alignment.center,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: Color(0xFFE53935),
-                ),
-                child: Text(
-                  '${transactions.length}',
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ),
-        ],
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: isAdmin ? AppColors.accent : AppColors.primary,
+        ),
       ),
     );
   }
@@ -2851,36 +2743,6 @@ class _NoScrollbarScrollBehavior extends ScrollBehavior {
     ScrollableDetails details,
   ) {
     return child;
-  }
-}
-
-class _SettingsButton extends StatelessWidget {
-  final VoidCallback onPressed;
-  final bool compact;
-
-  const _SettingsButton({required this.onPressed, this.compact = false});
-
-  @override
-  Widget build(BuildContext context) {
-    final size = compact ? 38.0 : 48.0;
-
-    return InkWell(
-      onTap: onPressed,
-      borderRadius: BorderRadius.circular(compact ? 19 : 14),
-      child: Container(
-        width: size,
-        height: size,
-        decoration: BoxDecoration(
-          color: const Color(0xFF1B6B72),
-          borderRadius: BorderRadius.circular(compact ? 19 : 14),
-        ),
-        child: Icon(
-          Icons.settings_outlined,
-          color: Colors.white,
-          size: compact ? 20 : 24,
-        ),
-      ),
-    );
   }
 }
 

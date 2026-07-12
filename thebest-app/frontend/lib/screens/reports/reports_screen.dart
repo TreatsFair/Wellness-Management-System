@@ -1239,8 +1239,11 @@ String _paymentLabel(String value) {
       return 'Cash';
     case 'qr_code':
       return 'QR Code';
+    case 'credit_card':
     case 'card':
-      return 'Card';
+      return 'Credit Card';
+    case 'debit_card':
+      return 'Debit Card';
     default:
       return value.isEmpty ? 'Other' : value;
   }
@@ -1252,8 +1255,11 @@ Color _paymentColor(String value) {
       return _green;
     case 'qr_code':
       return _blue;
+    case 'credit_card':
     case 'card':
       return _violet;
+    case 'debit_card':
+      return _amber;
     default:
       return _muted;
   }

@@ -5,17 +5,19 @@ const mobileNav = () => {
 
     let isMobileNavOpen = false;
 
+    // Only touch overflow-y; forcing overflow(-x) to auto here would undo
+    // the horizontal clipping the stylesheet applies to html/body.
     const openMenu = () => {
         mobileNav.style.display = 'flex';
         document.body.style.overflowY = 'hidden';
-        document.documentElement.style.overflow = 'hidden';
+        document.documentElement.style.overflowY = 'hidden';
         isMobileNavOpen = true;
     };
 
     const closeMenu = () => {
         mobileNav.style.display = 'none';
-        document.body.style.overflowY = 'auto';
-        document.documentElement.style.overflow = 'auto';
+        document.body.style.overflowY = '';
+        document.documentElement.style.overflowY = '';
         isMobileNavOpen = false;
     };
 

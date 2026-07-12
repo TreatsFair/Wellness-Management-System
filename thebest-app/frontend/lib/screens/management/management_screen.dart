@@ -74,6 +74,19 @@ int _timeToMinutes(String value) {
   return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }
 
+String _minutesToClock(int minutes) {
+  final normalized = minutes % (24 * 60);
+  return '${(normalized ~/ 60).toString().padLeft(2, '0')}:'
+      '${(normalized % 60).toString().padLeft(2, '0')}';
+}
+
+String _friendlyTime(String value) {
+  final minutes = _timeToMinutes(value);
+  return DateFormat(
+    'h:mm a',
+  ).format(DateTime(2026, 1, 1, minutes ~/ 60, minutes % 60));
+}
+
 bool _isPendingAppointmentStatus(String status) {
   return status == 'pending' ||
       status == 'confirmed' ||
@@ -345,13 +358,17 @@ class _ResourceItem {
     final price = _asDouble(d['price']);
     final therapistCommission = _asDouble(d['therapistCommission']);
     final counterCommission = _asDouble(d['counterCommission']);
+    final bufferAfter = _asInt(d['bufferAfterMinutes'], 0);
     final active = _asBool(d['active'] ?? d['isActive'], true);
+    final durationLabel = bufferAfter > 0
+        ? '$duration min + $bufferAfter min cleanup'
+        : '$duration min';
     return _ResourceItem(
       id: _asString(d['id']),
       name: name,
       subtitle: _asString(d['category'], 'Services'),
       detail:
-          '$duration min | RM ${price.toStringAsFixed(0)} | Comm RM ${therapistCommission.toStringAsFixed(0)}/${counterCommission.toStringAsFixed(0)}',
+          '$durationLabel | RM ${price.toStringAsFixed(0)} | Comm RM ${therapistCommission.toStringAsFixed(0)}/${counterCommission.toStringAsFixed(0)}',
       statusText: active ? 'Active' : 'Inactive',
       active: active,
       color: _teal,
@@ -363,13 +380,23 @@ class _ResourceItem {
     final name = _asString(d['name']);
     final totalSlots = _asInt(d['totalSlots'], 1);
     final active = _asBool(d['active'] ?? d['isActive'], true);
+    final busySlots = _asInt(d['currentBusySlots']);
+    final freeSlots = (totalSlots - busySlots).clamp(0, totalSlots);
+    final busyUntil = _asString(d['currentBusyUntil']);
+    final status = !active
+        ? 'Unavailable'
+        : busySlots == 0
+        ? 'Available'
+        : freeSlots == 0
+        ? 'Fully occupied until ${_friendlyTime(busyUntil)}'
+        : '$busySlots/$totalSlots occupied until ${_friendlyTime(busyUntil)}';
     return _ResourceItem(
       id: _asString(d['id']),
       name: name,
       subtitle: _roomTypeLabel(_asString(d['type'] ?? d['roomType'])),
       detail:
-          '${_asString(d['floor'], 'Main Floor')} | $totalSlots slot${totalSlots == 1 ? '' : 's'}',
-      statusText: active ? 'Available' : 'Unavailable',
+          '${_asString(d['floor'], 'Main Floor')} | $freeSlots of $totalSlots slot${totalSlots == 1 ? '' : 's'} available',
+      statusText: status,
       active: active,
       color: const Color(0xFF8B5CF6),
       raw: d,
@@ -390,6 +417,7 @@ class _ServiceRoomScreen extends StatefulWidget {
 class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   final _serviceRepository = ServiceRepository();
   final _roomRepository = RoomRepository();
+  final _appointmentRepository = AppointmentRepository();
   final _searchController = TextEditingController();
   List<_ResourceItem> _items = [];
   List<_ResourceItem> _filtered = [];
@@ -420,9 +448,12 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   Future<void> _load() async {
     setState(() => _loading = true);
     try {
-      final rows = widget.type == _ResourceType.service
+      var rows = widget.type == _ResourceType.service
           ? await _serviceRepository.getServices()
           : await _roomRepository.getRooms();
+      if (widget.type == _ResourceType.room) {
+        rows = await _withLiveRoomStatus(rows);
+      }
       final items = rows
           .map(
             (row) => widget.type == _ResourceType.service
@@ -446,6 +477,68 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
     } catch (_) {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<List<Map<String, dynamic>>> _withLiveRoomStatus(
+    List<Map<String, dynamic>> rooms,
+  ) async {
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    final yesterday = DateFormat(
+      'yyyy-MM-dd',
+    ).format(now.subtract(const Duration(days: 1)));
+    final appointments = await _appointmentRepository
+        .getAppointmentsInDateRange(yesterday, today);
+    final activeByRoom = <String, List<DateTime>>{};
+
+    for (final appointment in appointments) {
+      final status = _asString(appointment['status']).toLowerCase();
+      if (!_isPendingAppointmentStatus(status)) continue;
+      final roomId = _asString(appointment['roomId']);
+      if (roomId.isEmpty) continue;
+      final date = DateTime.tryParse(_asString(appointment['date'])) ?? now;
+      final start =
+          DateTime.tryParse(_asString(appointment['startAt']))?.toLocal() ??
+          DateTime(date.year, date.month, date.day).add(
+            Duration(
+              minutes: _timeToMinutes(_asString(appointment['startTime'])),
+            ),
+          );
+      var end = DateTime.tryParse(_asString(appointment['endAt']))?.toLocal();
+      if (end == null) {
+        var endMinutes = _timeToMinutes(_asString(appointment['endTime']));
+        if (endMinutes <= _timeToMinutes(_asString(appointment['startTime']))) {
+          endMinutes += 24 * 60;
+        }
+        end = DateTime(
+          date.year,
+          date.month,
+          date.day,
+        ).add(Duration(minutes: endMinutes));
+      }
+      final blockedUntil = end.add(
+        Duration(minutes: _asInt(appointment['bufferAfterMinutes'])),
+      );
+      if (!now.isBefore(start) && now.isBefore(blockedUntil)) {
+        activeByRoom.putIfAbsent(roomId, () => []).add(blockedUntil);
+      }
+    }
+
+    return rooms.map((room) {
+      final occupied =
+          activeByRoom[_asString(room['id'])] ?? const <DateTime>[];
+      DateTime? latest;
+      for (final end in occupied) {
+        if (latest == null || end.isAfter(latest)) latest = end;
+      }
+      return {
+        ...room,
+        'currentBusySlots': occupied.length,
+        'currentBusyUntil': latest == null
+            ? ''
+            : DateFormat('HH:mm').format(latest),
+      };
+    }).toList();
   }
 
   void _filter() {
@@ -979,6 +1072,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   late final TextEditingController _category;
   late final TextEditingController _duration;
   late final TextEditingController _price;
+  late final TextEditingController _bufferAfter;
   late final TextEditingController _therapistCommission;
   late final TextEditingController _counterCommission;
   late final TextEditingController _roomType;
@@ -1009,6 +1103,9 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     );
     _price = TextEditingController(
       text: _asDouble(raw['price']).toStringAsFixed(0),
+    );
+    _bufferAfter = TextEditingController(
+      text: _asInt(raw['bufferAfterMinutes'], 0).toString(),
     );
     _therapistCommission = TextEditingController(
       text: _asDouble(raw['therapistCommission']).toStringAsFixed(0),
@@ -1128,6 +1225,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     _category.dispose();
     _duration.dispose();
     _price.dispose();
+    _bufferAfter.dispose();
     _therapistCommission.dispose();
     _counterCommission.dispose();
     _roomType.dispose();
@@ -1149,6 +1247,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                 : _category.text.trim(),
             'duration': int.tryParse(_duration.text.trim()) ?? 60,
             'price': double.tryParse(_price.text.trim()) ?? 0,
+            'bufferAfterMinutes': int.tryParse(_bufferAfter.text.trim()) ?? 0,
             if (_canEditAdminFields) ...{
               'therapistCommission':
                   double.tryParse(_therapistCommission.text.trim()) ?? 0,
@@ -1392,6 +1491,15 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                           keyboardType: TextInputType.number,
                         ),
                       ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: _FormField(
+                          label: 'Cleanup buffer',
+                          controller: _bufferAfter,
+                          hint: 'Minutes after service',
+                          keyboardType: TextInputType.number,
+                        ),
+                      ),
                     ],
                   ),
                   const SizedBox(height: 12),
@@ -1620,7 +1728,7 @@ class _TherapistAvailabilityScreenState
         );
 
     var done = 0;
-    var busyUntil = therapist.busyUntil;
+    var busyUntil = '';
     final now = TimeOfDay.now();
     final nowMinutes = now.hour * 60 + now.minute;
 
@@ -1632,9 +1740,11 @@ class _TherapistAvailabilityScreenState
       }
       if (_isPendingAppointmentStatus(status)) {
         final start = _timeToMinutes(_asString(d['startTime'], '00:00'));
-        final end = _timeToMinutes(_asString(d['endTime'], '00:00'));
+        final end =
+            _timeToMinutes(_asString(d['endTime'], '00:00')) +
+            _asInt(d['bufferAfterMinutes']);
         if (start <= nowMinutes && end > nowMinutes) {
-          busyUntil = _asString(d['endTime']);
+          busyUntil = _minutesToClock(end);
         }
       }
     }
@@ -2143,16 +2253,22 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
     if (_loading) {
       return const Center(child: CircularProgressIndicator(color: _teal));
     }
+    final isBusy = widget.therapist.busyUntil.isNotEmpty;
     final effectivelyAvailable =
         (_availableOverride ?? widget.therapist.available) &&
-        !widget.therapist.onLeave;
+        !widget.therapist.onLeave &&
+        !isBusy;
     final statusColor = widget.therapist.onLeave
         ? const Color(0xFFD97706)
+        : isBusy
+        ? const Color(0xFFDC6B19)
         : effectivelyAvailable
         ? const Color(0xFF10B981)
         : const Color(0xFF94A3B8);
     final statusLabel = widget.therapist.onLeave
         ? 'On Leave'
+        : isBusy
+        ? 'Busy until ${_friendlyTime(widget.therapist.busyUntil)}'
         : effectivelyAvailable
         ? 'Available'
         : 'Unavailable';
@@ -2170,7 +2286,7 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
                 statusColor: statusColor,
                 statusLabel: statusLabel,
                 effectivelyAvailable: effectivelyAvailable,
-                onAvailabilityChanged: widget.therapist.onLeave
+                onAvailabilityChanged: widget.therapist.onLeave || isBusy
                     ? null
                     : _changeAvailability,
                 onEdit: widget.onEdit,
@@ -3002,9 +3118,13 @@ class _TherapistAvailabilityCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final effectivelyAvailable = therapist.available && !therapist.onLeave;
+    final isBusy = therapist.busyUntil.isNotEmpty;
+    final effectivelyAvailable =
+        therapist.available && !therapist.onLeave && !isBusy;
     final statusColor = therapist.onLeave
         ? const Color(0xFFD97706)
+        : isBusy
+        ? const Color(0xFFDC6B19)
         : effectivelyAvailable
         ? const Color(0xFF10B981)
         : const Color(0xFF9CA3AF);
@@ -3097,6 +3217,8 @@ class _TherapistAvailabilityCard extends StatelessWidget {
                       child: Text(
                         therapist.onLeave
                             ? 'On Leave'
+                            : isBusy
+                            ? 'Busy until ${_friendlyTime(therapist.busyUntil)}'
                             : effectivelyAvailable
                             ? 'Available'
                             : 'Unavailable',

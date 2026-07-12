@@ -53,6 +53,14 @@
       method: "POST",
       body: JSON.stringify(body),
     }),
+    confirmHold: (token) => request("/booking-holds/confirm", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+    payHold: (token) => request("/booking-holds/pay", {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
     getHoldStatus: (token) => request(`/booking-holds/status?token=${encodeURIComponent(token)}`),
   };
 })();

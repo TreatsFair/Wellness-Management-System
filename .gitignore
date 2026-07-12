@@ -75,3 +75,27 @@ replay_pid*.log
 # Supabase
 # =========================================================
 thebest-app/supabase/.temp/
+
+# =========================================================
+# Claude Code / Codex local tool state
+# Ignore personal/session files, but keep shared project config
+# (.mcp.json, skills-lock.json) tracked
+# =========================================================
+.claude/settings.local.json
+.claude/skills/
+.codex/
+claude.md
+# =========================================================
+# Ad-hoc local dev/preview scratch files
+# =========================================================
+flutter_preview_*/
+flutter_preview_*.pid
+flutter_preview_*.out.log
+flutter_preview_*.err.log
+flutter_web_*.pid
+flutter_web_*.out.log
+flutter_web_*.err.log
+*.pid
+
+project_guide
+docs/

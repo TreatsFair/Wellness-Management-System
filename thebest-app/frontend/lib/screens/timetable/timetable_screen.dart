@@ -1,11 +1,16 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/repository_utils.dart';
+import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/transaction_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+
+const Color _timetableAccent = Color(0xFF0F766E);
 
 class TimetableScreen extends StatefulWidget {
   final String userRole;
@@ -20,14 +25,22 @@ class _TimetableScreenState extends State<TimetableScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _dashboardRepository = DashboardRepository();
   final _transactionRepository = TransactionRepository();
+  final _roomRepository = RoomRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
   final _search = TextEditingController();
 
   DateTime _selectedDate = _stripDate(DateTime.now());
-  String _mode = 'all';
+  String _mode = 'staff';
+  String _view = 'overview';
   bool _loading = true;
   String? _error;
   List<_TimetableEntry> _entries = [];
+  List<_TimetableTherapist> _therapists = [];
+  List<_TimetableRoom> _rooms = [];
+  final Set<String> _expandedBandKeys = {};
+  // Resource ids the user has narrowed the timetable to (empty = show all).
+  final Set<String> _selectedResourceIds = {};
+  bool _resourceFilterExpanded = false;
   _TimetableEntry? _selectedEntry;
   int _openMinute = 9 * 60;
   int _closeMinute = 21 * 60;
@@ -49,6 +62,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     setState(() {
       _loading = true;
       _error = null;
+      _expandedBandKeys.clear();
     });
 
     try {
@@ -58,6 +72,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
           .getAppointmentsByDate(date);
       final transactionRows = await _transactionRepository
           .getTransactionsByDate(_selectedDate);
+      final therapistRows = await _dashboardRepository.listTherapists();
+      final roomRows = await _roomRepository.getActiveRooms();
 
       final customerIds = appointmentRows
           .map((row) => asString(row['customerId']))
@@ -80,16 +96,25 @@ class _TimetableScreenState extends State<TimetableScreen> {
         'services',
         serviceIds,
       );
-      final therapists = await _dashboardRepository.loadByIds(
+      final allTherapists = {
+        for (final row in therapistRows) asString(row['id']): row,
+      };
+      final linkedTherapists = await _dashboardRepository.loadByIds(
         'therapists',
-        therapistIds,
+        therapistIds.where((id) => !allTherapists.containsKey(id)),
       );
+      final therapists = {...allTherapists, ...linkedTherapists};
       final rooms = await _dashboardRepository.loadByIds('rooms', roomIds);
       final transactionsByAppointment = <String, Map<String, dynamic>>{};
+      final transactionsByGroup = <String, Map<String, dynamic>>{};
       for (final transaction in transactionRows) {
         final appointmentId = asString(transaction['appointmentId']);
+        final appointmentGroupId = asString(transaction['appointmentGroupId']);
         if (appointmentId.isNotEmpty) {
           transactionsByAppointment[appointmentId] = transaction;
+        }
+        if (appointmentGroupId.isNotEmpty) {
+          transactionsByGroup[appointmentGroupId] = transaction;
         }
       }
 
@@ -102,7 +127,9 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   services: services,
                   therapists: therapists,
                   rooms: rooms,
-                  transaction: transactionsByAppointment[asString(row['id'])],
+                  transaction:
+                      transactionsByAppointment[asString(row['id'])] ??
+                      transactionsByGroup[asString(row['appointmentGroupId'])],
                   selectedDate: _selectedDate,
                 ),
               )
@@ -113,6 +140,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
       if (!mounted) return;
       setState(() {
         _entries = entries;
+        _therapists = _buildTherapistRows(therapistRows, entries);
+        _rooms = _buildRoomRows(roomRows, entries);
         _openMinute = settings.$1;
         _closeMinute = settings.$2;
       });
@@ -138,18 +167,157 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
   List<_TimetableEntry> get _filteredEntries {
     final query = _search.text.trim().toLowerCase();
+    if (query.isEmpty) return _entries;
     return _entries.where((entry) {
-      if (query.isEmpty) return true;
-      if (_mode == 'staff') {
-        return entry.staffName.toLowerCase().contains(query);
+      if (_mode == 'staff' && entry.staffName.toLowerCase().contains(query)) {
+        return true;
       }
-      if (_mode == 'rooms') return entry.roomName.toLowerCase().contains(query);
+      if (_mode == 'rooms' && entry.roomName.toLowerCase().contains(query)) {
+        return true;
+      }
       return entry.matches(query);
     }).toList();
   }
 
-  _TimetableStats get _stats =>
-      _TimetableStats.fromEntries(_entries, selectedDate: _selectedDate);
+  List<_TimetableResource> get _staffResources {
+    final resources = _therapists
+        .map(
+          (t) => _TimetableResource(
+            id: t.id,
+            name: t.name,
+            subtitle: t.role,
+            capacity: 1,
+            available: t.available,
+            avatarText: t.initials,
+            avatarIcon: null,
+            resourceType: 'staff',
+            accentColor: _avatarColor(t.name),
+            matches: (e) => e.therapistId == t.id,
+          ),
+        )
+        .toList();
+    if (_entries.any((e) => e.therapistId.isEmpty)) {
+      resources.add(
+        _TimetableResource(
+          id: '',
+          name: 'Unassigned',
+          subtitle: 'Needs assignment',
+          capacity: 1,
+          available: false,
+          avatarText: '?',
+          avatarIcon: null,
+          resourceType: 'staff',
+          accentColor: const Color(0xFF64748B),
+          matches: (e) => e.therapistId.isEmpty,
+        ),
+      );
+    }
+    return resources;
+  }
+
+  List<_TimetableResource> get _roomResources {
+    final resources = _rooms
+        .map(
+          (r) => _TimetableResource(
+            id: r.id,
+            name: r.name,
+            subtitle: _titleCase(r.roomType),
+            capacity: r.totalSlots,
+            available: r.active,
+            avatarText: '',
+            avatarIcon: _roomIcon(r.roomType),
+            resourceType: 'room',
+            accentColor: _roomAccentColor(r.roomType),
+            matches: (e) => e.roomId == r.id,
+          ),
+        )
+        .toList();
+    if (_entries.any((e) => e.roomId.isEmpty)) {
+      resources.add(
+        _TimetableResource(
+          id: '',
+          name: 'Unassigned',
+          subtitle: 'No zone set',
+          capacity: 1,
+          available: false,
+          avatarText: '',
+          avatarIcon: Icons.meeting_room_outlined,
+          resourceType: 'room',
+          accentColor: const Color(0xFF64748B),
+          matches: (e) => e.roomId.isEmpty,
+        ),
+      );
+    }
+    return resources;
+  }
+
+  List<_TimetableResource> get _visibleResources {
+    final resources = _mode == 'rooms' ? _roomResources : _staffResources;
+    final query = _search.text.trim().toLowerCase();
+    if (query.isEmpty) return resources;
+    return resources.where((r) {
+      if (r.name.toLowerCase().contains(query)) return true;
+      return _entries.where(r.matches).any((e) => e.matches(query));
+    }).toList();
+  }
+
+  _TimetableStats get _stats => _TimetableStats.fromEntries(
+    _entries,
+    resources: _mode == 'rooms' ? _roomResources : _staffResources,
+    selectedDate: _selectedDate,
+  );
+
+  void _onModeChanged(String value) {
+    setState(() {
+      _mode = value;
+      _expandedBandKeys.clear();
+      _selectedResourceIds.clear();
+      _resourceFilterExpanded = false;
+    });
+  }
+
+  void _toggleResourceSelection(String id) {
+    setState(() {
+      if (_selectedResourceIds.contains(id)) {
+        _selectedResourceIds.remove(id);
+      } else {
+        _selectedResourceIds.add(id);
+      }
+    });
+  }
+
+  List<_TimetableResource> _applyResourceSelection(
+    List<_TimetableResource> resources,
+  ) {
+    if (_selectedResourceIds.isEmpty) return resources;
+    return resources
+        .where((r) => _selectedResourceIds.contains(r.id))
+        .toList();
+  }
+
+  void _onViewChanged(String value) {
+    if (_view == value) return;
+    setState(() {
+      _view = value;
+    });
+  }
+
+  void _openTimetable([String? mode]) {
+    setState(() {
+      _view = 'timetable';
+      if (mode != null) _mode = mode;
+    });
+  }
+
+  void _toggleBand(String key) {
+    setState(() {
+      if (_expandedBandKeys.contains(key)) {
+        _expandedBandKeys.remove(key);
+      } else {
+        _expandedBandKeys.add(key);
+      }
+    });
+  }
 
   void _shiftDate(int days) {
     setState(
@@ -170,8 +338,26 @@ class _TimetableScreenState extends State<TimetableScreen> {
     _loadTimetable();
   }
 
+  void _goToToday() {
+    final today = _stripDate(DateTime.now());
+    if (_selectedDate == today) return;
+    setState(() => _selectedDate = today);
+    _loadTimetable();
+  }
+
+  void _showTimetableSettings() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _TimetableSettingsSheet(
+        openMinute: _openMinute,
+        closeMinute: _closeMinute,
+      ),
+    );
+  }
+
   void _showEntry(_TimetableEntry entry) {
-    if (MediaQuery.of(context).size.width >= 900) {
+    if (MediaQuery.of(context).size.width >= 1200) {
       setState(() => _selectedEntry = entry);
       return;
     }
@@ -186,9 +372,12 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 760;
-    final showSidePanel = MediaQuery.of(context).size.width >= 900;
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isTabletLayout = screenWidth >= 900;
+    final isWideLayout = screenWidth >= 1200;
     final entries = _filteredEntries;
+    final resources = _applyResourceSelection(_visibleResources);
+    final modeResources = _mode == 'rooms' ? _roomResources : _staffResources;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF6F8FA),
@@ -197,67 +386,76 @@ class _TimetableScreenState extends State<TimetableScreen> {
           children: [
             _TimetableHeader(
               selectedDate: _selectedDate,
-              onBack: () => Navigator.pop(context),
+              onBack: () => Navigator.maybePop(context),
               onPrevious: () => _shiftDate(-1),
               onNext: () => _shiftDate(1),
               onPickDate: _pickDate,
+              onToday: _goToToday,
               onRefresh: _loadTimetable,
+              onSettings: _showTimetableSettings,
+            ),
+            Container(
+              color: Colors.white,
+              padding: EdgeInsets.fromLTRB(
+                isWideLayout ? 24 : 14,
+                10,
+                isWideLayout ? 24 : 14,
+                14,
+              ),
+              child: Column(
+                children: [
+                  _StatsRow(
+                    stats: _stats,
+                    mode: _mode,
+                    compact: !isTabletLayout,
+                    selectedDate: _selectedDate,
+                  ),
+                  const SizedBox(height: 12),
+                  _ViewToggle(view: _view, onChanged: _onViewChanged),
+                  if (_view == 'timetable') ...[
+                    const SizedBox(height: 10),
+                    _TimetableControls(
+                      mode: _mode,
+                      controller: _search,
+                      onModeChanged: _onModeChanged,
+                      resources: modeResources,
+                      entries: _entries,
+                      selectedDate: _selectedDate,
+                      selectedIds: _selectedResourceIds,
+                      filterExpanded: _resourceFilterExpanded,
+                      onToggleFilter: () => setState(
+                        () => _resourceFilterExpanded =
+                            !_resourceFilterExpanded,
+                      ),
+                      onToggleResource: _toggleResourceSelection,
+                      onClearResources: () =>
+                          setState(_selectedResourceIds.clear),
+                    ),
+                  ],
+                ],
+              ),
             ),
             Expanded(
               child: Stack(
                 children: [
                   RefreshIndicator(
                     onRefresh: _loadTimetable,
-                    child: ListView(
-                      padding: EdgeInsets.fromLTRB(
-                        isWide ? 24 : 14,
-                        12,
-                        isWide ? 24 : 14,
-                        28,
-                      ),
-                      children: [
-                        _StatsRow(stats: _stats, compact: !isWide),
-                        const SizedBox(height: 14),
-                        _TimetableControls(
-                          mode: _mode,
-                          controller: _search,
-                          onModeChanged: (value) =>
-                              setState(() => _mode = value),
-                        ),
-                        const SizedBox(height: 14),
-                        if (_loading)
-                          const _TimetableStateCard(
-                            icon: Icons.hourglass_empty,
-                            title: 'Loading timetable',
-                            message:
-                                'Checking today’s services and resource usage.',
-                          )
-                        else if (_error != null)
-                          _TimetableStateCard(
-                            icon: Icons.error_outline,
-                            title: 'Unable to load timetable',
-                            message: _error!,
-                          )
-                        else if (entries.isEmpty)
-                          const _TimetableStateCard(
-                            icon: Icons.event_available_outlined,
-                            title: 'No services found',
-                            message:
-                                'There are no visible services for this day.',
-                          )
-                        else
-                          _TimetableTimeline(
-                            entries: entries,
+                    notificationPredicate: (notification) =>
+                        notification.metrics.axis == Axis.vertical,
+                    child: _view == 'overview'
+                        ? _TimetableOverview(
+                            loading: _loading,
+                            error: _error,
+                            entries: _entries,
+                            therapists: _therapists,
+                            rooms: _rooms,
                             selectedDate: _selectedDate,
-                            openMinute: _openMinute,
-                            closeMinute: _closeMinute,
-                            isWide: isWide,
-                            onTap: _showEntry,
-                          ),
-                      ],
-                    ),
+                            onTapEntry: _showEntry,
+                            onOpenTimetable: _openTimetable,
+                          )
+                        : _buildBody(isTabletLayout, entries, resources),
                   ),
-                  if (showSidePanel)
+                  if (isWideLayout)
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 180),
                       curve: Curves.easeOutCubic,
@@ -288,13 +486,89 @@ class _TimetableScreenState extends State<TimetableScreen> {
       ),
     );
   }
+
+  Widget _buildBody(
+    bool isTablet,
+    List<_TimetableEntry> entries,
+    List<_TimetableResource> resources,
+  ) {
+    if (_loading) {
+      return ListView(
+        padding: const EdgeInsets.all(14),
+        children: const [
+          _TimetableStateCard(
+            icon: Icons.hourglass_empty,
+            title: 'Loading timetable',
+            message: "Checking today's services and resource usage.",
+          ),
+        ],
+      );
+    }
+    if (_error != null) {
+      return ListView(
+        padding: const EdgeInsets.all(14),
+        children: [
+          _TimetableStateCard(
+            icon: Icons.error_outline,
+            title: 'Unable to load timetable',
+            message: _error!,
+          ),
+        ],
+      );
+    }
+    if (resources.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.all(14),
+        children: [
+          _TimetableStateCard(
+            icon: _mode == 'staff'
+                ? Icons.people_outline
+                : Icons.meeting_room_outlined,
+            title: _mode == 'staff' ? 'No therapists found' : 'No rooms found',
+            message:
+                'Add ${_mode == 'staff' ? 'therapists' : 'rooms'} or check the selected outlet.',
+          ),
+        ],
+      );
+    }
+    if (isTablet) {
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(24, 14, 24, 28),
+        children: [
+          _ResourceTimetableGrid(
+            resources: resources,
+            entries: entries,
+            selectedDate: _selectedDate,
+            openMinute: _openMinute,
+            closeMinute: _closeMinute,
+            mode: _mode,
+            onTap: _showEntry,
+          ),
+        ],
+      );
+    }
+    return _MobileTimetable(
+      entries: entries,
+      bottomResources: resources,
+      mode: _mode,
+      selectedDate: _selectedDate,
+      openMinute: _openMinute,
+      closeMinute: _closeMinute,
+      expandedBandKeys: _expandedBandKeys,
+      onToggleBand: _toggleBand,
+      onTap: _showEntry,
+    );
+  }
 }
 
 class _TimetableEntry {
   final String id;
+  final String therapistId;
+  final String roomId;
   final String customerName;
   final String customerPhone;
   final String serviceName;
+  final int serviceCount;
   final String staffName;
   final String roomName;
   final String type;
@@ -303,17 +577,26 @@ class _TimetableEntry {
   final String endTime;
   final DateTime? startAt;
   final DateTime? endAt;
+  final String bookedStartTime;
+  final String bookedEndTime;
+  final DateTime? actualStartedAt;
+  final DateTime? actualCompletedAt;
+  final int bufferAfterMinutes;
   final double price;
   final String receiptNumber;
   final String paymentMethod;
+  final String paymentStatus;
   final double paidAmount;
   final DateTime selectedDate;
 
   const _TimetableEntry({
     required this.id,
+    required this.therapistId,
+    required this.roomId,
     required this.customerName,
     required this.customerPhone,
     required this.serviceName,
+    required this.serviceCount,
     required this.staffName,
     required this.roomName,
     required this.type,
@@ -322,9 +605,15 @@ class _TimetableEntry {
     required this.endTime,
     required this.startAt,
     required this.endAt,
+    required this.bookedStartTime,
+    required this.bookedEndTime,
+    required this.actualStartedAt,
+    required this.actualCompletedAt,
+    required this.bufferAfterMinutes,
     required this.price,
     required this.receiptNumber,
     required this.paymentMethod,
+    required this.paymentStatus,
     required this.paidAmount,
     required this.selectedDate,
   });
@@ -342,8 +631,13 @@ class _TimetableEntry {
     final service = services[asString(row['serviceId'])];
     final therapist = therapists[asString(row['therapistId'])];
     final room = rooms[asString(row['roomId'])];
+    final serviceName = asString(row['serviceName']).isNotEmpty
+        ? asString(row['serviceName'])
+        : asString(service?['name'], 'Service');
     return _TimetableEntry(
       id: asString(row['id']),
+      therapistId: asString(row['therapistId']),
+      roomId: asString(row['roomId']),
       customerName: _displayCustomerName(
         asString(row['customerName']).isNotEmpty
             ? asString(row['customerName'])
@@ -352,9 +646,8 @@ class _TimetableEntry {
       customerPhone: asString(row['customerPhone']).isNotEmpty
           ? asString(row['customerPhone'])
           : asString(customer?['phone'], '-'),
-      serviceName: asString(row['serviceName']).isNotEmpty
-          ? asString(row['serviceName'])
-          : asString(service?['name'], 'Service'),
+      serviceName: serviceName,
+      serviceCount: _readServiceCount(row['serviceItems'], serviceName),
       staffName: asString(row['therapistName']).isNotEmpty
           ? asString(row['therapistName'])
           : asString(therapist?['name'], 'Unassigned'),
@@ -367,9 +660,19 @@ class _TimetableEntry {
       endTime: _cleanTime(asString(row['endTime'], '10:00')),
       startAt: asDateTime(row['startAt']),
       endAt: asDateTime(row['endAt']),
+      bookedStartTime: _cleanTime(
+        asString(row['bookedStartTime'], asString(row['startTime'], '09:00')),
+      ),
+      bookedEndTime: _cleanTime(
+        asString(row['bookedEndTime'], asString(row['endTime'], '10:00')),
+      ),
+      actualStartedAt: asDateTime(row['actualStartedAt']),
+      actualCompletedAt: asDateTime(row['actualCompletedAt']),
+      bufferAfterMinutes: asInt(row['bufferAfterMinutes'], 0),
       price: asDouble(row['totalPrice']),
       receiptNumber: asString(transaction?['receiptNumber']),
       paymentMethod: asString(transaction?['paymentMethod']),
+      paymentStatus: asString(transaction?['paymentStatus']),
       paidAmount: asDouble(transaction?['totalAmount']),
       selectedDate: selectedDate,
     );
@@ -388,36 +691,79 @@ class _TimetableEntry {
   }
 
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
+  int get cleanupEndMinutes => endMinutes + bufferAfterMinutes.clamp(0, 240);
+  int get blockDurationMinutes =>
+      (cleanupEndMinutes - startMinutes).clamp(0, 1440);
   bool get isWalkIn =>
       type == 'walkin' || type == 'walk_in' || type == 'walk-in';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
+  bool get isVoided => status == 'voided';
   bool get isCompleted => operationalStatus == 'Completed';
   bool get isInProgress => operationalStatus == 'In Progress';
-  bool get isUpcoming => operationalStatus == 'Upcoming';
-  bool get hasPayment => receiptNumber.isNotEmpty || paidAmount > 0;
+  bool get isUpcoming => operationalStatus == 'Awaiting Arrival';
+  bool get hasPayment =>
+      receiptNumber.isNotEmpty ||
+      paidAmount > 0 ||
+      paymentStatus.toLowerCase() == 'paid';
+
+  /// Real-world moment this service is scheduled to finish (prefers the
+  /// timestamptz `endAt`, falls back to the day + end-of-service minutes).
+  DateTime get _serviceEndDateTime {
+    final resolved = endAt?.toLocal();
+    if (resolved != null) return resolved;
+    return DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+    ).add(Duration(minutes: endMinutes));
+  }
+
+  bool get serviceWindowEnded => DateTime.now().isAfter(_serviceEndDateTime);
+
+  // A paid walk-in needs no manual start/complete: it counts as in progress
+  // for the duration of its booked window, then completes on its own once
+  // that window has passed.
+  bool get isPaidWalkInInProgress =>
+      isWalkIn &&
+      hasPayment &&
+      !isCancelled &&
+      !isVoided &&
+      !serviceWindowEnded;
+  bool get isWalkInCompletedByTime =>
+      isWalkIn &&
+      hasPayment &&
+      !isCancelled &&
+      !isVoided &&
+      serviceWindowEnded;
   String get typeLabel => isWalkIn ? 'Walk-in' : 'Booking';
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get paidLabel => 'RM ${paidAmount.toStringAsFixed(2)}';
   String get timeRange => '${_clockLabel(startTime)} - ${_clockLabel(endTime)}';
+  String get bookedTimeRange =>
+      '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
+  String get actualStartLabel => actualStartedAt == null
+      ? 'Not started'
+      : DateFormat('h:mm a').format(actualStartedAt!.toLocal());
+  String get actualCompletedLabel => actualCompletedAt == null
+      ? 'Not completed'
+      : DateFormat('h:mm a').format(actualCompletedAt!.toLocal());
   String get durationLabel => '$timeRange ($durationMinutes min)';
+  String get cleanupUntilLabel => bufferAfterMinutes <= 0
+      ? 'No cleanup buffer'
+      : 'Cleanup until ${_clockLabel(_minutesToTime(cleanupEndMinutes))} '
+            '(+$bufferAfterMinutes min)';
+  String get blockDurationLabel => bufferAfterMinutes <= 0
+      ? durationLabel
+      : '$timeRange ($durationMinutes min) + $bufferAfterMinutes min cleanup';
 
   String get operationalStatus {
-    if (status == 'completed') return 'Completed';
-    final today = _stripDate(DateTime.now());
-    final selected = _stripDate(selectedDate);
-    final now = DateTime.now();
-    final nowMinutes = now.hour * 60 + now.minute;
-    if (selected.isBefore(today)) return 'Completed';
-    if (selected.isAfter(today)) return 'Upcoming';
-    if ((status == 'confirmed' || status == 'in_progress') &&
-        nowMinutes >= startMinutes &&
-        nowMinutes < endMinutes) {
+    if (isVoided) return 'Voided';
+    if (isCancelled) return 'Cancelled';
+    if (status == 'completed' || isWalkInCompletedByTime) return 'Completed';
+    if (status == 'in_progress' || isPaidWalkInInProgress) {
       return 'In Progress';
     }
-    if (nowMinutes >= endMinutes && (hasPayment || isWalkIn)) {
-      return 'Completed';
-    }
-    return 'Upcoming';
+    return 'Awaiting Arrival';
   }
 
   bool matches(String query) {
@@ -429,32 +775,266 @@ class _TimetableEntry {
   }
 }
 
+class _TimetableTherapist {
+  final String id;
+  final String name;
+  final String role;
+  final bool available;
+
+  const _TimetableTherapist({
+    required this.id,
+    required this.name,
+    required this.role,
+    required this.available,
+  });
+
+  factory _TimetableTherapist.fromMap(Map<String, dynamic> row) {
+    return _TimetableTherapist(
+      id: asString(row['id']),
+      name: asString(row['name'], 'Therapist'),
+      role: asString(row['role'], 'Therapist'),
+      available: asBool(row['availabilityStatus'], true),
+    );
+  }
+
+  String get initials {
+    final parts = name.trim().split(RegExp(r'\s+'));
+    if (parts.length >= 2) {
+      return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+    }
+    return name.isEmpty ? '?' : name[0].toUpperCase();
+  }
+}
+
+List<_TimetableTherapist> _buildTherapistRows(
+  List<Map<String, dynamic>> rows,
+  List<_TimetableEntry> entries,
+) {
+  final therapists = rows
+      .where((row) {
+        final role = asString(row['role'], 'Therapist').toLowerCase();
+        return role.contains('therapist');
+      })
+      .map(_TimetableTherapist.fromMap)
+      .toList()
+    ..sort((a, b) => a.name.compareTo(b.name));
+
+  final knownIds = therapists.map((therapist) => therapist.id).toSet();
+  final missing = <_TimetableTherapist>[];
+  for (final entry in entries) {
+    if (entry.therapistId.isEmpty || knownIds.contains(entry.therapistId)) {
+      continue;
+    }
+    knownIds.add(entry.therapistId);
+    missing.add(
+      _TimetableTherapist(
+        id: entry.therapistId,
+        name: entry.staffName,
+        role: 'Therapist',
+        available: true,
+      ),
+    );
+  }
+  return [...therapists, ...missing];
+}
+
+class _TimetableRoom {
+  final String id;
+  final String name;
+  final String roomType;
+  final int totalSlots;
+  final bool active;
+
+  const _TimetableRoom({
+    required this.id,
+    required this.name,
+    required this.roomType,
+    required this.totalSlots,
+    required this.active,
+  });
+
+  factory _TimetableRoom.fromMap(Map<String, dynamic> row) {
+    return _TimetableRoom(
+      id: asString(row['id']),
+      name: asString(row['name'], 'Room'),
+      roomType: asString(row['roomType'], 'body_room'),
+      totalSlots: asInt(row['totalSlots'], 1).clamp(1, 99),
+      active: asBool(row['isActive'], true),
+    );
+  }
+}
+
+List<_TimetableRoom> _buildRoomRows(
+  List<Map<String, dynamic>> rows,
+  List<_TimetableEntry> entries,
+) {
+  final rooms = rows.map(_TimetableRoom.fromMap).toList()
+    ..sort((a, b) => a.name.compareTo(b.name));
+
+  final knownIds = rooms.map((room) => room.id).toSet();
+  final missing = <_TimetableRoom>[];
+  for (final entry in entries) {
+    if (entry.roomId.isEmpty || knownIds.contains(entry.roomId)) continue;
+    knownIds.add(entry.roomId);
+    missing.add(
+      _TimetableRoom(
+        id: entry.roomId,
+        name: entry.roomName,
+        roomType: 'body_room',
+        totalSlots: 1,
+        active: true,
+      ),
+    );
+  }
+  return [...rooms, ...missing];
+}
+
+class _TimetableResource {
+  final String id;
+  final String name;
+  final String subtitle;
+  final int capacity;
+  final bool available;
+  final String avatarText;
+  final IconData? avatarIcon;
+  final String resourceType;
+  final Color accentColor;
+  final bool Function(_TimetableEntry entry) matches;
+
+  const _TimetableResource({
+    required this.id,
+    required this.name,
+    required this.subtitle,
+    required this.capacity,
+    required this.available,
+    required this.avatarText,
+    required this.avatarIcon,
+    required this.resourceType,
+    required this.accentColor,
+    required this.matches,
+  });
+
+  bool get isRoom => resourceType == 'room';
+}
+
+class _ResourceStatus {
+  final String label;
+  final Color color;
+
+  const _ResourceStatus(this.label, this.color);
+}
+
+_ResourceStatus _resourceStatus({
+  required _TimetableResource resource,
+  required List<_TimetableEntry> entries,
+  required int nowMinutes,
+  required bool selectedToday,
+}) {
+  if (!resource.available) {
+    return const _ResourceStatus('Unavailable', Color(0xFF6B7280));
+  }
+  if (!selectedToday) {
+    return const _ResourceStatus('Scheduled', Color(0xFF6B7280));
+  }
+  final active = entries
+      .where(
+        (e) =>
+            !e.isVoided &&
+            nowMinutes >= e.startMinutes &&
+            nowMinutes < e.cleanupEndMinutes,
+      )
+      .toList();
+  if (resource.capacity <= 1) {
+    if (active.isEmpty) {
+      return const _ResourceStatus('Available now', Color(0xFF10B981));
+    }
+    final entry = active.first;
+    if (nowMinutes >= entry.endMinutes) {
+      return _ResourceStatus(
+        'Cleaning until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+        const Color(0xFFF59E0B),
+      );
+    }
+    return _ResourceStatus(
+      'Busy until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+      const Color(0xFFF97316),
+    );
+  }
+  final used = active.length;
+  final cleaning = active.where((entry) => nowMinutes >= entry.endMinutes).length;
+  final freeSlots = (resource.capacity - used).clamp(0, resource.capacity);
+  if (used == 0) {
+    return const _ResourceStatus('Available now', Color(0xFF10B981));
+  }
+  if (cleaning == used) {
+    return _ResourceStatus(
+      '$cleaning cleaning',
+      const Color(0xFFF59E0B),
+    );
+  }
+  if (freeSlots > 0) {
+    return _ResourceStatus(
+      '$freeSlots available now',
+      const Color(0xFF10B981),
+    );
+  }
+  final nextFree = active
+      .map((entry) => entry.cleanupEndMinutes)
+      .reduce((a, b) => a < b ? a : b);
+  return _ResourceStatus(
+    'Full until ${_clockLabel(_minutesToTime(nextFree))}',
+    const Color(0xFFF97316),
+  );
+}
+
 class _TimetableStats {
   final int inProgress;
   final int upcoming;
   final int completed;
-  final int staffBusy;
-  final int roomsInUse;
+  final int busy;
+  final int free;
 
   const _TimetableStats({
     required this.inProgress,
     required this.upcoming,
     required this.completed,
-    required this.staffBusy,
-    required this.roomsInUse,
+    required this.busy,
+    required this.free,
   });
 
   factory _TimetableStats.fromEntries(
     List<_TimetableEntry> entries, {
+    required List<_TimetableResource> resources,
     required DateTime selectedDate,
   }) {
     final active = entries.where((entry) => entry.isInProgress).toList();
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final selectedToday = _stripDate(selectedDate) == _stripDate(now);
+    var busy = 0;
+    var free = 0;
+    for (final resource in resources) {
+      if (!resource.available) continue;
+      final used = selectedToday
+          ? entries
+                .where(
+                  (e) =>
+                      !e.isVoided &&
+                      resource.matches(e) &&
+                      nowMinutes >= e.startMinutes &&
+                      nowMinutes < e.cleanupEndMinutes,
+                )
+                .length
+          : 0;
+      if (used > 0) busy++;
+      if (used < resource.capacity) free++;
+    }
     return _TimetableStats(
       inProgress: active.length,
       upcoming: entries.where((entry) => entry.isUpcoming).length,
       completed: entries.where((entry) => entry.isCompleted).length,
-      staffBusy: active.map((entry) => entry.staffName).toSet().length,
-      roomsInUse: active.map((entry) => entry.roomName).toSet().length,
+      busy: busy,
+      free: free,
     );
   }
 }
@@ -465,7 +1045,9 @@ class _TimetableHeader extends StatelessWidget {
   final VoidCallback onPrevious;
   final VoidCallback onNext;
   final VoidCallback onPickDate;
+  final VoidCallback onToday;
   final VoidCallback onRefresh;
+  final VoidCallback onSettings;
 
   const _TimetableHeader({
     required this.selectedDate,
@@ -473,63 +1055,303 @@ class _TimetableHeader extends StatelessWidget {
     required this.onPrevious,
     required this.onNext,
     required this.onPickDate,
+    required this.onToday,
     required this.onRefresh,
+    required this.onSettings,
   });
 
   @override
   Widget build(BuildContext context) {
+    final compact = MediaQuery.of(context).size.width < 900;
+    final isToday = _stripDate(selectedDate) == _stripDate(DateTime.now());
+    final dateLabel = compact
+        ? DateFormat('EEE, d MMM yyyy').format(selectedDate)
+        : DateFormat('EEEE, d MMMM yyyy').format(selectedDate);
+
+    final menuButton = _SquareIconButton.menu(
+      tooltip: 'More timetable actions',
+      onSelected: (value) {
+        if (value == 'refresh') onRefresh();
+        if (value == 'settings') onSettings();
+      },
+    );
+    final backButton = _SquareIconButton(
+      icon: Icons.arrow_back_rounded,
+      tooltip: 'Back',
+      onPressed: onBack,
+    );
+    final dateText = Text(
+      isToday ? 'Today · $dateLabel' : dateLabel,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w700,
+        color: isToday ? const Color(0xFF0F766E) : const Color(0xFF6B7280),
+      ),
+    );
+
+    if (compact) {
+      // Two rows on phones: title row, then the date controls. A single
+      // row truncates both the title and the date.
+      return Container(
+        padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(bottom: BorderSide(color: Color(0xFFEEF1F4))),
+        ),
+        child: Column(
+          children: [
+            Row(
+              children: [
+                backButton,
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text(
+                    'Daily Timetable',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF0F172A),
+                      height: 1.05,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                menuButton,
+              ],
+            ),
+            const SizedBox(height: 10),
+            Row(
+              children: [
+                _SquareIconButton(
+                  icon: Icons.chevron_left,
+                  tooltip: 'Previous day',
+                  onPressed: onPrevious,
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: InkWell(
+                    onTap: onPickDate,
+                    borderRadius: BorderRadius.circular(11),
+                    child: Container(
+                      height: 40,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(11),
+                        border: Border.all(color: const Color(0xFFE2E8F0)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.calendar_today_outlined,
+                            size: 15,
+                            color: Color(0xFF334155),
+                          ),
+                          const SizedBox(width: 8),
+                          Flexible(child: dateText),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 7),
+                _SquareIconButton(
+                  icon: Icons.chevron_right,
+                  tooltip: 'Next day',
+                  onPressed: onNext,
+                ),
+                if (!isToday) ...[
+                  const SizedBox(width: 7),
+                  _TodayButton(onPressed: onToday),
+                ],
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return Container(
-      padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(bottom: BorderSide(color: Color(0xFFEEF1F4))),
+      ),
       child: Row(
         children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back, color: Color(0xFF111827)),
-            tooltip: 'Back',
-          ),
+          backButton,
+          const SizedBox(width: 12),
           Expanded(
-            child: GestureDetector(
-              onTap: onPickDate,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Daily Timetable',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF111827),
-                    ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Daily Timetable',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                    height: 1.05,
                   ),
-                  Text(
-                    DateFormat('EEEE, d MMMM yyyy').format(selectedDate),
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF6B7280),
-                    ),
-                  ),
-                ],
+                ),
+                const SizedBox(height: 2),
+                dateText,
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          if (!isToday) ...[
+            _TodayButton(onPressed: onToday),
+            const SizedBox(width: 7),
+          ],
+          _SquareIconButton(
+            icon: Icons.calendar_today_outlined,
+            iconSize: 17,
+            tooltip: 'Pick date',
+            onPressed: onPickDate,
+          ),
+          const SizedBox(width: 7),
+          _SquareIconButton(
+            icon: Icons.chevron_left,
+            tooltip: 'Previous day',
+            onPressed: onPrevious,
+          ),
+          const SizedBox(width: 7),
+          _SquareIconButton(
+            icon: Icons.chevron_right,
+            tooltip: 'Next day',
+            onPressed: onNext,
+          ),
+          const SizedBox(width: 7),
+          menuButton,
+        ],
+      ),
+    );
+  }
+}
+
+/// One-tap jump back to today, shown only while browsing another day.
+class _TodayButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _TodayButton({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 40,
+      child: Material(
+        color: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(11),
+          side: const BorderSide(color: Color(0xFFE2E8F0)),
+        ),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(11),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Center(
+              child: Text(
+                'Today',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF0F766E),
+                ),
               ),
             ),
           ),
-          IconButton(
-            onPressed: onPrevious,
-            icon: const Icon(Icons.chevron_left),
-            tooltip: 'Previous day',
+        ),
+      ),
+    );
+  }
+}
+
+// Standardised outlined square icon button used across the timetable header.
+class _SquareIconButton extends StatelessWidget {
+  final IconData? icon;
+  final double iconSize;
+  final String tooltip;
+  final VoidCallback? onPressed;
+  final ValueChanged<String>? onSelected;
+
+  const _SquareIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.onPressed,
+    this.iconSize = 20,
+  }) : onSelected = null;
+
+  const _SquareIconButton.menu({required this.tooltip, required this.onSelected})
+    : icon = null,
+      iconSize = 20,
+      onPressed = null;
+
+  @override
+  Widget build(BuildContext context) {
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(11),
+      side: const BorderSide(color: Color(0xFFE2E8F0)),
+    );
+    if (onSelected != null) {
+      return SizedBox(
+        width: 40,
+        height: 40,
+        child: Material(
+          color: Colors.white,
+          shape: shape,
+          clipBehavior: Clip.antiAlias,
+          child: PopupMenuButton<String>(
+            tooltip: tooltip,
+            onSelected: onSelected,
+            icon: const Icon(
+              Icons.more_vert,
+              size: 20,
+              color: Color(0xFF334155),
+            ),
+            itemBuilder: (context) => const [
+              PopupMenuItem(
+                value: 'refresh',
+                child: ListTile(
+                  leading: Icon(Icons.refresh),
+                  title: Text('Refresh'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+              PopupMenuItem(
+                value: 'settings',
+                child: ListTile(
+                  leading: Icon(Icons.settings_outlined),
+                  title: Text('Settings'),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ),
+            ],
           ),
-          IconButton(
-            onPressed: onNext,
-            icon: const Icon(Icons.chevron_right),
-            tooltip: 'Next day',
+        ),
+      );
+    }
+    return SizedBox(
+      width: 40,
+      height: 40,
+      child: Material(
+        color: Colors.white,
+        shape: shape,
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(11),
+          child: Tooltip(
+            message: tooltip,
+            child: Icon(icon, size: iconSize, color: const Color(0xFF334155)),
           ),
-          IconButton(
-            onPressed: onRefresh,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh',
-          ),
-        ],
+        ),
       ),
     );
   }
@@ -537,22 +1359,95 @@ class _TimetableHeader extends StatelessWidget {
 
 class _StatsRow extends StatelessWidget {
   final _TimetableStats stats;
+  final String mode;
   final bool compact;
+  final DateTime selectedDate;
 
-  const _StatsRow({required this.stats, required this.compact});
+  const _StatsRow({
+    required this.stats,
+    required this.mode,
+    required this.compact,
+    required this.selectedDate,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final cards = [
-      _StatChip('In Progress', stats.inProgress, const Color(0xFF0EA5E9)),
-      _StatChip('Upcoming', stats.upcoming, const Color(0xFF2563EB)),
-      _StatChip('Completed', stats.completed, const Color(0xFF059669)),
-      _StatChip('Staff Busy', stats.staffBusy, const Color(0xFFF59E0B)),
-      _StatChip('Rooms In Use', stats.roomsInUse, const Color(0xFF7C3AED)),
-    ];
+    final busyLabel = mode == 'rooms' ? 'Zones Busy' : 'Staff Busy';
+    final freeLabel = mode == 'rooms' ? 'Zones Free' : 'Free Now';
     if (compact) {
-      return Wrap(spacing: 8, runSpacing: 8, children: cards);
+      final cards = [
+        _OverviewStatCard(
+          label: 'In Progress',
+          value: stats.inProgress,
+          color: const Color(0xFF2563EB),
+          icon: Icons.access_time_filled_rounded,
+        ),
+        _OverviewStatCard(
+          label: 'Awaiting',
+          value: stats.upcoming,
+          color: const Color(0xFFF59E0B),
+          icon: Icons.hourglass_bottom_rounded,
+        ),
+        _OverviewStatCard(
+          label: 'Completed',
+          value: stats.completed,
+          color: const Color(0xFF059669),
+          icon: Icons.check_circle_rounded,
+        ),
+        _OverviewStatCard(
+          label: mode == 'rooms' ? 'Zones Free' : 'Free Now',
+          value: stats.free,
+          color: const Color(0xFF64748B),
+          icon: mode == 'rooms'
+              ? Icons.meeting_room_outlined
+              : Icons.sentiment_satisfied_alt_rounded,
+        ),
+      ];
+      return Row(
+        children: [
+          for (var i = 0; i < cards.length; i++) ...[
+            Expanded(child: cards[i]),
+            if (i != cards.length - 1) const SizedBox(width: 8),
+          ],
+        ],
+      );
     }
+    final cards = [
+      _StatChip(
+        'In Progress',
+        stats.inProgress,
+        const Color(0xFF0EA5E9),
+        icon: Icons.schedule_outlined,
+      ),
+      _StatChip(
+        'Awaiting Arrival',
+        stats.upcoming,
+        const Color(0xFF2563EB),
+        icon: Icons.event_note_outlined,
+      ),
+      _StatChip(
+        'Completed',
+        stats.completed,
+        const Color(0xFF059669),
+        icon: Icons.check_circle_outline,
+      ),
+      _StatChip(
+        busyLabel,
+        stats.busy,
+        const Color(0xFFF97316),
+        icon: mode == 'rooms'
+            ? Icons.meeting_room_outlined
+            : Icons.person_off_outlined,
+      ),
+      _StatChip(
+        freeLabel,
+        stats.free,
+        const Color(0xFF10B981),
+        icon: mode == 'rooms'
+            ? Icons.meeting_room_outlined
+            : Icons.person_outline,
+      ),
+    ];
     return Row(
       children: [
         for (var i = 0; i < cards.length; i++) ...[
@@ -564,44 +1459,1087 @@ class _StatsRow extends StatelessWidget {
   }
 }
 
-class _StatChip extends StatelessWidget {
+class _OverviewStatCard extends StatelessWidget {
   final String label;
   final int value;
   final Color color;
+  final IconData icon;
 
-  const _StatChip(this.label, this.value, this.color);
+  const _OverviewStatCard({
+    required this.label,
+    required this.value,
+    required this.color,
+    required this.icon,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
       ),
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          Row(
+            children: [
+              Container(
+                width: 24,
+                height: 24,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, size: 14, color: color),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                '$value',
+                style: const TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF0F172A),
+                  height: 1,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
+          const SizedBox(height: 7),
           Text(
-            '$value',
-            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w900),
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF64748B),
+              height: 1,
+            ),
           ),
-          const SizedBox(width: 6),
-          Flexible(
-            child: Text(
-              label,
-              overflow: TextOverflow.ellipsis,
+        ],
+      ),
+    );
+  }
+}
+
+// Top-level Overview | Timetable segmented toggle.
+class _ViewToggle extends StatelessWidget {
+  final String view;
+  final ValueChanged<String> onChanged;
+
+  const _ViewToggle({required this.view, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
+      ),
+      child: Row(
+        children: [
+          _ViewToggleButton(
+            label: 'Overview',
+            icon: Icons.grid_view_rounded,
+            active: view == 'overview',
+            onTap: () => onChanged('overview'),
+          ),
+          _ViewToggleButton(
+            label: 'Timetable',
+            icon: Icons.calendar_view_week_rounded,
+            active: view == 'timetable',
+            onTap: () => onChanged('timetable'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ViewToggleButton extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool active;
+  final VoidCallback onTap;
+
+  const _ViewToggleButton({
+    required this.label,
+    required this.icon,
+    required this.active,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          padding: const EdgeInsets.symmetric(vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? _timetableAccent : Colors.transparent,
+            borderRadius: BorderRadius.circular(9),
+            boxShadow: active
+                ? const [
+                    BoxShadow(
+                      color: Color(0x260F766E),
+                      blurRadius: 8,
+                      offset: Offset(0, 3),
+                    ),
+                  ]
+                : null,
+          ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                icon,
+                size: 15,
+                color: active ? Colors.white : const Color(0xFF64748B),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: active ? Colors.white : const Color(0xFF64748B),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ResourceFilterPanel extends StatelessWidget {
+  final String mode;
+  final List<_TimetableResource> resources;
+  final List<_TimetableEntry> entries;
+  final DateTime selectedDate;
+  final Set<String> selectedIds;
+  final VoidCallback onHide;
+  final ValueChanged<String> onToggle;
+  final VoidCallback onClear;
+
+  const _ResourceFilterPanel({
+    required this.mode,
+    required this.resources,
+    required this.entries,
+    required this.selectedDate,
+    required this.selectedIds,
+    required this.onHide,
+    required this.onToggle,
+    required this.onClear,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isRoom = mode == 'rooms';
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final selectedToday = _stripDate(selectedDate) == _stripDate(now);
+    final allSelected = selectedIds.isEmpty;
+    final title = isRoom ? 'Zones' : 'Therapists';
+    final allLabel = isRoom ? 'All Zones' : 'All Staff';
+    final allSubtitle = isRoom
+        ? '${resources.length} zones'
+        : '${resources.length} staff';
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 10, 10, 12),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Color(0xFFEEF1F4))),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Icon(
+                isRoom ? Icons.spa_outlined : Icons.groups_2_outlined,
+                size: 18,
+                color: _timetableAccent,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                onPressed: allSelected ? onHide : onClear,
+                icon: Icon(
+                  allSelected
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.chevron_right_rounded,
+                  size: 18,
+                ),
+                label: Text(allSelected ? 'Hide' : 'View all'),
+                style: TextButton.styleFrom(
+                  foregroundColor: _timetableAccent,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  minimumSize: const Size(0, 34),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  textStyle: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 86,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: resources.length + 1,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, index) {
+                if (index == 0) {
+                  return _ResourceFilterCard(
+                    icon: isRoom ? Icons.spa_outlined : null,
+                    avatarText: isRoom ? '' : 'A',
+                    title: allLabel,
+                    subtitle: allSubtitle,
+                    color: _timetableAccent,
+                    selected: allSelected,
+                    onTap: onClear,
+                  );
+                }
+                final resource = resources[index - 1];
+                final resourceEntries = entries.where(resource.matches).toList();
+                final status = _resourceStatus(
+                  resource: resource,
+                  entries: resourceEntries,
+                  nowMinutes: nowMinutes,
+                  selectedToday: selectedToday,
+                );
+                final statusLabel = isRoom
+                    ? '${resource.capacity} lanes'
+                    : status.label.contains('Busy')
+                        ? 'Busy'
+                        : status.label.contains('Cleaning')
+                            ? 'Cleaning'
+                            : resource.available
+                                ? 'Available'
+                                : 'Unavailable';
+                return _ResourceFilterCard(
+                  icon: resource.avatarIcon,
+                  avatarText: resource.avatarText,
+                  title: resource.name,
+                  subtitle: statusLabel,
+                  color: resource.accentColor,
+                  statusColor: status.color,
+                  selected: selectedIds.contains(resource.id),
+                  onTap: () => onToggle(resource.id),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceFilterCard extends StatelessWidget {
+  final IconData? icon;
+  final String avatarText;
+  final String title;
+  final String subtitle;
+  final Color color;
+  final Color? statusColor;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ResourceFilterCard({
+    required this.icon,
+    required this.avatarText,
+    required this.title,
+    required this.subtitle,
+    required this.color,
+    this.statusColor,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final dotColor = statusColor ?? color;
+    return SizedBox(
+      width: 136,
+      child: Material(
+        color: selected ? color.withValues(alpha: 0.08) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: selected ? color.withValues(alpha: 0.75) : const Color(0xFFE2E8F0),
+            width: selected ? 1.4 : 1,
+          ),
+        ),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            child: Row(
+              children: [
+                Container(
+                  width: 34,
+                  height: 34,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: color.withValues(alpha: 0.14),
+                    shape: BoxShape.circle,
+                  ),
+                  child: icon == null
+                      ? Text(
+                          avatarText.isEmpty ? '?' : avatarText[0],
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w900,
+                            color: color,
+                          ),
+                        )
+                      : Icon(icon, size: 18, color: color),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF0F172A),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Row(
+                        children: [
+                          if (statusColor != null) ...[
+                            Container(
+                              width: 6,
+                              height: 6,
+                              decoration: BoxDecoration(
+                                color: dotColor,
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                          ],
+                          Expanded(
+                            child: Text(
+                              subtitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF64748B),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+String _overviewDuration(int minutes) {
+  if (minutes <= 0) return 'now';
+  if (minutes < 60) return '$minutes min${minutes == 1 ? '' : 's'}';
+  final hours = minutes ~/ 60;
+  final mins = minutes % 60;
+  if (mins == 0) return '$hours hr${hours == 1 ? '' : 's'}';
+  return '$hours hr $mins min${mins == 1 ? '' : 's'}';
+}
+
+// "Running status at a glance" page — the Overview tab.
+class _TimetableOverview extends StatelessWidget {
+  final bool loading;
+  final String? error;
+  final List<_TimetableEntry> entries;
+  final List<_TimetableTherapist> therapists;
+  final List<_TimetableRoom> rooms;
+  final DateTime selectedDate;
+  final ValueChanged<_TimetableEntry> onTapEntry;
+  final void Function([String? mode]) onOpenTimetable;
+
+  const _TimetableOverview({
+    required this.loading,
+    required this.error,
+    required this.entries,
+    required this.therapists,
+    required this.rooms,
+    required this.selectedDate,
+    required this.onTapEntry,
+    required this.onOpenTimetable,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) {
+      return ListView(
+        padding: const EdgeInsets.all(14),
+        children: const [
+          _TimetableStateCard(
+            icon: Icons.hourglass_empty,
+            title: 'Loading overview',
+            message: "Checking today's live status.",
+          ),
+        ],
+      );
+    }
+    if (error != null) {
+      return ListView(
+        padding: const EdgeInsets.all(14),
+        children: [
+          _TimetableStateCard(
+            icon: Icons.error_outline,
+            title: 'Unable to load overview',
+            message: error!,
+          ),
+        ],
+      );
+    }
+
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final selectedToday = _stripDate(selectedDate) == _stripDate(now);
+
+    final inProgress = entries.where((e) => e.isInProgress).toList()
+      ..sort((a, b) => a.endMinutes.compareTo(b.endMinutes));
+    final upNext = entries.where((e) => e.isUpcoming).toList()
+      ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+    final busyTherapistIds = inProgress
+        .map((e) => e.therapistId)
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    final busyTherapistEntries = inProgress
+        .where((e) => e.therapistId.isNotEmpty)
+        .toList()
+      ..sort((a, b) => a.endMinutes.compareTo(b.endMinutes));
+    final freeTherapists = therapists
+        .where((t) => t.available && !busyTherapistIds.contains(t.id))
+        .toList();
+
+    void showMore(
+      String title,
+      List<_TimetableEntry> items,
+      Widget Function(BuildContext sheetContext, _TimetableEntry entry)
+          rowBuilder, {
+      bool contained = false,
+    }) {
+      _showOverviewMoreSheet(
+        context: context,
+        title: title,
+        itemCount: items.length,
+        contained: contained,
+        itemBuilder: (sheetContext, index) =>
+            rowBuilder(sheetContext, items[index]),
+      );
+    }
+
+    Widget inProgressSection({int? cap}) {
+      final visible = cap == null ? inProgress : inProgress.take(cap).toList();
+      final hidden = inProgress.length - visible.length;
+      return _OverviewPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _OverviewSectionHeader(
+              title: 'In Progress Now (${inProgress.length})',
+              onViewAll: () => onOpenTimetable('staff'),
+            ),
+            const SizedBox(height: 10),
+            if (inProgress.isEmpty)
+              const _OverviewEmptyHint(
+                icon: Icons.timelapse_outlined,
+                message: 'No services are in progress right now.',
+              )
+            else ...[
+              for (var i = 0; i < visible.length; i++) ...[
+                _OverviewInProgressCard(
+                  entry: visible[i],
+                  selectedToday: selectedToday,
+                  nowMinutes: nowMinutes,
+                  onTap: () => onTapEntry(visible[i]),
+                ),
+                if (i != visible.length - 1) const SizedBox(height: 8),
+              ],
+              if (hidden > 0) ...[
+                const SizedBox(height: 8),
+                _OverviewMoreRow(
+                  count: hidden,
+                  onTap: () => showMore(
+                    'In Progress Now',
+                    inProgress,
+                    (sheetContext, entry) => _OverviewInProgressCard(
+                      entry: entry,
+                      selectedToday: selectedToday,
+                      nowMinutes: nowMinutes,
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        onTapEntry(entry);
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ],
+        ),
+      );
+    }
+
+    Widget availableSoonSection({int? cap}) {
+      final visible = cap == null
+          ? busyTherapistEntries
+          : busyTherapistEntries.take(cap).toList();
+      final hidden = busyTherapistEntries.length - visible.length;
+      return _OverviewPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _OverviewSectionHeader(
+              title: 'Available Soon (${busyTherapistEntries.length})',
+              onViewAll: () => onOpenTimetable('staff'),
+            ),
+            const SizedBox(height: 10),
+            if (busyTherapistEntries.isEmpty)
+              const _OverviewEmptyHint(
+                icon: Icons.groups_2_outlined,
+                message: 'No therapists finishing soon.',
+              )
+            else
+              _OverviewContainedList(
+                itemCount: visible.length,
+                itemBuilder: (index) => _OverviewBusyTherapistRow(
+                  entry: visible[index],
+                  selectedToday: selectedToday,
+                  nowMinutes: nowMinutes,
+                  onTap: () => onTapEntry(visible[index]),
+                ),
+                trailingBuilder: hidden > 0
+                    ? () => _OverviewMoreRow(
+                        count: hidden,
+                        onTap: () => showMore(
+                          'Available Soon',
+                          busyTherapistEntries,
+                          (sheetContext, entry) => _OverviewBusyTherapistRow(
+                            entry: entry,
+                            selectedToday: selectedToday,
+                            nowMinutes: nowMinutes,
+                            onTap: () {
+                              Navigator.of(sheetContext).pop();
+                              onTapEntry(entry);
+                            },
+                          ),
+                          contained: true,
+                        ),
+                      )
+                    : null,
+              ),
+          ],
+        ),
+      );
+    }
+
+    Widget freeTherapistsSection() => _OverviewPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _OverviewSectionHeader(
+            title: 'Free Therapists (${freeTherapists.length})',
+            onViewAll: () => onOpenTimetable('staff'),
+          ),
+          const SizedBox(height: 10),
+          if (freeTherapists.isEmpty)
+            const _OverviewEmptyHint(
+              icon: Icons.people_outline,
+              message: 'Every therapist is currently busy.',
+            )
+          else
+            LayoutBuilder(
+              builder: (context, chipConstraints) {
+                const gap = 10.0;
+                final columns = (chipConstraints.maxWidth / 190)
+                    .floor()
+                    .clamp(1, 4);
+                final width =
+                    (chipConstraints.maxWidth - gap * (columns - 1)) / columns;
+                return Wrap(
+                  spacing: gap,
+                  runSpacing: gap,
+                  children: [
+                    for (final therapist in freeTherapists)
+                      SizedBox(
+                        width: width,
+                        child: _OverviewFreeChip(
+                          therapist: therapist,
+                          compact: true,
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+        ],
+      ),
+    );
+
+    Widget zonesSection() => _OverviewPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _OverviewSectionHeader(
+            title: 'Zones Live Status',
+            onViewAll: () => onOpenTimetable('rooms'),
+          ),
+          const SizedBox(height: 10),
+          if (rooms.isEmpty)
+            const _OverviewEmptyHint(
+              icon: Icons.meeting_room_outlined,
+              message: 'No zones found.',
+            )
+          else
+            LayoutBuilder(
+              builder: (context, zoneConstraints) {
+                // Every zone shown directly in a tidy grid — 2 up on a narrow
+                // column, up to 4 across when there's room.
+                const gap = 10.0;
+                final columns = (zoneConstraints.maxWidth / 150)
+                    .floor()
+                    .clamp(2, 4);
+                final width =
+                    (zoneConstraints.maxWidth - gap * (columns - 1)) / columns;
+                return Wrap(
+                  spacing: gap,
+                  runSpacing: gap,
+                  children: [
+                    for (final room in rooms)
+                      SizedBox(
+                        width: width,
+                        child: _OverviewZoneCard(
+                          room: room,
+                          compact: true,
+                          occupied: entries
+                              .where(
+                                (e) => e.roomId == room.id && e.isInProgress,
+                              )
+                              .length,
+                        ),
+                      ),
+                  ],
+                );
+              },
+            ),
+        ],
+      ),
+    );
+
+    Widget upNextSection({int? cap}) {
+      final visible = cap == null ? upNext : upNext.take(cap).toList();
+      final hidden = upNext.length - visible.length;
+      return _OverviewPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _OverviewSectionHeader(
+              title: 'Up Next (${upNext.length})',
+              onViewAll: () => onOpenTimetable('staff'),
+            ),
+            const SizedBox(height: 10),
+            if (upNext.isEmpty)
+              const _OverviewEmptyHint(
+                icon: Icons.event_available_outlined,
+                message: 'No upcoming bookings for this day.',
+              )
+            else
+              _OverviewContainedList(
+                itemCount: visible.length,
+                itemBuilder: (index) => _OverviewUpNextRow(
+                  entry: visible[index],
+                  selectedToday: selectedToday,
+                  nowMinutes: nowMinutes,
+                  onTap: () => onTapEntry(visible[index]),
+                ),
+                trailingBuilder: hidden > 0
+                    ? () => _OverviewMoreRow(
+                        count: hidden,
+                        onTap: () => showMore(
+                          'Up Next',
+                          upNext,
+                          (sheetContext, entry) => _OverviewUpNextRow(
+                            entry: entry,
+                            selectedToday: selectedToday,
+                            nowMinutes: nowMinutes,
+                            onTap: () {
+                              Navigator.of(sheetContext).pop();
+                              onTapEntry(entry);
+                            },
+                          ),
+                          contained: true,
+                        ),
+                      )
+                    : null,
+              ),
+          ],
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final tablet = constraints.maxWidth >= 900;
+        if (!tablet) {
+          return ListView(
+            padding: const EdgeInsets.fromLTRB(14, 16, 14, 28),
+            children: [
+              inProgressSection(),
+              const SizedBox(height: 14),
+              availableSoonSection(),
+              const SizedBox(height: 14),
+              upNextSection(),
+              const SizedBox(height: 14),
+              freeTherapistsSection(),
+              const SizedBox(height: 14),
+              zonesSection(),
+            ],
+          );
+        }
+        // Natural-height sections in a single page scroll: no fixed-height
+        // panels, so there are no large empty gaps. Left column leads with
+        // live activity, right column with who frees up next.
+        return SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    inProgressSection(cap: 3),
+                    const SizedBox(height: 16),
+                    zonesSection(),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    availableSoonSection(cap: 4),
+                    const SizedBox(height: 16),
+                    upNextSection(cap: 4),
+                    const SizedBox(height: 16),
+                    freeTherapistsSection(),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _OverviewContainedList extends StatelessWidget {
+  final int itemCount;
+  final Widget Function(int index) itemBuilder;
+  final Widget Function()? trailingBuilder;
+
+  const _OverviewContainedList({
+    required this.itemCount,
+    required this.itemBuilder,
+    this.trailingBuilder,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+      ),
+      child: Column(
+        children: [
+          for (var i = 0; i < itemCount; i++) ...[
+            itemBuilder(i),
+            if (i != itemCount - 1 || trailingBuilder != null)
+              const Divider(height: 1, color: Color(0xFFEEF1F4)),
+          ],
+          if (trailingBuilder != null) trailingBuilder!(),
+        ],
+      ),
+    );
+  }
+}
+
+class _OverviewMoreRow extends StatelessWidget {
+  final int count;
+  final VoidCallback onTap;
+
+  const _OverviewMoreRow({required this.count, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Text(
+              '+$count more',
               style: const TextStyle(
                 fontSize: 12,
-                fontWeight: FontWeight.w700,
-                color: Color(0xFF6B7280),
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF0F766E),
+              ),
+            ),
+            const SizedBox(width: 2),
+            const Icon(
+              Icons.chevron_right,
+              size: 16,
+              color: Color(0xFF0F766E),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Opens a right-side sheet listing the complete set of items for a section
+/// (used by the overview "+X more" rows), so the dashboard itself stays
+/// compact instead of expanding.
+Future<void> _showOverviewMoreSheet({
+  required BuildContext context,
+  required String title,
+  required int itemCount,
+  required Widget Function(BuildContext sheetContext, int index) itemBuilder,
+  bool contained = false,
+}) {
+  return showGeneralDialog<void>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: 'Close',
+    barrierColor: const Color(0x33000000),
+    transitionDuration: const Duration(milliseconds: 220),
+    pageBuilder: (context, animation, secondaryAnimation) {
+      final width = MediaQuery.of(context).size.width;
+      final sheetWidth = width < 520 ? width : 440.0;
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Material(
+          color: Colors.white,
+          child: SizedBox(
+            width: sheetWidth,
+            height: double.infinity,
+            child: SafeArea(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(18, 14, 8, 12),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            title,
+                            style: const TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF0F172A),
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          icon: const Icon(Icons.close_rounded),
+                          color: const Color(0xFF334155),
+                          tooltip: 'Close',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 1, color: Color(0xFFEEF1F4)),
+                  Expanded(
+                    child: ListView.separated(
+                      padding: const EdgeInsets.all(14),
+                      itemCount: itemCount,
+                      separatorBuilder: (_, _) => contained
+                          ? const Divider(height: 1, color: Color(0xFFEEF1F4))
+                          : const SizedBox(height: 10),
+                      itemBuilder: itemBuilder,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    },
+    transitionBuilder: (context, animation, secondaryAnimation, child) {
+      final curved = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+      );
+      return SlideTransition(
+        position: Tween<Offset>(
+          begin: const Offset(1, 0),
+          end: Offset.zero,
+        ).animate(curved),
+        child: child,
+      );
+    },
+  );
+}
+
+class _OverviewPanel extends StatelessWidget {
+  final Widget child;
+
+  const _OverviewPanel({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      clipBehavior: Clip.hardEdge,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x05000000),
+            blurRadius: 14,
+            offset: Offset(0, 5),
+          ),
+        ],
+      ),
+      child: child,
+    );
+  }
+}
+
+class _OverviewSectionHeader extends StatelessWidget {
+  final String title;
+  final VoidCallback onViewAll;
+
+  const _OverviewSectionHeader({required this.title, required this.onViewAll});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Text(
+            title,
+            style: const TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w900,
+              color: Color(0xFF0F172A),
+            ),
+          ),
+        ),
+        InkWell(
+          onTap: onViewAll,
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+            child: Row(
+              children: const [
+                Text(
+                  'View all',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF0F766E),
+                  ),
+                ),
+                SizedBox(width: 2),
+                Icon(
+                  Icons.chevron_right,
+                  size: 17,
+                  color: Color(0xFF0F766E),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _OverviewEmptyHint extends StatelessWidget {
+  final IconData icon;
+  final String message;
+
+  const _OverviewEmptyHint({required this.icon, required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: const Color(0xFF94A3B8)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF64748B),
               ),
             ),
           ),
@@ -611,34 +2549,774 @@ class _StatChip extends StatelessWidget {
   }
 }
 
-class _TimetableControls extends StatelessWidget {
+class _OverviewPill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _OverviewPill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          color: color,
+        ),
+      ),
+    );
+  }
+}
+
+class _OverviewInProgressCard extends StatelessWidget {
+  final _TimetableEntry entry;
+  final bool selectedToday;
+  final int nowMinutes;
+  final VoidCallback onTap;
+
+  const _OverviewInProgressCard({
+    required this.entry,
+    required this.selectedToday,
+    required this.nowMinutes,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _avatarColor(entry.staffName);
+    final remaining = entry.endMinutes - nowMinutes;
+    final remainingLabel = selectedToday && remaining > 0
+        ? 'Ends in ${_overviewDuration(remaining)}'
+        : null;
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFE6EAEF)),
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Container(
+                width: 36,
+                height: 36,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: accent.withValues(alpha: 0.14),
+                  shape: BoxShape.circle,
+                ),
+                child: Text(
+                  _initials(entry.staffName),
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    color: accent,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 9,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      entry.staffName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      entry.customerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                flex: 12,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      entry.serviceCount > 1
+                          ? '${entry.serviceName} (${entry.serviceCount})'
+                          : entry.serviceName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF334155),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      entry.roomName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 118,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      entry.timeRange,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF0F172A),
+                      ),
+                    ),
+                    if (remainingLabel != null) ...[
+                      const SizedBox(height: 4),
+                      _OverviewPill(
+                        label: remainingLabel,
+                        color: const Color(0xFF0F766E),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _OverviewBusyTherapistRow extends StatelessWidget {
+  final _TimetableEntry entry;
+  final bool selectedToday;
+  final int nowMinutes;
+  final VoidCallback onTap;
+
+  const _OverviewBusyTherapistRow({
+    required this.entry,
+    required this.selectedToday,
+    required this.nowMinutes,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _avatarColor(entry.staffName);
+    final remaining = entry.endMinutes - nowMinutes;
+    final freeInLabel = selectedToday && remaining > 0
+        ? 'Free in ${_overviewDuration(remaining)}'
+        : null;
+
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+        child: Row(
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: accent.withValues(alpha: 0.14),
+                shape: BoxShape.circle,
+              ),
+              child: Text(
+                _initials(entry.staffName),
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                  color: accent,
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    entry.staffName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF0F172A),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    entry.serviceName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Free at ${_clockLabel(entry.endTime)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+                if (freeInLabel != null) ...[
+                  const SizedBox(height: 4),
+                  _OverviewPill(
+                    label: freeInLabel,
+                    color: const Color(0xFF0F766E),
+                  ),
+                ],
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OverviewFreeChip extends StatelessWidget {
+  final _TimetableTherapist therapist;
+  final bool compact;
+
+  const _OverviewFreeChip({required this.therapist, this.compact = false});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _avatarColor(therapist.name);
+    final avatarSize = compact ? 28.0 : 34.0;
+    return Container(
+      padding: compact
+          ? const EdgeInsets.symmetric(horizontal: 8, vertical: 7)
+          : const EdgeInsets.fromLTRB(10, 9, 16, 9),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: avatarSize,
+            height: avatarSize,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.14),
+              shape: BoxShape.circle,
+            ),
+            child: Text(
+              therapist.initials,
+              style: TextStyle(
+                fontSize: compact ? 11.5 : 13,
+                fontWeight: FontWeight.w900,
+                color: accent,
+              ),
+            ),
+          ),
+          SizedBox(width: compact ? 7 : 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  _shortCustomerName(therapist.name),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: compact ? 12 : 13.5,
+                    fontWeight: FontWeight.w800,
+                    color: const Color(0xFF0F172A),
+                  ),
+                ),
+                SizedBox(height: compact ? 1 : 3),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const _StatusDot(color: Color(0xFF10B981)),
+                    const SizedBox(width: 5),
+                    Text(
+                      compact ? 'Free' : 'Free now',
+                      style: TextStyle(
+                        fontSize: compact ? 10.5 : 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFF059669),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusDot extends StatelessWidget {
+  final Color color;
+
+  const _StatusDot({required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 8,
+      height: 8,
+      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+  }
+}
+
+class _OverviewZoneCard extends StatelessWidget {
+  final _TimetableRoom room;
+  final int occupied;
+  final bool compact;
+
+  const _OverviewZoneCard({
+    required this.room,
+    required this.occupied,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _roomAccentColor(room.roomType);
+    final capacity = room.totalSlots.clamp(1, 99);
+    final used = occupied.clamp(0, capacity);
+    final free = capacity - used;
+    final fullyOccupied = free <= 0;
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 7 : 12,
+        vertical: compact ? 6 : 14,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: compact ? 28 : 40,
+            height: compact ? 28 : 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: accent.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              _roomIcon(room.roomType),
+              size: compact ? 15 : 20,
+              color: accent,
+            ),
+          ),
+          SizedBox(height: compact ? 4 : 8),
+          SizedBox(
+            height: compact ? 28 : 34,
+            child: Center(
+              child: Text(
+                room.name,
+                maxLines: 2,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: compact ? 10.5 : 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFF0F172A),
+                  height: 1.15,
+                ),
+              ),
+            ),
+          ),
+          SizedBox(height: compact ? 3 : 8),
+          Text(
+            '$used used · $free free',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: compact ? 10 : 11.5,
+              fontWeight: FontWeight.w800,
+              color: fullyOccupied ? const Color(0xFFDC2626) : accent,
+            ),
+          ),
+          SizedBox(height: compact ? 3 : 8),
+          _OverviewCapacityDots(
+            used: used,
+            capacity: capacity,
+            activeColor: fullyOccupied ? const Color(0xFFDC2626) : accent,
+          ),
+          if (!compact) ...[
+            const SizedBox(height: 8),
+            _OverviewPill(
+              label: '$capacity total capacity',
+              color: fullyOccupied ? const Color(0xFFDC2626) : accent,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _OverviewCapacityDots extends StatelessWidget {
+  final int used;
+  final int capacity;
+  final Color activeColor;
+
+  const _OverviewCapacityDots({
+    required this.used,
+    required this.capacity,
+    required this.activeColor,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = capacity.clamp(1, 8).toInt();
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (var i = 0; i < visible; i++) ...[
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: i < used ? activeColor : const Color(0xFFCBD5E1),
+              shape: BoxShape.circle,
+            ),
+          ),
+          if (i != visible - 1) const SizedBox(width: 7),
+        ],
+      ],
+    );
+  }
+}
+
+class _OverviewUpNextRow extends StatelessWidget {
+  final _TimetableEntry entry;
+  final bool selectedToday;
+  final int nowMinutes;
+  final VoidCallback onTap;
+
+  const _OverviewUpNextRow({
+    required this.entry,
+    required this.selectedToday,
+    required this.nowMinutes,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final untilStart = entry.startMinutes - nowMinutes;
+    final inLabel = selectedToday && untilStart > 0
+        ? 'In ${_overviewDuration(untilStart)}'
+        : null;
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            SizedBox(
+              width: 76,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    _clockLabel(entry.startTime),
+                    style: const TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFFF59E0B),
+                    ),
+                  ),
+                  if (inLabel != null) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      inLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF94A3B8),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    entry.customerName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F172A),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.place_outlined,
+                        size: 12,
+                        color: Color(0xFF94A3B8),
+                      ),
+                      const SizedBox(width: 3),
+                      Expanded(
+                        child: Text(
+                          '${entry.serviceName} · ${entry.roomName}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            const _OverviewPill(
+              label: 'Awaiting',
+              color: Color(0xFFF59E0B),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatChip extends StatelessWidget {
+  final String label;
+  final int value;
+  final Color color;
+  final IconData icon;
+
+  const _StatChip(
+    this.label,
+    this.value,
+    this.color, {
+    required this.icon,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: color.withValues(alpha: 0.22)),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x07000000),
+              blurRadius: 6,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 40,
+              height: 40,
+              decoration: BoxDecoration(
+                color: color.withValues(alpha: 0.12),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, size: 22, color: color),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    '$value',
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF111827),
+                      height: 1,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: color,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF475569),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _TimetableControls extends StatefulWidget {
   final String mode;
   final TextEditingController controller;
   final ValueChanged<String> onModeChanged;
+  final List<_TimetableResource> resources;
+  final List<_TimetableEntry> entries;
+  final DateTime selectedDate;
+  final Set<String> selectedIds;
+  final bool filterExpanded;
+  final VoidCallback onToggleFilter;
+  final ValueChanged<String> onToggleResource;
+  final VoidCallback onClearResources;
 
   const _TimetableControls({
     required this.mode,
     required this.controller,
     required this.onModeChanged,
+    required this.resources,
+    required this.entries,
+    required this.selectedDate,
+    required this.selectedIds,
+    required this.filterExpanded,
+    required this.onToggleFilter,
+    required this.onToggleResource,
+    required this.onClearResources,
   });
+
+  @override
+  State<_TimetableControls> createState() => _TimetableControlsState();
+}
+
+class _TimetableControlsState extends State<_TimetableControls> {
+  bool _searchExpanded = false;
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final narrow = constraints.maxWidth < 640;
-        final filters = _ModeSelector(mode: mode, onChanged: onModeChanged);
+        final narrow = constraints.maxWidth < 620;
+        final modes = _ModeSelector(
+          mode: widget.mode,
+          onChanged: widget.onModeChanged,
+        );
         final search = TextField(
-          controller: controller,
+          controller: widget.controller,
+          autofocus: narrow && _searchExpanded,
           decoration: InputDecoration(
-            hintText: mode == 'staff'
-                ? 'Search staff...'
-                : mode == 'rooms'
-                ? 'Search rooms...'
-                : 'Search customer, service, staff, room...',
-            prefixIcon: const Icon(Icons.search),
+            hintText: widget.mode == 'rooms'
+                ? 'Search customer, service, room...'
+                : 'Search customer, service, staff...',
+            prefixIcon: const Icon(Icons.search, size: 21),
+            suffixIcon: widget.controller.text.isEmpty
+                ? null
+                : IconButton(
+                    onPressed: widget.controller.clear,
+                    icon: const Icon(Icons.close, size: 18),
+                    tooltip: 'Clear search',
+                  ),
             filled: true,
-            fillColor: const Color(0xFFEAF0F5),
+            fillColor: Colors.white,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: const BorderSide(color: Color(0xFFD5DEE8)),
@@ -647,22 +3325,157 @@ class _TimetableControls extends StatelessWidget {
               borderRadius: BorderRadius.circular(12),
               borderSide: const BorderSide(color: Color(0xFFD5DEE8)),
             ),
-            contentPadding: const EdgeInsets.symmetric(vertical: 12),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(12),
+              borderSide: const BorderSide(color: Color(0xFF1B6B72)),
+            ),
+            contentPadding: const EdgeInsets.symmetric(vertical: 11),
           ),
         );
+        final filterButton = _FilterMenuButton(
+          expanded: widget.filterExpanded,
+          selectedCount: widget.selectedIds.length,
+          onTap: widget.resources.isEmpty ? null : widget.onToggleFilter,
+        );
+        final filterPanel = _ResourceFilterPanel(
+          mode: widget.mode,
+          resources: widget.resources,
+          entries: widget.entries,
+          selectedDate: widget.selectedDate,
+          selectedIds: widget.selectedIds,
+          onHide: widget.onToggleFilter,
+          onToggle: widget.onToggleResource,
+          onClear: widget.onClearResources,
+        );
         if (narrow) {
-          return Column(
-            children: [filters, const SizedBox(height: 10), search],
+          return AnimatedSize(
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+            alignment: Alignment.topCenter,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    Expanded(child: modes),
+                    const SizedBox(width: 8),
+                    filterButton,
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: () {
+                        setState(() => _searchExpanded = !_searchExpanded);
+                        if (_searchExpanded) return;
+                        widget.controller.clear();
+                        FocusScope.of(context).unfocus();
+                      },
+                      icon: Icon(
+                        _searchExpanded ? Icons.close : Icons.search,
+                      ),
+                      tooltip: _searchExpanded ? 'Close search' : 'Search',
+                    ),
+                  ],
+                ),
+                if (_searchExpanded) ...[
+                  const SizedBox(height: 8),
+                  search,
+                ],
+                if (widget.filterExpanded) ...[
+                  const SizedBox(height: 10),
+                  filterPanel,
+                ],
+              ],
+            ),
           );
         }
-        return Row(
+        return Column(
           children: [
-            SizedBox(width: 310, child: filters),
-            const SizedBox(width: 12),
-            Expanded(child: search),
+            Row(
+              children: [
+                SizedBox(width: 248, child: modes),
+                const SizedBox(width: 14),
+                Expanded(child: search),
+                const SizedBox(width: 10),
+                filterButton,
+              ],
+            ),
+            if (widget.filterExpanded) ...[
+              const SizedBox(height: 10),
+              filterPanel,
+            ],
           ],
         );
       },
+    );
+  }
+}
+
+class _FilterMenuButton extends StatelessWidget {
+  final bool expanded;
+  final int selectedCount;
+  final VoidCallback? onTap;
+
+  const _FilterMenuButton({
+    required this.expanded,
+    required this.selectedCount,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasSelection = selectedCount > 0;
+    return Material(
+      color: hasSelection
+          ? _timetableAccent.withValues(alpha: 0.1)
+          : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(
+          color: hasSelection ? _timetableAccent : const Color(0xFFD5DEE8),
+        ),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: SizedBox(
+          height: 48,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.tune_rounded,
+                  size: 19,
+                  color: hasSelection
+                      ? _timetableAccent
+                      : const Color(0xFF334155),
+                ),
+                const SizedBox(width: 7),
+                Text(
+                  hasSelection ? 'Filter ($selectedCount)' : 'Filter',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: hasSelection
+                        ? _timetableAccent
+                        : const Color(0xFF334155),
+                  ),
+                ),
+                const SizedBox(width: 4),
+                Icon(
+                  expanded
+                      ? Icons.keyboard_arrow_up_rounded
+                      : Icons.keyboard_arrow_down_rounded,
+                  size: 19,
+                  color: hasSelection
+                      ? _timetableAccent
+                      : const Color(0xFF64748B),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -678,12 +3491,12 @@ class _ModeSelector extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(4),
       decoration: BoxDecoration(
-        color: const Color(0xFFEAF0F5),
-        borderRadius: BorderRadius.circular(12),
+        color: const Color(0xFFF1F5F9),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
       ),
       child: Row(
         children: [
-          _ModeButton('All', 'all', mode, onChanged),
           _ModeButton('Staff', 'staff', mode, onChanged),
           _ModeButton('Rooms', 'rooms', mode, onChanged),
         ],
@@ -709,19 +3522,45 @@ class _ModeButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(9),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 160),
-          padding: const EdgeInsets.symmetric(vertical: 9),
+          padding: const EdgeInsets.symmetric(vertical: 10),
           decoration: BoxDecoration(
             color: active ? Colors.white : Colors.transparent,
             borderRadius: BorderRadius.circular(9),
+            boxShadow: active
+                ? const [
+                    BoxShadow(
+                      color: Color(0x0F000000),
+                      blurRadius: 10,
+                      offset: Offset(0, 4),
+                    ),
+                  ]
+                : null,
           ),
-          child: Text(
-            label,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w900,
-              color: active ? const Color(0xFF1B6B72) : const Color(0xFF6B7280),
-            ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(
+                value == 'rooms'
+                    ? Icons.meeting_room_outlined
+                    : Icons.people_alt_outlined,
+                size: 15,
+                color: active
+                    ? const Color(0xFF0F766E)
+                    : const Color(0xFF64748B),
+              ),
+              const SizedBox(width: 5),
+              Text(
+                label,
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: active
+                      ? const Color(0xFF0F766E)
+                      : const Color(0xFF64748B),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -729,157 +3568,1951 @@ class _ModeButton extends StatelessWidget {
   }
 }
 
-class _TimetableTimeline extends StatelessWidget {
+class _ResourceTimetableGrid extends StatefulWidget {
+  final List<_TimetableResource> resources;
   final List<_TimetableEntry> entries;
   final DateTime selectedDate;
   final int openMinute;
   final int closeMinute;
-  final bool isWide;
+  final String mode;
+  final bool compact;
   final ValueChanged<_TimetableEntry> onTap;
 
-  const _TimetableTimeline({
+  const _ResourceTimetableGrid({
+    required this.resources,
     required this.entries,
     required this.selectedDate,
     required this.openMinute,
     required this.closeMinute,
-    required this.isWide,
+    required this.mode,
+    this.compact = false,
+    required this.onTap,
+  });
+
+  @override
+  State<_ResourceTimetableGrid> createState() => _ResourceTimetableGridState();
+}
+
+class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
+  static const double hourWidth = 136.0;
+  static const double minuteWidth = hourWidth / 60;
+  static const double laneHeight = 84;
+  static const double laneGap = 8;
+  static const double rowTopPad = 14;
+  static const double rowBottomPad = 14;
+
+  /// The narrowest appointment block is 62px (~28 min at this scale), so
+  /// anything shorter is inflated for lane assignment to keep blocks from
+  /// painting over each other. Back-to-back 30-minute bookings still share
+  /// a lane.
+  static int _visualEnd(_TimetableEntry entry) {
+    final min = entry.startMinutes + 28;
+    return entry.cleanupEndMinutes > min ? entry.cleanupEndMinutes : min;
+  }
+
+  late final ScrollController _scrollController;
+  bool _scrolled = false;
+
+  int get _canvasStartMinute => _floorToHour(widget.openMinute);
+  int get _canvasEndMinute => _ceilToHour(widget.closeMinute);
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController(
+      initialScrollOffset: _initialOffset(),
+    );
+    _scrolled = _scrollController.initialScrollOffset > 2;
+    _scrollController.addListener(_onScroll);
+  }
+
+  @override
+  void didUpdateWidget(covariant _ResourceTimetableGrid oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_stripDate(widget.selectedDate) != _stripDate(oldWidget.selectedDate)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _initialOffset().clamp(
+            0.0,
+            _scrollController.position.maxScrollExtent,
+          ),
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.removeListener(_onScroll);
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    final scrolled = _scrollController.offset > 2;
+    if (scrolled != _scrolled) setState(() => _scrolled = scrolled);
+  }
+
+  double _initialOffset() {
+    final now = DateTime.now();
+    if (_stripDate(widget.selectedDate) != _stripDate(now)) return 0;
+    final nowMinutes = now.hour * 60 + now.minute;
+    if (nowMinutes <= _canvasStartMinute) return 0;
+    final timelineWidth =
+        (_canvasEndMinute - _canvasStartMinute) * minuteWidth;
+    final target = (nowMinutes - _canvasStartMinute) * minuteWidth - 220;
+    return target.clamp(0.0, (timelineWidth - hourWidth).clamp(0.0, timelineWidth));
+  }
+
+  double _rowHeightFor(List<_TimetableEntry> entries) {
+    final lanes = _assignLanesFlat(entries, endOf: _visualEnd);
+    final laneCount = lanes.isEmpty
+        ? 1
+        : lanes.map((l) => l.lane).reduce((a, b) => a > b ? a : b) + 1;
+    final height = rowTopPad +
+        laneCount * laneHeight +
+        (laneCount - 1) * laneGap +
+        rowBottomPad;
+    if (widget.mode == 'rooms') {
+      return height.clamp(132.0, double.infinity).toDouble();
+    }
+    return height;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canvasStartMinute = _canvasStartMinute;
+    final canvasEndMinute = _canvasEndMinute;
+    // Sticky resource column, sized just wide enough for a name + role/label.
+    // The timeline starts at `resourceWidth`, so trimming this hands the
+    // recovered horizontal space straight to the schedule. Responsive via the
+    // compact breakpoint; staff stays ~100px (mobile) / ~132px (tablet).
+    final resourceWidth = widget.compact
+        ? (widget.mode == 'rooms' ? 112.0 : 100.0)
+        : (widget.mode == 'rooms' ? 156.0 : 132.0);
+    final timelineWidth = (canvasEndMinute - canvasStartMinute) * minuteWidth;
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final selectedToday = _stripDate(widget.selectedDate) == _stripDate(now);
+    final showNow =
+        selectedToday &&
+        nowMinutes >= canvasStartMinute &&
+        nowMinutes <= canvasEndMinute;
+    final nowLeft = (nowMinutes - canvasStartMinute) * minuteWidth;
+
+    final rowEntries = [
+      for (final resource in widget.resources)
+        widget.entries.where(resource.matches).toList(),
+    ];
+    final rowHeights = [for (final list in rowEntries) _rowHeightFor(list)];
+    final contentHeight =
+        50.0 + rowHeights.fold<double>(0, (total, height) => total + height);
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: const Color(0xFFDDE5EE)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x0A000000),
+                blurRadius: 8,
+                offset: Offset(0, 3),
+              ),
+            ],
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(12),
+            child: Stack(
+              children: [
+                // Scrollable timeline. Padded so it starts after the pinned
+                // resource column, which stays put while hours scroll.
+                Padding(
+                  padding: EdgeInsets.only(left: resourceWidth),
+                  child: SingleChildScrollView(
+                    controller: _scrollController,
+                    scrollDirection: Axis.horizontal,
+                    child: SizedBox(
+                      width: timelineWidth,
+                      height: contentHeight,
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              _TimelineHoursHeader(
+                                timelineWidth: timelineWidth,
+                                canvasStartMinute: canvasStartMinute,
+                                canvasEndMinute: canvasEndMinute,
+                                minuteWidth: minuteWidth,
+                              ),
+                              for (var i = 0; i < widget.resources.length; i++)
+                                _ResourceRowTimeline(
+                                  entries: rowEntries[i],
+                                  selectedDate: widget.selectedDate,
+                                  rowHeight: rowHeights[i],
+                                  timelineWidth: timelineWidth,
+                                  canvasStartMinute: canvasStartMinute,
+                                  canvasEndMinute: canvasEndMinute,
+                                  openMinute: widget.openMinute,
+                                  closeMinute: widget.closeMinute,
+                                  onTap: widget.onTap,
+                                  isLast: i == widget.resources.length - 1,
+                                ),
+                            ],
+                          ),
+                          if (showNow)
+                            Positioned(
+                              left: (nowLeft - 32).clamp(
+                                4.0,
+                                timelineWidth - 68,
+                              ),
+                              top: 9,
+                              child: _TimelineNowPill(
+                                label: _shortClockLabel(_minutesToTime(nowMinutes)),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+                // Pinned resource column, painted above the timeline with a
+                // soft edge shadow once the timeline has scrolled.
+                Positioned(
+                  left: 0,
+                  top: 0,
+                  bottom: 0,
+                  width: resourceWidth,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 160),
+                    curve: Curves.easeOutCubic,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFFCFDFE),
+                      boxShadow: _scrolled
+                          ? const [
+                              BoxShadow(
+                                color: Color(0x1A0F172A),
+                                blurRadius: 8,
+                                offset: Offset(2, 0),
+                              ),
+                            ]
+                          : const [],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _ResourceColumnHeader(
+                          titleLabel: widget.mode == 'rooms'
+                              ? 'Room / Zone'
+                              : 'Therapist',
+                        ),
+                        for (var i = 0; i < widget.resources.length; i++)
+                          _ResourceCell(
+                            resource: widget.resources[i],
+                            occupied: rowEntries[i]
+                                .where((entry) => entry.isInProgress)
+                                .length,
+                            width: resourceWidth,
+                            height: rowHeights[i],
+                            isLast: i == widget.resources.length - 1,
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        const _TimetableLegend(),
+      ],
+    );
+  }
+}
+
+class _ResourceColumnHeader extends StatelessWidget {
+  final String titleLabel;
+
+  const _ResourceColumnHeader({required this.titleLabel});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 50,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      decoration: const BoxDecoration(
+        color: Color(0xFFFBFCFD),
+        border: Border(
+          bottom: BorderSide(color: Color(0xFFDDE5EE)),
+          right: BorderSide(color: Color(0xFFDDE5EE)),
+        ),
+      ),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          titleLabel,
+          style: const TextStyle(
+            fontSize: 13.5,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF111827),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TimelineNowPill extends StatelessWidget {
+  final String label;
+
+  const _TimelineNowPill({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: _timetableAccent,
+        borderRadius: BorderRadius.circular(8),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x330F766E),
+            blurRadius: 8,
+            offset: Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+          color: Colors.white,
+        ),
+      ),
+    );
+  }
+}
+
+class _TimelineHoursHeader extends StatelessWidget {
+  final double timelineWidth;
+  final int canvasStartMinute;
+  final int canvasEndMinute;
+  final double minuteWidth;
+
+  const _TimelineHoursHeader({
+    required this.timelineWidth,
+    required this.canvasStartMinute,
+    required this.canvasEndMinute,
+    required this.minuteWidth,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final firstHour = canvasStartMinute ~/ 60;
+    final lastHour = (canvasEndMinute / 60).ceil();
+    return Container(
+      height: 50,
+      width: timelineWidth,
+      decoration: const BoxDecoration(
+        color: Color(0xFFFBFCFD),
+        border: Border(bottom: BorderSide(color: Color(0xFFDDE5EE))),
+      ),
+      child: Stack(
+        children: [
+          for (var hour = firstHour; hour <= lastHour; hour++)
+            Positioned(
+              left: (hour * 60 - canvasStartMinute) * minuteWidth,
+              top: 0,
+              bottom: 0,
+              child: Container(
+                width: 1,
+                color: const Color(0xFFEFF3F7),
+              ),
+            ),
+          for (var hour = firstHour; hour < lastHour; hour++)
+            Positioned(
+              left: (hour * 60 - canvasStartMinute) * minuteWidth + 14,
+              top: 18,
+              child: Text(
+                _hourLabel(hour),
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF334155),
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceRowTimeline extends StatelessWidget {
+  final List<_TimetableEntry> entries;
+  final DateTime selectedDate;
+  final double rowHeight;
+  final double timelineWidth;
+  final int canvasStartMinute;
+  final int canvasEndMinute;
+  final int openMinute;
+  final int closeMinute;
+  final ValueChanged<_TimetableEntry> onTap;
+  final bool isLast;
+
+  const _ResourceRowTimeline({
+    required this.entries,
+    required this.selectedDate,
+    required this.rowHeight,
+    required this.timelineWidth,
+    required this.canvasStartMinute,
+    required this.canvasEndMinute,
+    required this.openMinute,
+    required this.closeMinute,
+    required this.onTap,
+    required this.isLast,
+  });
+
+  static const double laneHeight = _ResourceTimetableGridState.laneHeight;
+  static const double laneGap = _ResourceTimetableGridState.laneGap;
+  static const double topPad = _ResourceTimetableGridState.rowTopPad;
+  static const double minuteWidth = _ResourceTimetableGridState.minuteWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = [...entries]
+      ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+    final blockingEntries = sorted.where((entry) => !entry.isVoided).toList();
+    final lanes = _assignLanesFlat(
+      sorted,
+      endOf: _ResourceTimetableGridState._visualEnd,
+    );
+    final laneCount = lanes.isEmpty
+        ? 1
+        : lanes.map((l) => l.lane).reduce((a, b) => a > b ? a : b) + 1;
+
+    final now = DateTime.now();
+    final selectedToday = _stripDate(selectedDate) == _stripDate(now);
+    final selectedBeforeToday = _stripDate(selectedDate).isBefore(
+      _stripDate(now),
+    );
+    final nowMinutes = now.hour * 60 + now.minute;
+
+    return Container(
+      height: rowHeight,
+      width: timelineWidth,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border(
+          bottom: BorderSide(
+            color: isLast ? Colors.transparent : const Color(0xFFE5E7EB),
+          ),
+        ),
+      ),
+      child: Stack(
+        children: [
+          _RowTimeGrid(
+            canvasStartMinute: canvasStartMinute,
+            canvasEndMinute: canvasEndMinute,
+            minuteWidth: minuteWidth,
+          ),
+          if (lanes.isEmpty)
+            for (final segment in _freeSegments(
+              blockingEntries,
+              openMinute,
+              closeMinute,
+              minuteWidth,
+            ))
+              _FreeAvailabilitySegment(
+                segment: segment,
+                hasServicesInRow: blockingEntries.isNotEmpty,
+                openMinute: openMinute,
+                canvasStartMinute: canvasStartMinute,
+                minuteWidth: minuteWidth,
+                top: topPad,
+                height: laneHeight,
+                selectedToday: selectedToday,
+                selectedBeforeToday: selectedBeforeToday,
+                nowMinutes: nowMinutes,
+              )
+          else
+            for (var laneIndex = 0; laneIndex < laneCount; laneIndex++)
+              for (final segment in _freeSegments(
+                lanes
+                    .where((lane) => lane.lane == laneIndex)
+                    .map((lane) => lane.entry)
+                    .where((entry) => !entry.isVoided)
+                    .toList(),
+                openMinute,
+                closeMinute,
+                minuteWidth,
+              ))
+                _FreeAvailabilitySegment(
+                  segment: segment,
+                  hasServicesInRow: lanes.any(
+                    (lane) => lane.lane == laneIndex,
+                  ),
+                  openMinute: openMinute,
+                  canvasStartMinute: canvasStartMinute,
+                  minuteWidth: minuteWidth,
+                  top: topPad + laneIndex * (laneHeight + laneGap),
+                  height: laneHeight,
+                  selectedToday: selectedToday,
+                  selectedBeforeToday: selectedBeforeToday,
+                  nowMinutes: nowMinutes,
+                ),
+          for (final lane in lanes)
+            _ResourceAppointmentBlock(
+              entry: lane.entry,
+              canvasStartMinute: canvasStartMinute,
+              minuteWidth: minuteWidth,
+              top: topPad + lane.lane * (laneHeight + laneGap),
+              cardHeight: laneHeight,
+              onTap: () => onTap(lane.entry),
+            ),
+          if (selectedToday &&
+              nowMinutes >= canvasStartMinute &&
+              nowMinutes <= canvasEndMinute)
+            Positioned(
+              left: (nowMinutes - canvasStartMinute) * minuteWidth - 3,
+              top: 6,
+              bottom: 6,
+              width: 7,
+              child: const _DashedNowLine(),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceCell extends StatelessWidget {
+  final _TimetableResource resource;
+  final int occupied;
+  final double width;
+  final double height;
+  final bool isLast;
+
+  const _ResourceCell({
+    required this.resource,
+    required this.occupied,
+    required this.width,
+    required this.height,
+    required this.isLast,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isRoom = resource.isRoom;
+    final used = occupied.clamp(0, resource.capacity);
+    final compact = width <= 120;
+    return Container(
+      width: width,
+      height: height,
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 8 : 10,
+        vertical: compact ? 8 : 10,
+      ),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFCFDFE),
+        border: Border(
+          right: const BorderSide(color: Color(0xFFDDE5EE)),
+          bottom: BorderSide(
+            color: isLast ? Colors.transparent : const Color(0xFFE5E7EB),
+          ),
+        ),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            resource.name,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            softWrap: true,
+            style: TextStyle(
+              fontSize: compact ? 12.5 : 13.5,
+              fontWeight: FontWeight.w900,
+              color: const Color(0xFF0F172A),
+              height: 1.2,
+            ),
+          ),
+          if (isRoom) ...[
+            // Zones show a compact "used / capacity" occupancy pill and no
+            // subtitle, matching the reference on both mobile and tablet.
+            SizedBox(height: compact ? 8 : 10),
+            _ResourcePill(
+              label: '$used / ${resource.capacity}',
+              color: resource.accentColor,
+            ),
+          ] else ...[
+            SizedBox(height: compact ? 2 : 3),
+            Text(
+              resource.subtitle,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: compact ? 10.5 : 11.5,
+                fontWeight: FontWeight.w700,
+                color: const Color(0xFF64748B),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourcePill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _ResourcePill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 136),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 112),
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w800,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ResourceAppointmentBlock extends StatelessWidget {
+  final _TimetableEntry entry;
+  final int canvasStartMinute;
+  final double minuteWidth;
+  final double top;
+  final double cardHeight;
+  final VoidCallback onTap;
+
+  const _ResourceAppointmentBlock({
+    required this.entry,
+    required this.canvasStartMinute,
+    required this.minuteWidth,
+    required this.top,
+    required this.cardHeight,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final hourHeight = isWide ? 82.0 : 76.0;
-    final labelWidth = isWide ? 58.0 : 42.0;
-    final earliestEntryStart = entries.fold<int>(
-      openMinute,
-      (earliest, entry) =>
-          entry.startMinutes < earliest ? entry.startMinutes : earliest,
-    );
-    final latestEntryEnd = entries.fold<int>(
-      closeMinute,
-      (latest, entry) => entry.endMinutes > latest ? entry.endMinutes : latest,
-    );
-    final canvasStartMinute = _floorToHour(earliestEntryStart);
-    final canvasEndMinute = _ceilToHour(latestEntryEnd);
-    final totalHeight =
-        ((canvasEndMinute - canvasStartMinute) / 60 * hourHeight).clamp(
-          120.0,
-          2600.0,
-        );
-    final placements = _assignLanes(entries);
+    final style = _statusStyle(entry);
+    final left = (entry.startMinutes - canvasStartMinute) * minuteWidth;
+    final serviceWidth =
+        ((entry.endMinutes - entry.startMinutes) * minuteWidth)
+            .clamp(62.0, double.infinity)
+            .toDouble();
+    final bufferMinutes = entry.bufferAfterMinutes.clamp(0, 240);
+    final bufferWidth = bufferMinutes > 0
+        ? (bufferMinutes * minuteWidth).clamp(34.0, double.infinity)
+        : 0.0;
+    final large = serviceWidth >= 154;
+    final medium = serviceWidth >= 108 && serviceWidth < 154;
+    final small = serviceWidth < 96;
+    final showTinyIcon = serviceWidth >= 76;
+    final displayName = small
+        ? _compactInitials(entry.customerName)
+        : medium
+        ? _shortCustomerName(entry.customerName)
+        : entry.customerName;
+    final timeLabel = small
+        ? _compactDurationLabel(entry.durationMinutes)
+        : serviceWidth >= 130
+        ? _meridiemRangeLabel(entry.startTime, entry.endTime)
+        : '${_shortClockLabel(entry.startTime)} - ${_shortClockLabel(entry.endTime)}';
+    final serviceLabel = _timelineServiceLabel(entry, serviceWidth);
 
-    return Container(
-      padding: EdgeInsets.fromLTRB(isWide ? 18 : 10, 16, isWide ? 18 : 10, 18),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
-      ),
-      child: SizedBox(
-        height: totalHeight,
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final canvasLeft = labelWidth + 12;
-            final canvasWidth = constraints.maxWidth - canvasLeft;
-            return Stack(
-              clipBehavior: Clip.none,
-              children: [
-                _TimetableGrid(
-                  canvasStartMinute: canvasStartMinute,
-                  canvasEndMinute: canvasEndMinute,
-                  hourHeight: hourHeight,
-                  labelWidth: labelWidth,
-                  showNowLine:
-                      _stripDate(selectedDate) == _stripDate(DateTime.now()),
+    return Stack(
+      children: [
+        if (bufferMinutes > 0)
+          Positioned(
+            left: left + serviceWidth + 3,
+            top: top,
+            width: (bufferWidth - 3).clamp(0.0, double.infinity),
+            height: cardHeight,
+            child: _BufferBlock(
+              minutes: bufferMinutes,
+              rangeLabel:
+                  '${_shortClockLabel(entry.endTime)} - ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+              showRange: bufferWidth >= 70,
+            ),
+          ),
+        Positioned(
+          left: left,
+          top: top,
+          width: serviceWidth,
+          height: cardHeight,
+          child: Material(
+            color: Colors.transparent,
+            child: InkWell(
+              onTap: onTap,
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                padding: EdgeInsets.symmetric(
+                  horizontal: small ? 7 : 10,
+                  vertical: small
+                      ? 5
+                      : medium
+                      ? 6
+                      : 7,
                 ),
-                for (final placement in placements)
-                  _PositionedTimetableCard(
-                    placement: placement,
-                    canvasStartMinute: canvasStartMinute,
-                    hourHeight: hourHeight,
-                    canvasLeft: canvasLeft,
-                    canvasWidth: canvasWidth,
-                    compact: !isWide,
-                    onTap: onTap,
+                decoration: BoxDecoration(
+                  color: style.background,
+                  borderRadius: BorderRadius.circular(9),
+                  border: Border.all(color: style.border),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x08000000),
+                      blurRadius: 8,
+                      offset: Offset(0, 3),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: small
+                      ? MainAxisAlignment.center
+                      : MainAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        if (!small || showTinyIcon) ...[
+                          Container(
+                            width: small ? 16 : 18,
+                            height: small ? 16 : 18,
+                            decoration: BoxDecoration(
+                              color: style.color.withValues(alpha: 0.12),
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              entry.isVoided
+                                  ? Icons.block_rounded
+                                  : entry.isCompleted
+                                  ? Icons.check_rounded
+                                  : entry.isInProgress
+                                  ? Icons.timer_outlined
+                                  : Icons.event_note_outlined,
+                              size: small ? 11 : 13,
+                              color: style.color,
+                            ),
+                          ),
+                          SizedBox(width: small ? 5 : 6),
+                        ],
+                        Expanded(
+                          child: Text(
+                            displayName,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: small
+                                  ? 12.5
+                                  : medium
+                                  ? 13.5
+                                  : 14,
+                              fontWeight: FontWeight.w800,
+                              color: const Color(0xFF111827),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (!small && large && entry.isInProgress) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        'In Progress',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w900,
+                          color: style.color,
+                        ),
+                      ),
+                    ],
+                    if (!small && large && !entry.isInProgress) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        serviceLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF374151),
+                        ),
+                      ),
+                    ],
+                    if (!small && medium) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        serviceLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF374151),
+                        ),
+                      ),
+                    ],
+                    SizedBox(
+                      height: small
+                          ? 2
+                          : medium
+                          ? 4
+                          : 3,
+                    ),
+                    Text(
+                      timeLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: small
+                            ? 11.5
+                            : medium
+                            ? 12
+                            : 12.5,
+                        fontWeight: FontWeight.w700,
+                        color: const Color(0xFF4B5563),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _BufferBlock extends StatelessWidget {
+  final int minutes;
+  final String rangeLabel;
+  final bool showRange;
+
+  const _BufferBlock({
+    required this.minutes,
+    required this.rangeLabel,
+    required this.showRange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      alignment: Alignment.center,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFCBD5E1)),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            Icons.cleaning_services_outlined,
+            size: showRange ? 13 : 12,
+            color: const Color(0xFF9AA1AB),
+          ),
+          SizedBox(height: showRange ? 3 : 2),
+          Text(
+            showRange ? 'Cleanup' : '${minutes}m',
+            textAlign: TextAlign.center,
+            maxLines: 1,
+            style: const TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+          if (showRange) ...[
+            const SizedBox(height: 2),
+            Text(
+              '$minutes min\n$rangeLabel',
+              textAlign: TextAlign.center,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF9AA1AB),
+                height: 1.15,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _FreeAvailabilitySegment extends StatelessWidget {
+  final _ScheduleSegment segment;
+  final bool hasServicesInRow;
+  final int openMinute;
+  final int canvasStartMinute;
+  final double minuteWidth;
+  final double top;
+  final double height;
+  final bool selectedToday;
+  final bool selectedBeforeToday;
+  final int nowMinutes;
+
+  const _FreeAvailabilitySegment({
+    required this.segment,
+    required this.hasServicesInRow,
+    required this.openMinute,
+    required this.canvasStartMinute,
+    required this.minuteWidth,
+    required this.top,
+    required this.height,
+    required this.selectedToday,
+    required this.selectedBeforeToday,
+    required this.nowMinutes,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final left = (segment.start - canvasStartMinute) * minuteWidth;
+    final width = (segment.end - segment.start) * minuteWidth;
+    if (width < 8) return const SizedBox.shrink();
+    final finalSlotAvailable =
+        segment.isFinalAfterBusy &&
+        (selectedBeforeToday || (selectedToday && nowMinutes >= segment.start));
+    final shouldLabel =
+        width >= 72 &&
+        (segment.isFinalAfterBusy ||
+            (!hasServicesInRow &&
+                segment.start <= openMinute &&
+                !segment.afterBusy));
+    final label = finalSlotAvailable
+        ? 'Free'
+        : segment.isFinalAfterBusy
+        ? 'Free after ${_clockLabel(_minutesToTime(segment.start))}'
+        : segment.start <= openMinute
+        ? 'Free'
+        : '';
+    final showSubtitle =
+        shouldLabel &&
+        width >= 150 &&
+        (!segment.isFinalAfterBusy || finalSlotAvailable);
+    return Positioned(
+      left: left,
+      top: top,
+      width: width,
+      height: height,
+      child: Container(
+        alignment: segment.isFinalAfterBusy && !finalSlotAvailable
+            ? Alignment.centerLeft
+            : Alignment.center,
+        padding: EdgeInsets.symmetric(
+          horizontal: segment.isFinalAfterBusy && !finalSlotAvailable ? 14 : 8,
+          vertical: 8,
+        ),
+        decoration: BoxDecoration(
+          color: const Color(0xFFF7FFFC),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+            color: const Color(0xFFC7EBDD),
+            style: BorderStyle.solid,
+          ),
+        ),
+        child: shouldLabel
+            ? Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: segment.isFinalAfterBusy && !finalSlotAvailable
+                    ? CrossAxisAlignment.start
+                    : CrossAxisAlignment.center,
+                children: [
+                  Text(
+                    label,
+                    textAlign: segment.isFinalAfterBusy && !finalSlotAvailable
+                        ? TextAlign.left
+                        : TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Color(0xFF166534),
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      height: 1.2,
+                    ),
                   ),
+                  if (showSubtitle) ...[
+                    const SizedBox(height: 3),
+                    const Text(
+                      'Available',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Color(0xFF475569),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ],
+              )
+            : const SizedBox.shrink(),
+      ),
+    );
+  }
+}
+
+class _RowTimeGrid extends StatelessWidget {
+  final int canvasStartMinute;
+  final int canvasEndMinute;
+  final double minuteWidth;
+
+  const _RowTimeGrid({
+    required this.canvasStartMinute,
+    required this.canvasEndMinute,
+    required this.minuteWidth,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final firstHour = canvasStartMinute ~/ 60;
+    final lastHour = (canvasEndMinute / 60).ceil();
+    return Stack(
+      children: [
+        for (var hour = firstHour; hour <= lastHour; hour++)
+          Positioned(
+            left: (hour * 60 - canvasStartMinute) * minuteWidth,
+            top: 0,
+            bottom: 0,
+            child: Container(width: 1, color: const Color(0xFFE8EEF5)),
+          ),
+      ],
+    );
+  }
+}
+
+class _TimetableLegend extends StatelessWidget {
+  const _TimetableLegend();
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      alignment: WrapAlignment.center,
+      spacing: 16,
+      runSpacing: 8,
+      children: const [
+        _LegendDot(color: Color(0xFF2563EB), label: 'Awaiting arrival'),
+        _LegendDot(color: Color(0xFF0EA5E9), label: 'In progress'),
+        _LegendDot(color: Color(0xFF059669), label: 'Completed'),
+        _LegendDot(color: Color(0xFF9CA3AF), label: 'Buffer'),
+        _LegendSwatch(color: Color(0xFFDDF6EA), label: 'Free capacity'),
+      ],
+    );
+  }
+}
+
+class _LegendSwatch extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendSwatch({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 12,
+          height: 12,
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(3),
+            border: Border.all(color: const Color(0xFFBFE5D6)),
+          ),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DashedNowLine extends StatelessWidget {
+  const _DashedNowLine();
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _DashedLinePainter(
+        _timetableAccent.withValues(alpha: 0.85),
+      ),
+      size: Size.infinite,
+    );
+  }
+}
+
+class _DashedLinePainter extends CustomPainter {
+  final Color color;
+
+  const _DashedLinePainter(this.color);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = 1.0
+      ..strokeCap = StrokeCap.round;
+    const dashHeight = 3.0;
+    const dashSpace = 4.0;
+    final x = size.width / 2;
+    var y = 0.0;
+    while (y < size.height) {
+      canvas.drawLine(
+        Offset(x, y),
+        Offset(x, (y + dashHeight).clamp(0, size.height)),
+        paint,
+      );
+      y += dashHeight + dashSpace;
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashedLinePainter oldDelegate) =>
+      oldDelegate.color != color;
+}
+
+class _LegendDot extends StatelessWidget {
+  final Color color;
+  final String label;
+
+  const _LegendDot({required this.color, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w700,
+            color: Color(0xFF6B7280),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _ScheduleSegment {
+  final int start;
+  final int end;
+  final bool afterBusy;
+  final bool isFinalAfterBusy;
+
+  const _ScheduleSegment(
+    this.start,
+    this.end, {
+    this.afterBusy = false,
+    this.isFinalAfterBusy = false,
+  });
+}
+
+/// The appointment/buffer blocks enforce a minimum pixel width so their
+/// icon and label stay legible even for very short bookings. That means
+/// their rendered right edge can sit past [_TimetableEntry.cleanupEndMinutes]
+/// in time-space. Free segments must start after that *visual* edge, not
+/// the raw time, or the "Free after" label ends up rendered underneath the
+/// buffer chip.
+double _visualBlockEndMinutes(_TimetableEntry entry, double minuteWidth) {
+  const serviceMinPx = 62.0;
+  const bufferMinPx = 34.0;
+  final serviceWidthPx = (entry.endMinutes - entry.startMinutes) * minuteWidth;
+  final serviceEnd = serviceWidthPx < serviceMinPx
+      ? entry.startMinutes + serviceMinPx / minuteWidth
+      : entry.endMinutes.toDouble();
+  final bufferMinutes = entry.bufferAfterMinutes.clamp(0, 240);
+  if (bufferMinutes <= 0) return serviceEnd;
+  final bufferWidthPx = bufferMinutes * minuteWidth;
+  final visualBufferMinutes = bufferWidthPx < bufferMinPx
+      ? bufferMinPx / minuteWidth
+      : bufferMinutes.toDouble();
+  return serviceEnd + visualBufferMinutes;
+}
+
+List<_ScheduleSegment> _freeSegments(
+  List<_TimetableEntry> entries,
+  int openMinute,
+  int closeMinute,
+  double minuteWidth,
+) {
+  final busy = entries
+      .map(
+        (entry) => _ScheduleSegment(
+          entry.startMinutes.clamp(openMinute, closeMinute).toInt(),
+          _visualBlockEndMinutes(entry, minuteWidth)
+              .ceil()
+              .clamp(openMinute, closeMinute),
+        ),
+      )
+      .where((segment) => segment.end > segment.start)
+      .toList()
+    ..sort((a, b) => a.start.compareTo(b.start));
+
+  final free = <_ScheduleSegment>[];
+  var cursor = openMinute;
+  var passedBusy = false;
+  for (final segment in busy) {
+    if (segment.start > cursor) {
+      free.add(_ScheduleSegment(cursor, segment.start, afterBusy: passedBusy));
+    }
+    if (segment.end > cursor) cursor = segment.end;
+    passedBusy = true;
+  }
+  if (cursor < closeMinute) {
+    free.add(
+      _ScheduleSegment(
+        cursor,
+        closeMinute,
+        afterBusy: passedBusy,
+        isFinalAfterBusy: passedBusy,
+      ),
+    );
+  }
+  return free.where((segment) => segment.end - segment.start >= 30).toList();
+}
+
+/// Overlap grouping and lane assignment. [endOf] decides where an entry's
+/// occupied span ends; the default is the real cleanup end. Callers that
+/// render entries with a minimum pixel size pass an inflated end (e.g.
+/// `max(cleanupEnd, start + minVisualMinutes)`) so blocks that would collide
+/// on screen are pushed into a side-by-side lane instead of painting on top
+/// of each other. Back-to-back bookings (next start == previous end) stay in
+/// the same lane because the comparison is strict.
+List<List<_TimetableEntry>> _groupOverlapping(
+  List<_TimetableEntry> entries, {
+  int Function(_TimetableEntry entry)? endOf,
+}) {
+  final end = endOf ?? (entry) => entry.cleanupEndMinutes;
+  final sorted = [...entries]
+    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  final groups = <List<_TimetableEntry>>[];
+  var current = <_TimetableEntry>[];
+  var groupEnd = 0;
+  for (final entry in sorted) {
+    if (current.isEmpty || entry.startMinutes < groupEnd) {
+      current.add(entry);
+      if (end(entry) > groupEnd) groupEnd = end(entry);
+    } else {
+      groups.add(current);
+      current = [entry];
+      groupEnd = end(entry);
+    }
+  }
+  if (current.isNotEmpty) groups.add(current);
+  return groups;
+}
+
+class _EntryLane {
+  final _TimetableEntry entry;
+  final int lane;
+
+  const _EntryLane(this.entry, this.lane);
+}
+
+List<_EntryLane> _assignLanesFlat(
+  List<_TimetableEntry> entries, {
+  int Function(_TimetableEntry entry)? endOf,
+}) {
+  final end = endOf ?? (entry) => entry.cleanupEndMinutes;
+  final result = <_EntryLane>[];
+  for (final group in _groupOverlapping(entries, endOf: endOf)) {
+    final laneEnds = <int>[];
+    for (final entry in group) {
+      var lane = laneEnds.indexWhere((laneEnd) => entry.startMinutes >= laneEnd);
+      if (lane == -1) {
+        lane = laneEnds.length;
+        laneEnds.add(end(entry));
+      } else {
+        laneEnds[lane] = end(entry);
+      }
+      result.add(_EntryLane(entry, lane));
+    }
+  }
+  return result;
+}
+
+class _MobileTimetable extends StatefulWidget {
+  final List<_TimetableEntry> entries;
+  final List<_TimetableResource> bottomResources;
+  final String mode;
+  final DateTime selectedDate;
+  final int openMinute;
+  final int closeMinute;
+  final Set<String> expandedBandKeys;
+  final ValueChanged<String> onToggleBand;
+  final ValueChanged<_TimetableEntry> onTap;
+
+  const _MobileTimetable({
+    required this.entries,
+    required this.bottomResources,
+    required this.mode,
+    required this.selectedDate,
+    required this.openMinute,
+    required this.closeMinute,
+    required this.expandedBandKeys,
+    required this.onToggleBand,
+    required this.onTap,
+  });
+
+  @override
+  State<_MobileTimetable> createState() => _MobileTimetableState();
+}
+
+class _MobileTimetableState extends State<_MobileTimetable> {
+  @override
+  Widget build(BuildContext context) {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(6, 8, 6, 24),
+      physics: const AlwaysScrollableScrollPhysics(),
+      children: [
+        _ResourceTimetableGrid(
+          resources: widget.bottomResources,
+          entries: widget.entries,
+          mode: widget.mode,
+          selectedDate: widget.selectedDate,
+          openMinute: widget.openMinute,
+          closeMinute: widget.closeMinute,
+          compact: true,
+          onTap: widget.onTap,
+        ),
+      ],
+    );
+  }
+}
+
+// ignore: unused_element
+class _MobileResourceNavigator extends StatelessWidget {
+  final List<_TimetableResource> resources;
+  final List<_TimetableEntry> entries;
+  final String selectedId;
+  final String mode;
+  final int nowMinutes;
+  final bool selectedToday;
+  final ValueChanged<String> onSelected;
+
+  const _MobileResourceNavigator({
+    required this.resources,
+    required this.entries,
+    required this.selectedId,
+    required this.mode,
+    required this.nowMinutes,
+    required this.selectedToday,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      color: Colors.white,
+      padding: const EdgeInsets.fromLTRB(12, 10, 12, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                mode == 'rooms'
+                    ? Icons.meeting_room_outlined
+                    : Icons.people_alt_outlined,
+                size: 17,
+                color: const Color(0xFF176B68),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                mode == 'rooms' ? 'Choose room or zone' : 'Choose staff',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF475467),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 68,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: resources.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (context, index) {
+                final resource = resources[index];
+                return _MobileResourceChip(
+                  resource: resource,
+                  entries: entries,
+                  nowMinutes: nowMinutes,
+                  selectedToday: selectedToday,
+                  selected: resource.id == selectedId,
+                  onTap: () => onSelected(resource.id),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
+class _MobileSelectedResourceHeader extends StatelessWidget {
+  final _TimetableResource resource;
+  final _ResourceStatus status;
+  final int appointmentCount;
+
+  const _MobileSelectedResourceHeader({
+    required this.resource,
+    required this.status,
+    required this.appointmentCount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF8FAFB),
+        border: Border(
+          top: BorderSide(color: Color(0xFFE4E7EC)),
+          bottom: BorderSide(color: Color(0xFFE4E7EC)),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  resource.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF17202A),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$appointmentCount ${appointmentCount == 1 ? 'booking' : 'bookings'} today',
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF667085),
+                  ),
+                ),
               ],
-            );
-          },
+            ),
+          ),
+          Container(
+            constraints: const BoxConstraints(maxWidth: 170),
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+            decoration: BoxDecoration(
+              color: status.color.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: status.color.withValues(alpha: 0.24)),
+            ),
+            child: Text(
+              status.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: status.color,
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MobileTimelineBoard extends StatefulWidget {
+  final List<_TimetableEntry> entries;
+  final String mode;
+  final DateTime selectedDate;
+  final int openMinute;
+  final int closeMinute;
+  final Set<String> expandedBandKeys;
+  final ValueChanged<String> onToggleBand;
+  final ValueChanged<_TimetableEntry> onTap;
+
+  const _MobileTimelineBoard({
+    required this.entries,
+    required this.mode,
+    required this.selectedDate,
+    required this.openMinute,
+    required this.closeMinute,
+    required this.expandedBandKeys,
+    required this.onToggleBand,
+    required this.onTap,
+  });
+
+  @override
+  State<_MobileTimelineBoard> createState() => _MobileTimelineBoardState();
+}
+
+class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
+  static const double hourHeight = 92.0;
+  static const double minuteHeight = hourHeight / 60;
+  static const double topPad = 10.0;
+  static const double bottomPad = 22.0;
+  static const double timeWidth = 44.0;
+  static const double laneGap = 8.0;
+
+  /// The shortest card is 46px, which equals exactly 30 minutes at this
+  /// scale. Lane assignment inflates every entry to at least that visual
+  /// span so shorter bookings can never paint over the next card; exact
+  /// back-to-back bookings still share a lane.
+  static const int minVisualMinutes = 30;
+
+  late final ScrollController _scrollController;
+
+  int get _canvasStartMinute => _floorToHour(widget.openMinute);
+  int get _canvasEndMinute => _ceilToHour(widget.closeMinute);
+
+  static int _visualEnd(_TimetableEntry entry) {
+    final min = entry.startMinutes + minVisualMinutes;
+    return entry.cleanupEndMinutes > min ? entry.cleanupEndMinutes : min;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController = ScrollController(
+      initialScrollOffset: _initialOffset(),
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _MobileTimelineBoard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_stripDate(widget.selectedDate) != _stripDate(oldWidget.selectedDate)) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        _scrollController.animateTo(
+          _initialOffset().clamp(
+            0.0,
+            _scrollController.position.maxScrollExtent,
+          ),
+          duration: const Duration(milliseconds: 240),
+          curve: Curves.easeOutCubic,
+        );
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  double _initialOffset() {
+    final now = DateTime.now();
+    if (_stripDate(widget.selectedDate) != _stripDate(now)) return 0;
+    final nowMinutes = now.hour * 60 + now.minute;
+    if (nowMinutes <= _canvasStartMinute) return 0;
+    final target =
+        topPad + (nowMinutes - _canvasStartMinute) * minuteHeight - 150;
+    final maxOffset =
+        topPad +
+        (_canvasEndMinute - _canvasStartMinute) * minuteHeight +
+        bottomPad;
+    return target.clamp(0.0, maxOffset);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final canvasStartMinute = _canvasStartMinute;
+    final canvasEndMinute = _canvasEndMinute;
+    final groups = _groupOverlapping(widget.entries, endOf: _visualEnd);
+    var maxLanes = 1;
+    for (final group in groups) {
+      final key = _mobileBandKey(group);
+      final collapsed =
+          group.length > 3 && !widget.expandedBandKeys.contains(key);
+      if (collapsed) continue;
+      final lanes = _assignLanesFlat(group, endOf: _visualEnd);
+      final laneCount = lanes.isEmpty
+          ? 1
+          : lanes.map((lane) => lane.lane).reduce((a, b) => a > b ? a : b) + 1;
+      if (laneCount > maxLanes) maxLanes = laneCount;
+    }
+    final boardHeight =
+        topPad +
+        (canvasEndMinute - canvasStartMinute) * minuteHeight +
+        bottomPad;
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final selectedToday = _stripDate(widget.selectedDate) == _stripDate(now);
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Fill the viewport when the lanes fit; scroll only when they don't.
+        final available = constraints.maxWidth - 6 - 8 - timeWidth;
+        final fitted = (available - 22 - (maxLanes - 1) * laneGap) / maxLanes;
+        final laneWidth = fitted.clamp(206.0, 340.0);
+        final timelineWidth =
+            (10 + maxLanes * laneWidth + (maxLanes - 1) * laneGap + 12)
+                .clamp(available, double.infinity)
+                .toDouble();
+        return ListView(
+          controller: _scrollController,
+          padding: const EdgeInsets.fromLTRB(6, 4, 8, 10),
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: [
+            SizedBox(
+              height: boardHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    width: timeWidth,
+                    height: boardHeight,
+                    child: _MobileTimelineTimeRail(
+                      canvasStartMinute: canvasStartMinute,
+                      canvasEndMinute: canvasEndMinute,
+                      minuteHeight: minuteHeight,
+                      topPad: topPad,
+                      nowMinutes: selectedToday ? nowMinutes : null,
+                    ),
+                  ),
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SizedBox(
+                        width: timelineWidth,
+                        height: boardHeight,
+                        child: Stack(
+                          clipBehavior: Clip.none,
+                          children: [
+                            _MobileTimelineGrid(
+                              canvasStartMinute: canvasStartMinute,
+                              canvasEndMinute: canvasEndMinute,
+                              minuteHeight: minuteHeight,
+                              topPad: topPad,
+                              timeWidth: 0,
+                              contentWidth: timelineWidth,
+                            ),
+                            if (widget.entries.isEmpty)
+                              const _MobileEmptyDayHint(),
+                            for (final group in groups)
+                              ..._buildGroup(
+                                group: group,
+                                canvasStartMinute: canvasStartMinute,
+                                laneWidth: laneWidth,
+                              ),
+                            if (selectedToday &&
+                                nowMinutes >= canvasStartMinute &&
+                                nowMinutes <= canvasEndMinute)
+                              _MobileTimelineNowLine(
+                                top:
+                                    topPad +
+                                    (nowMinutes - canvasStartMinute) *
+                                        minuteHeight,
+                                contentWidth: timelineWidth,
+                              ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  List<Widget> _buildGroup({
+    required List<_TimetableEntry> group,
+    required int canvasStartMinute,
+    required double laneWidth,
+  }) {
+    final key = _mobileBandKey(group);
+    final start = _groupStart(group);
+    final end = _groupEnd(group);
+    final top = topPad + (start - canvasStartMinute) * minuteHeight;
+    final collapsed =
+        group.length > 3 && !widget.expandedBandKeys.contains(key);
+    if (collapsed) {
+      return [
+        Positioned(
+          left: 10,
+          top: top,
+          width: laneWidth,
+          height: ((end - start) * minuteHeight).clamp(64.0, 96.0).toDouble(),
+          child: _MobileTimelineCollapsedBand(
+            band: group,
+            startMinutes: start,
+            endMinutes: end,
+            onExpand: () => widget.onToggleBand(key),
+          ),
+        ),
+      ];
+    }
+
+    final lanes = _assignLanesFlat(group, endOf: _visualEnd);
+    return [
+      for (final lane in lanes)
+        Positioned(
+          left: 10 + lane.lane * (laneWidth + laneGap),
+          top:
+              topPad +
+              (lane.entry.startMinutes - canvasStartMinute) * minuteHeight,
+          width: laneWidth,
+          height: _cardHeight(lane.entry),
+          child: _MobileTimelineEntryCard(
+            entry: lane.entry,
+            mode: widget.mode,
+            compact: _cardHeight(lane.entry) < 68,
+            onTap: () => widget.onTap(lane.entry),
+          ),
+        ),
+      if (group.length > 3)
+        Positioned(
+          left: 10,
+          top: topPad + (end - canvasStartMinute) * minuteHeight + 4,
+          child: _MobileCollapseHandle(onTap: () => widget.onToggleBand(key)),
+        ),
+    ];
+  }
+
+  double _cardHeight(_TimetableEntry entry) {
+    final raw = (entry.endMinutes - entry.startMinutes) * minuteHeight;
+    return raw < 46.0 ? 46.0 : raw;
+  }
+}
+
+class _MobileEmptyDayHint extends StatelessWidget {
+  const _MobileEmptyDayHint();
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Align(
+          alignment: const Alignment(0, -0.55),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: const Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.event_available_outlined,
+                  size: 17,
+                  color: Color(0xFF0F766E),
+                ),
+                SizedBox(width: 8),
+                Text(
+                  'No bookings on this day',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF334155),
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-class _TimetableGrid extends StatelessWidget {
+class _MobileTimelineGrid extends StatelessWidget {
   final int canvasStartMinute;
   final int canvasEndMinute;
-  final double hourHeight;
-  final double labelWidth;
-  final bool showNowLine;
+  final double minuteHeight;
+  final double topPad;
+  final double timeWidth;
+  final double contentWidth;
 
-  const _TimetableGrid({
+  const _MobileTimelineGrid({
     required this.canvasStartMinute,
     required this.canvasEndMinute,
-    required this.hourHeight,
-    required this.labelWidth,
-    required this.showNowLine,
+    required this.minuteHeight,
+    required this.topPad,
+    required this.timeWidth,
+    required this.contentWidth,
   });
 
   @override
   Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final nowMinutes = now.hour * 60 + now.minute;
-    final showNow =
-        showNowLine &&
-        nowMinutes >= canvasStartMinute &&
-        nowMinutes <= canvasEndMinute;
     final firstHour = canvasStartMinute ~/ 60;
-    final lastHour = (canvasEndMinute / 60).ceil();
-
+    final lastHour = canvasEndMinute ~/ 60;
     return Stack(
       children: [
-        for (var hour = firstHour; hour <= lastHour; hour++) ...[
+        Positioned(
+          left: timeWidth + 10,
+          top: topPad,
+          bottom: 0,
+          child: Container(width: 1, color: const Color(0xFFE7EDF3)),
+        ),
+        for (var hour = firstHour; hour <= lastHour; hour++)
           Positioned(
-            top: ((hour * 60 - canvasStartMinute) / 60) * hourHeight,
             left: 0,
-            width: labelWidth,
-            child: Text(
-              _hourLabel(hour),
-              textAlign: TextAlign.right,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w900,
-                color: Color(0xFF4B5563),
+            top: topPad + (hour * 60 - canvasStartMinute) * minuteHeight,
+            width: contentWidth,
+            child: const Divider(height: 1, color: Color(0xFFE5EAF0)),
+          ),
+      ],
+    );
+  }
+}
+
+class _MobileTimelineTimeRail extends StatelessWidget {
+  final int canvasStartMinute;
+  final int canvasEndMinute;
+  final double minuteHeight;
+  final double topPad;
+  final int? nowMinutes;
+
+  const _MobileTimelineTimeRail({
+    required this.canvasStartMinute,
+    required this.canvasEndMinute,
+    required this.minuteHeight,
+    required this.topPad,
+    this.nowMinutes,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final firstHour = canvasStartMinute ~/ 60;
+    final lastHour = canvasEndMinute ~/ 60;
+    final now = nowMinutes;
+    final showNow =
+        now != null && now >= canvasStartMinute && now <= canvasEndMinute;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Positioned(
+          right: 0,
+          top: topPad,
+          bottom: 0,
+          child: Container(width: 1, color: const Color(0xFFE1E7EF)),
+        ),
+        for (var hour = firstHour; hour <= lastHour; hour++)
+          // Hide the hour label when the "now" chip would sit on top of it.
+          if (!showNow || ((hour * 60 - now).abs() > 14 / minuteHeight))
+            Positioned(
+              left: 0,
+              right: 5,
+              top: topPad + (hour * 60 - canvasStartMinute) * minuteHeight - 7,
+              child: Text(
+                _hourLabel(hour % 24).toUpperCase(),
+                textAlign: TextAlign.right,
+                maxLines: 1,
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF111827),
+                ),
               ),
             ),
-          ),
-          Positioned(
-            top: ((hour * 60 - canvasStartMinute) / 60) * hourHeight,
-            left: labelWidth + 12,
-            right: 0,
-            child: const Divider(height: 1, color: Color(0xFFE5E7EB)),
-          ),
-        ],
         if (showNow)
           Positioned(
-            top: ((nowMinutes - canvasStartMinute) / 60) * hourHeight,
-            left: labelWidth + 12,
-            right: 0,
-            child: Row(
-              children: [
-                Container(
-                  width: 8,
-                  height: 8,
-                  decoration: const BoxDecoration(
-                    color: Color(0xFFE11D48),
-                    shape: BoxShape.circle,
+            left: 0,
+            right: 3,
+            top: topPad + (now - canvasStartMinute) * minuteHeight - 8,
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                decoration: BoxDecoration(
+                  color: _timetableAccent,
+                  borderRadius: BorderRadius.circular(5),
+                ),
+                child: Text(
+                  _shortClockLabel(_minutesToTime(now)),
+                  maxLines: 1,
+                  style: const TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w900,
+                    color: Colors.white,
+                    height: 1.1,
                   ),
                 ),
-                const Expanded(
-                  child: Divider(height: 1, color: Color(0xFFE11D48)),
-                ),
-              ],
+              ),
             ),
           ),
       ],
@@ -887,164 +5520,348 @@ class _TimetableGrid extends StatelessWidget {
   }
 }
 
-class _PositionedTimetableCard extends StatelessWidget {
-  final _LanePlacement placement;
-  final int canvasStartMinute;
-  final double hourHeight;
-  final double canvasLeft;
-  final double canvasWidth;
-  final bool compact;
-  final ValueChanged<_TimetableEntry> onTap;
+class _MobileTimelineNowLine extends StatelessWidget {
+  final double top;
+  final double contentWidth;
 
-  const _PositionedTimetableCard({
-    required this.placement,
-    required this.canvasStartMinute,
-    required this.hourHeight,
-    required this.canvasLeft,
-    required this.canvasWidth,
-    required this.compact,
-    required this.onTap,
+  const _MobileTimelineNowLine({
+    required this.top,
+    required this.contentWidth,
   });
 
   @override
   Widget build(BuildContext context) {
-    const spacing = 8.0;
-    final entry = placement.entry;
-    final laneWidth =
-        (canvasWidth - spacing * (placement.laneCount - 1)) /
-        placement.laneCount;
-    final left = canvasLeft + placement.lane * (laneWidth + spacing);
-    final top = ((entry.startMinutes - canvasStartMinute) / 60) * hourHeight;
-    final height = (((entry.endMinutes - entry.startMinutes) / 60) * hourHeight)
-        .clamp(54.0, 240.0)
-        .toDouble();
-
     return Positioned(
-      top: top,
-      left: left,
-      width: laneWidth,
-      height: height,
-      child: _TimetableCard(
-        entry: entry,
-        compact: compact || laneWidth < 230 || height < 76,
-        dotOnly: laneWidth < 150 || height < 72,
-        showDetails: height >= 96 && laneWidth >= 260,
-        onTap: () => onTap(entry),
+      left: 0,
+      top: top - 4,
+      width: contentWidth,
+      child: IgnorePointer(
+        child: Row(
+          children: [
+            Container(
+              width: 9,
+              height: 9,
+              decoration: const BoxDecoration(
+                color: _timetableAccent,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const Expanded(
+              child: Divider(
+                height: 1,
+                thickness: 1.4,
+                color: _timetableAccent,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-class _TimetableCard extends StatelessWidget {
+class _MobileTimelineEntryCard extends StatelessWidget {
   final _TimetableEntry entry;
+  final String mode;
   final bool compact;
-  final bool dotOnly;
-  final bool showDetails;
   final VoidCallback onTap;
 
-  const _TimetableCard({
+  const _MobileTimelineEntryCard({
     required this.entry,
-    required this.compact,
-    required this.dotOnly,
-    required this.showDetails,
+    required this.mode,
+    this.compact = false,
     required this.onTap,
   });
+
+  String get _resourceLabel =>
+      mode == 'rooms' ? entry.roomName : entry.staffName;
 
   @override
   Widget build(BuildContext context) {
     final style = _statusStyle(entry);
-    final dense = compact || !showDetails;
-    final serviceLabel = dotOnly && dense
-        ? entry.priceLabel
-        : '${entry.serviceName} - ${entry.priceLabel}';
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         child: Container(
-          padding: EdgeInsets.symmetric(
-            horizontal: dense ? 8 : 12,
-            vertical: dense ? 6 : 10,
-          ),
+          alignment: compact ? Alignment.centerLeft : null,
+          padding: compact
+              ? const EdgeInsets.symmetric(horizontal: 10, vertical: 5)
+              : const EdgeInsets.all(9),
           decoration: BoxDecoration(
             color: style.background,
-            borderRadius: BorderRadius.circular(12),
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(color: style.border),
             boxShadow: const [
               BoxShadow(
+                color: Color(0x0D000000),
+                blurRadius: 6,
+                offset: Offset(0, 2),
+              ),
+            ],
+          ),
+          child: compact ? _buildCompact(style) : _buildFull(style),
+        ),
+      ),
+    );
+  }
+
+  /// One-line layout for bookings too short to fit the full card.
+  Widget _buildCompact(_StatusStyle style) {
+    return Row(
+      children: [
+        Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: style.color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            '${entry.customerName} · ${entry.serviceName}',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF111827),
+            ),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          _meridiemRangeLabel(entry.startTime, entry.endTime),
+          maxLines: 1,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF4B5563),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildFull(_StatusStyle style) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        CircleAvatar(
+          radius: 18,
+          backgroundColor: style.color.withValues(alpha: 0.13),
+          child: Text(
+            _compactInitials(entry.customerName),
+            style: TextStyle(
+              color: style.color,
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+        const SizedBox(width: 9),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Text(
+                      entry.customerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  _MobileStatusPill(entry: entry),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Text(
+                entry.serviceName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF374151),
+                ),
+              ),
+              const SizedBox(height: 5),
+              _MobileMetaLine(
+                icon: Icons.schedule_outlined,
+                label:
+                    '${_meridiemRangeLabel(entry.startTime, entry.endTime)}  -  $_resourceLabel',
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MobileStatusPill extends StatelessWidget {
+  final _TimetableEntry entry;
+
+  const _MobileStatusPill({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    final style = _statusStyle(entry);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+      decoration: BoxDecoration(
+        color: style.color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: style.color.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: style.color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            entry.operationalStatus,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
+              color: style.color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MobileMetaLine extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _MobileMetaLine({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 13, color: const Color(0xFF6B7280)),
+        const SizedBox(width: 5),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF4B5563),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MobileTimelineCollapsedBand extends StatelessWidget {
+  final List<_TimetableEntry> band;
+  final int startMinutes;
+  final int endMinutes;
+  final VoidCallback onExpand;
+
+  const _MobileTimelineCollapsedBand({
+    required this.band,
+    required this.startMinutes,
+    required this.endMinutes,
+    required this.onExpand,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final inProgress = band.where((entry) => entry.isInProgress).length;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onExpand,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.all(13),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: const Color(0xFFCBD5E1)),
+            boxShadow: const [
+              BoxShadow(
                 color: Color(0x10000000),
-                blurRadius: 10,
-                offset: Offset(0, 4),
+                blurRadius: 6,
+                offset: Offset(0, 2),
               ),
             ],
           ),
           child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Container(
-                width: 4,
-                height: double.infinity,
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
                 decoration: BoxDecoration(
-                  color: style.color,
-                  borderRadius: BorderRadius.circular(20),
+                  color: const Color(0xFF0F766E).withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                child: Text(
+                  '${band.length}',
+                  style: const TextStyle(
+                    color: Color(0xFF0F766E),
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                  ),
                 ),
               ),
-              SizedBox(width: dense ? 8 : 10),
+              const SizedBox(width: 12),
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: dense
-                      ? MainAxisAlignment.center
-                      : MainAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            entry.customerName,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: dense ? 13 : 15,
-                              fontWeight: FontWeight.w900,
-                              color: const Color(0xFF111827),
-                            ),
-                          ),
-                        ),
-                        _TinyBadge(
-                          label: dotOnly ? '' : entry.operationalStatus,
-                          color: style.color,
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: dense ? 2 : 5),
                     Text(
-                      serviceLabel,
+                      '${_meridiemRangeLabel(_minutesToTime(startMinutes), _minutesToTime(endMinutes))} collapsed',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: dense ? 11 : 12,
-                        fontWeight: FontWeight.w700,
-                        color: const Color(0xFF4B5563),
+                      style: const TextStyle(
+                        color: Color(0xFF111827),
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
                       ),
                     ),
-                    if (showDetails) ...[
-                      const SizedBox(height: 6),
-                      Text(
-                        '${entry.timeRange} · ${entry.staffName} · ${entry.roomName}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: Color(0xFF6B7280),
-                        ),
+                    const SizedBox(height: 3),
+                    Text(
+                      inProgress > 0
+                          ? '$inProgress in progress - tap to expand'
+                          : '${band.length} orders at this time - tap to expand',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFF64748B),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
                       ),
-                    ],
+                    ),
                   ],
                 ),
               ),
+              const Icon(Icons.expand_more, color: Color(0xFF64748B)),
             ],
           ),
         ),
@@ -1053,43 +5870,513 @@ class _TimetableCard extends StatelessWidget {
   }
 }
 
-class _TinyBadge extends StatelessWidget {
-  final String label;
-  final Color color;
+class _MobileCollapseHandle extends StatelessWidget {
+  final VoidCallback onTap;
 
-  const _TinyBadge({required this.label, required this.color});
+  const _MobileCollapseHandle({required this.onTap});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: label.isEmpty ? 5 : 8,
-        vertical: 5,
+    return TextButton.icon(
+      onPressed: onTap,
+      icon: const Icon(Icons.expand_less, size: 16),
+      label: const Text('Collapse group'),
+      style: TextButton.styleFrom(
+        foregroundColor: const Color(0xFF0F766E),
+        textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w800),
       ),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(999),
-      ),
+    );
+  }
+}
+
+String _mobileBandKey(List<_TimetableEntry> band) => band.map((e) => e.id).join(',');
+
+int _groupStart(List<_TimetableEntry> group) =>
+    group.map((e) => e.startMinutes).reduce((a, b) => a < b ? a : b);
+
+int _groupEnd(List<_TimetableEntry> group) =>
+    group.map((e) => e.cleanupEndMinutes).reduce((a, b) => a > b ? a : b);
+
+// ignore: unused_element
+class _MobileHourDivider extends StatelessWidget {
+  final int hour;
+
+  const _MobileHourDivider({required this.hour});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 16, bottom: 10),
       child: Row(
-        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _hourLabel(hour).toUpperCase(),
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF9CA3AF),
+              letterSpacing: 0.4,
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Expanded(child: Divider(height: 1, color: Color(0xFFE5E7EB))),
+        ],
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
+class _MobileNowMarker extends StatelessWidget {
+  const _MobileNowMarker();
+
+  @override
+  Widget build(BuildContext context) {
+    final label = DateFormat('h:mm a').format(DateTime.now());
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
         children: [
           Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            width: 8,
+            height: 8,
+            decoration: const BoxDecoration(
+              color: _timetableAccent,
+              shape: BoxShape.circle,
+            ),
           ),
-          if (label.isNotEmpty) ...[
-            const SizedBox(width: 5),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w900,
-                color: color,
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w900,
+              color: _timetableAccent,
+            ),
+          ),
+          const SizedBox(width: 8),
+          const Expanded(
+            child: Divider(height: 1, color: _timetableAccent, thickness: 1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
+class _MobileBandRow extends StatelessWidget {
+  final List<_TimetableEntry> band;
+  final String mode;
+  final VoidCallback? onCollapse;
+  final ValueChanged<_TimetableEntry> onTap;
+
+  const _MobileBandRow({
+    required this.band,
+    required this.mode,
+    required this.onCollapse,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (band.length == 1) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: _MobileEntryCard(
+          entry: band.first,
+          mode: mode,
+          width: double.infinity,
+          onTap: () => onTap(band.first),
+        ),
+      );
+    }
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.groups_outlined,
+                size: 14,
+                color: Color(0xFF6B7280),
+              ),
+              const SizedBox(width: 6),
+              Text(
+                '${band.length} running at once',
+                style: const TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF6B7280),
+                ),
+              ),
+              const Spacer(),
+              if (onCollapse != null)
+                GestureDetector(
+                  onTap: onCollapse,
+                  child: const Text(
+                    'Collapse',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 152,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: band.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 10),
+              itemBuilder: (context, i) => _MobileEntryCard(
+                entry: band[i],
+                mode: mode,
+                width: 250,
+                onTap: () => onTap(band[i]),
               ),
             ),
-          ],
+          ),
         ],
+      ),
+    );
+  }
+}
+
+// ignore: unused_element
+class _MobileCollapsedBand extends StatelessWidget {
+  final List<_TimetableEntry> band;
+  final int startMinutes;
+  final VoidCallback onExpand;
+
+  const _MobileCollapsedBand({
+    required this.band,
+    required this.startMinutes,
+    required this.onExpand,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final inProgress = band.where((e) => e.isInProgress).length;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onExpand,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1B6B72).withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  alignment: Alignment.center,
+                  child: Text(
+                    '${band.length}',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${_clockLabel(_minutesToTime(startMinutes))} - ${band.length} services running',
+                        style: const TextStyle(
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        inProgress > 0
+                            ? '$inProgress in progress now'
+                            : 'Tap to view all',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.expand_more, color: Color(0xFF6B7280)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileEntryCard extends StatelessWidget {
+  final _TimetableEntry entry;
+  final String mode;
+  final double width;
+  final VoidCallback onTap;
+
+  const _MobileEntryCard({
+    required this.entry,
+    required this.mode,
+    required this.width,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final style = _statusStyle(entry);
+    final secondary = mode == 'staff' ? entry.roomName : entry.staffName;
+    return SizedBox(
+      width: width,
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            padding: const EdgeInsets.all(13),
+            decoration: BoxDecoration(
+              color: style.background,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: style.border),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        entry.customerName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 15.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF111827),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _MobileStatusPill(entry: entry),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  entry.serviceName,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF4B5563),
+                  ),
+                ),
+                const SizedBox(height: 7),
+                Text(
+                  '${_shortClockLabel(entry.startTime)} - ${_clockLabel(entry.endTime)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF4B5563),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Row(
+                  children: [
+                    Icon(
+                      mode == 'staff'
+                          ? Icons.meeting_room_outlined
+                          : Icons.person_outline,
+                      size: 13,
+                      color: const Color(0xFF9CA3AF),
+                    ),
+                    const SizedBox(width: 4),
+                    Expanded(
+                      child: Text(
+                        secondary,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF6B7280),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (entry.bufferAfterMinutes > 0) ...[
+                  const SizedBox(height: 5),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF1F3F5),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFFD8DCE1)),
+                    ),
+                    child: Text(
+                      '+${entry.bufferAfterMinutes} min buffer until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF6B7280),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileResourceChip extends StatelessWidget {
+  final _TimetableResource resource;
+  final List<_TimetableEntry> entries;
+  final int nowMinutes;
+  final bool selectedToday;
+  final bool selected;
+  final VoidCallback? onTap;
+
+  const _MobileResourceChip({
+    required this.resource,
+    required this.entries,
+    required this.nowMinutes,
+    required this.selectedToday,
+    this.selected = false,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final matched = entries
+        .where((entry) => !entry.isVoided && resource.matches(entry))
+        .toList();
+    final status = _resourceStatus(
+      resource: resource,
+      entries: matched,
+      nowMinutes: nowMinutes,
+      selectedToday: selectedToday,
+    );
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          width: 128,
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFFEDF7F6) : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: selected
+                  ? const Color(0xFF176B68)
+                  : const Color(0xFFDCE3E7),
+              width: selected ? 1.5 : 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                children: [
+                  CircleAvatar(
+                    radius: 15,
+                    backgroundColor: status.color.withValues(alpha: 0.13),
+                    child: resource.avatarIcon != null
+                        ? Icon(
+                            resource.avatarIcon,
+                            size: 15,
+                            color: status.color,
+                          )
+                        : Text(
+                            resource.avatarText,
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w900,
+                              color: status.color,
+                            ),
+                          ),
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      resource.name,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF111827),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const Spacer(),
+              Row(
+                children: [
+                  Container(
+                    width: 7,
+                    height: 7,
+                    decoration: BoxDecoration(
+                      color: status.color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                  const SizedBox(width: 5),
+                  Expanded(
+                    child: Text(
+                      status.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w800,
+                        color: status.color,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1158,7 +6445,7 @@ class _TimetableDetailCard extends StatelessWidget {
       padding: EdgeInsets.all(compact ? 20 : 22),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(compact ? 18 : 16),
+        borderRadius: BorderRadius.circular(8),
         boxShadow: const [
           BoxShadow(
             color: Color(0x26000000),
@@ -1206,7 +6493,7 @@ class _TimetableDetailCard extends StatelessWidget {
                         entry.customerName,
                         style: const TextStyle(
                           fontSize: 19,
-                          fontWeight: FontWeight.w900,
+                          fontWeight: FontWeight.w800,
                           color: Color(0xFF111827),
                         ),
                       ),
@@ -1248,9 +6535,25 @@ class _TimetableDetailCard extends StatelessWidget {
             ),
             _DetailRow(
               icon: Icons.schedule_outlined,
-              label: 'Time',
-              title: entry.durationLabel,
+              // A walk-in has a single service time (no prior reservation),
+              // so it reads as "Start time" rather than "Booked time".
+              label: entry.isWalkIn ? 'Start time' : 'Booked time',
+              title: entry.bookedTimeRange,
+              subtitle: entry.bufferAfterMinutes > 0
+                  ? entry.cleanupUntilLabel
+                  : null,
             ),
+            // Actual start/complete timing is a booking concept; walk-ins run
+            // for their booked window and complete automatically.
+            if (!entry.isWalkIn && entry.actualStartedAt != null)
+              _DetailRow(
+                icon: Icons.play_circle_outline,
+                label: 'Actual service time',
+                title: 'Started ${entry.actualStartLabel}',
+                subtitle: entry.actualCompletedAt == null
+                    ? 'Completion not recorded yet'
+                    : 'Completed ${entry.actualCompletedLabel}',
+              ),
             _DetailRow(
               icon: Icons.payments_outlined,
               label: 'Price',
@@ -1266,7 +6569,12 @@ class _TimetableDetailCard extends StatelessWidget {
               _DetailRow(
                 icon: Icons.credit_card_outlined,
                 label: 'Payment',
-                title: entry.paymentMethod,
+                title: entry.paymentMethod.isEmpty
+                    ? 'Paid'
+                    : entry.paymentMethod,
+                subtitle: entry.paymentStatus.isEmpty
+                    ? null
+                    : entry.paymentStatus.toUpperCase(),
               ),
               _DetailRow(
                 icon: Icons.account_balance_wallet_outlined,
@@ -1300,7 +6608,7 @@ class _PanelStatusBadge extends StatelessWidget {
         style: TextStyle(
           color: color,
           fontSize: 13,
-          fontWeight: FontWeight.w900,
+          fontWeight: FontWeight.w800,
         ),
       ),
     );
@@ -1338,7 +6646,7 @@ class _DetailRow extends StatelessWidget {
                   style: const TextStyle(
                     color: Color(0xFF6B7280),
                     fontSize: 12,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
                 const SizedBox(height: 3),
@@ -1347,7 +6655,7 @@ class _DetailRow extends StatelessWidget {
                   style: const TextStyle(
                     color: Color(0xFF111827),
                     fontSize: 14,
-                    fontWeight: FontWeight.w900,
+                    fontWeight: FontWeight.w800,
                   ),
                 ),
                 if (subtitle != null) ...[
@@ -1361,6 +6669,168 @@ class _DetailRow extends StatelessWidget {
                     ),
                   ),
                 ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableSettingsSheet extends StatelessWidget {
+  final int openMinute;
+  final int closeMinute;
+
+  const _TimetableSettingsSheet({
+    required this.openMinute,
+    required this.closeMinute,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(maxWidth: 460),
+          margin: const EdgeInsets.all(14),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x26000000),
+                blurRadius: 24,
+                offset: Offset(0, 10),
+              ),
+            ],
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE8F5F5),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: const Icon(
+                      Icons.settings_outlined,
+                      color: Color(0xFF0F766E),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Timetable settings',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF111827),
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          'Daily grid display rules',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF6B7280),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => Navigator.pop(context),
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              _SettingsInfoRow(
+                icon: Icons.access_time,
+                title: 'Displayed hours',
+                value:
+                    '${_clockLabel(_minutesToTime(openMinute))} - ${_clockLabel(_minutesToTime(closeMinute))}',
+              ),
+              const _SettingsInfoRow(
+                icon: Icons.people_alt_outlined,
+                title: 'Rows',
+                value: 'Every therapist or room is shown, even when free.',
+              ),
+              const _SettingsInfoRow(
+                icon: Icons.cleaning_services_outlined,
+                title: 'Cleanup buffer',
+                value:
+                    'Shown as a separate block after the service, but still blocks staff and room availability.',
+              ),
+              const _SettingsInfoRow(
+                icon: Icons.meeting_room_outlined,
+                title: 'Room / zone capacity',
+                value:
+                    'Zones with more than one slot can host multiple bookings at once, shown stacked side by side.',
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _SettingsInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String value;
+
+  const _SettingsInfoRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: const Color(0xFF0F766E)),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF111827),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF6B7280),
+                    height: 1.35,
+                  ),
+                ),
               ],
             ),
           ),
@@ -1387,7 +6857,7 @@ class _TimetableStateCard extends StatelessWidget {
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(16),
+        borderRadius: BorderRadius.circular(8),
         border: Border.all(color: const Color(0xFFE5E7EB)),
       ),
       child: Column(
@@ -1396,7 +6866,7 @@ class _TimetableStateCard extends StatelessWidget {
           const SizedBox(height: 10),
           Text(
             title,
-            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w900),
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: 6),
           Text(
@@ -1414,70 +6884,19 @@ class _TimetableStateCard extends StatelessWidget {
   }
 }
 
-class _LanePlacement {
-  final _TimetableEntry entry;
-  final int lane;
-  final int laneCount;
-
-  const _LanePlacement({
-    required this.entry,
-    required this.lane,
-    required this.laneCount,
-  });
-}
-
-List<_LanePlacement> _assignLanes(List<_TimetableEntry> entries) {
-  final sorted = [...entries]
-    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
-  final placements = <_LanePlacement>[];
-  var group = <_TimetableEntry>[];
-  var groupEnd = 0;
-
-  void flush() {
-    if (group.isEmpty) return;
-    final laneEnds = <int>[];
-    final laneById = <String, int>{};
-    for (final entry in group) {
-      var lane = laneEnds.indexWhere((end) => entry.startMinutes >= end);
-      if (lane == -1) {
-        lane = laneEnds.length;
-        laneEnds.add(entry.endMinutes);
-      } else {
-        laneEnds[lane] = entry.endMinutes;
-      }
-      laneById[entry.id] = lane;
-    }
-    for (final entry in group) {
-      placements.add(
-        _LanePlacement(
-          entry: entry,
-          lane: laneById[entry.id] ?? 0,
-          laneCount: laneEnds.length,
-        ),
-      );
-    }
-  }
-
-  for (final entry in sorted) {
-    if (group.isEmpty || entry.startMinutes < groupEnd) {
-      group.add(entry);
-      if (entry.endMinutes > groupEnd) groupEnd = entry.endMinutes;
-    } else {
-      flush();
-      group = [entry];
-      groupEnd = entry.endMinutes;
-    }
-  }
-  flush();
-  return placements;
-}
-
 _StatusStyle _statusStyle(_TimetableEntry entry) {
+  if (entry.isVoided || entry.isCancelled) {
+    return const _StatusStyle(
+      color: Color(0xFF6B7280),
+      background: Color(0xFFF3F4F6),
+      border: Color(0xFFD1D5DB),
+    );
+  }
   if (entry.isInProgress) {
     return const _StatusStyle(
-      color: Color(0xFF0EA5E9),
-      background: Color(0xFFEFF8FF),
-      border: Color(0xFF7DD3FC),
+      color: Color(0xFFF97316),
+      background: Color(0xFFFFF7ED),
+      border: Color(0xFFFED7AA),
     );
   }
   if (entry.isCompleted) {
@@ -1501,6 +6920,142 @@ String _initials(String value) {
       .where((part) => part.isNotEmpty);
   final letters = parts.take(2).map((part) => part[0]).join();
   return letters.isEmpty ? '?' : letters.toUpperCase();
+}
+
+String _compactInitials(String value) {
+  final display = _displayCustomerName(value);
+  if (display.toLowerCase() == 'guest') return 'G';
+  final parts = display
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) return '?';
+  if (parts.length == 1) return parts.first[0].toUpperCase();
+  return '${parts.first[0]}.${parts.last[0]}'.toUpperCase();
+}
+
+int _readServiceCount(Object? raw, String fallbackLabel) {
+  final names = <String>{};
+
+  void addName(Object? value) {
+    if (value == null) return;
+    if (value is Map) {
+      final name =
+          asString(value['name']).isNotEmpty
+              ? asString(value['name'])
+              : asString(value['serviceName']);
+      if (name.trim().isNotEmpty) names.add(name.trim().toLowerCase());
+      return;
+    }
+    final name = value.toString().trim();
+    if (name.isNotEmpty) names.add(name.toLowerCase());
+  }
+
+  if (raw is Iterable) {
+    for (final item in raw) {
+      addName(item);
+    }
+  } else if (raw is String && raw.trim().isNotEmpty) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Iterable) {
+        for (final item in decoded) {
+          addName(item);
+        }
+      } else {
+        addName(decoded);
+      }
+    } catch (_) {
+      addName(raw);
+    }
+  }
+
+  if (names.isNotEmpty) return names.length;
+  final fallbackParts = fallbackLabel
+      .split(RegExp(r'\s*(?:,|\+|/)\s*'))
+      .where((part) => part.trim().isNotEmpty)
+      .toList();
+  return fallbackParts.length > 1 ? fallbackParts.length : 1;
+}
+
+String _serviceCountLabel(int count) {
+  return count == 1 ? '1 service' : '$count services';
+}
+
+String _compactDurationLabel(int minutes) {
+  final safe = minutes.clamp(0, 24 * 60).toInt();
+  if (safe < 60) return '${safe}m';
+  final hours = safe ~/ 60;
+  final mins = safe % 60;
+  if (mins == 0) return '${hours}h';
+  return '${hours}h ${mins}m';
+}
+
+String _timelineServiceLabel(_TimetableEntry entry, double width) {
+  if (entry.serviceCount > 1 &&
+      (width < 180 || entry.serviceName.length > 26)) {
+    return _serviceCountLabel(entry.serviceCount);
+  }
+  return entry.serviceName;
+}
+
+String _shortCustomerName(String value) {
+  final display = _displayCustomerName(value);
+  if (display.length <= 10) return display;
+  final parts = display
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.length >= 2) return '${parts.first} ${parts.last[0]}.';
+  return display;
+}
+
+String _titleCase(String value) {
+  final words = value
+      .split(RegExp(r'[_\s]+'))
+      .where((word) => word.isNotEmpty)
+      .map((word) => '${word[0].toUpperCase()}${word.substring(1)}');
+  final joined = words.join(' ');
+  return joined.isEmpty ? 'Room' : joined;
+}
+
+Color _avatarColor(String value) {
+  const colors = [
+    Color(0xFF2563EB),
+    Color(0xFF0F766E),
+    Color(0xFF7C3AED),
+    Color(0xFFDB2777),
+    Color(0xFF0891B2),
+    Color(0xFF059669),
+  ];
+  if (value.trim().isEmpty) return colors.first;
+  final hash = value.codeUnits.fold<int>(0, (total, unit) => total + unit);
+  return colors[hash % colors.length];
+}
+
+IconData _roomIcon(String value) {
+  final type = value.toLowerCase();
+  if (type.contains('foot')) return Icons.directions_walk_outlined;
+  if (type.contains('face')) return Icons.face_retouching_natural_outlined;
+  if (type.contains('couple') || type.contains('group')) {
+    return Icons.groups_outlined;
+  }
+  if (type.contains('vip')) return Icons.stars_outlined;
+  if (type.contains('body') || type.contains('massage')) {
+    return Icons.spa_outlined;
+  }
+  return Icons.meeting_room_outlined;
+}
+
+Color _roomAccentColor(String value) {
+  final type = value.toLowerCase();
+  if (type.contains('foot')) return const Color(0xFF059669);
+  if (type.contains('upper')) return const Color(0xFF2563EB);
+  if (type.contains('lower')) return const Color(0xFF7C3AED);
+  if (type.contains('face')) return const Color(0xFFDB2777);
+  if (type.contains('vip')) return const Color(0xFFF97316);
+  return const Color(0xFF0F766E);
 }
 
 class _StatusStyle {
@@ -1539,6 +7094,13 @@ int _timeToMinutes(String time) {
   return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }
 
+String _minutesToTime(int minutes) {
+  final normalized = minutes % (24 * 60);
+  final hour = (normalized ~/ 60).toString().padLeft(2, '0');
+  final minute = (normalized % 60).toString().padLeft(2, '0');
+  return '$hour:$minute';
+}
+
 int _floorToHour(int minutes) => (minutes ~/ 60) * 60;
 
 int _ceilToHour(int minutes) => ((minutes + 59) ~/ 60) * 60;
@@ -1554,6 +7116,29 @@ String _clockLabel(String time) {
   final hour = minutes ~/ 60;
   final minute = minutes % 60;
   return DateFormat('h:mm a').format(DateTime(2026, 1, 1, hour, minute));
+}
+
+String _shortClockLabel(String time) {
+  final minutes = _timeToMinutes(time);
+  final hour = minutes ~/ 60;
+  final minute = minutes % 60;
+  return DateFormat('h:mm').format(DateTime(2026, 1, 1, hour, minute));
+}
+
+/// Renders a start-end range with AM/PM markers, dropping the leading
+/// marker when both ends share the same period (e.g. "3:22 - 4:22 PM")
+/// so the range stays compact instead of repeating "PM" twice.
+String _meridiemRangeLabel(String start, String end) {
+  final startMinutes = _timeToMinutes(start) % (24 * 60);
+  final endMinutes = _timeToMinutes(end) % (24 * 60);
+  final startPeriod = startMinutes < 720 ? 'AM' : 'PM';
+  final endPeriod = endMinutes < 720 ? 'AM' : 'PM';
+  final startDigits = _shortClockLabel(start);
+  final endDigits = _shortClockLabel(end);
+  if (startPeriod == endPeriod) {
+    return '$startDigits - $endDigits $endPeriod';
+  }
+  return '$startDigits $startPeriod - $endDigits $endPeriod';
 }
 
 String _hourLabel(int hour) {

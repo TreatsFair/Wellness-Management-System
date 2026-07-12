@@ -8,5 +8,6 @@
         "./thebest-app/supabase/functions/booking-api"
     ],
     "deno.importMap": "./thebest-app/supabase/functions/booking-api/deno.json",
-    "deno.path": "C:/Users/chinh/AppData/Local/Microsoft/WinGet/Links/deno.exe"
+    "deno.path": "C:/Users/chinh/AppData/Local/Microsoft/WinGet/Links/deno.exe",
+    "liveServer.settings.port": 5501
 }

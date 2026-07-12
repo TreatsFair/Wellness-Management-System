@@ -74,6 +74,7 @@ const state = {
   loadingServices: false,
   loadingTimes: false,
   hold: null,
+  appointment: null,
 };
 
 const panels = [...document.querySelectorAll("[data-panel]")];
@@ -549,6 +550,10 @@ function showConfirmation({ preview = false, hold = null } = {}) {
     eyebrow.textContent = "Preview mode";
     title.textContent = "The booking form is ready.";
     message.textContent = "Configure Supabase to create a real 15-minute hold. No appointment or payment was created.";
+  } else if (state.appointment) {
+    eyebrow.textContent = "Booking confirmed";
+    title.textContent = "Your appointment is booked.";
+    message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. Your appointment is confirmed. We look forward to seeing you.`;
   } else {
     const expires = new Date(hold.expires_at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
     eyebrow.textContent = "Time temporarily reserved";
@@ -557,6 +562,114 @@ function showConfirmation({ preview = false, hold = null } = {}) {
   }
   document.querySelector("#confirmation-dialog").showModal();
 }
+
+// --- Payment return flow -----------------------------------------------
+// After Billplz redirects the browser back here (?bp_token=...), we poll the
+// hold's status rather than trusting the redirect's own query params — the
+// callback (verified server-side) is the source of truth, and its arrival
+// isn't guaranteed to happen before the browser redirect does.
+let paymentPollTimer = null;
+let paymentPollAttempts = 0;
+const PAYMENT_POLL_INTERVAL_MS = 2000;
+const PAYMENT_POLL_MAX_ATTEMPTS = 60; // ~2 minutes
+
+function setDialogIcon(kind) {
+  const mark = document.querySelector(".success-mark");
+  mark.classList.remove("is-pending", "is-failed");
+  if (kind === "pending") {
+    mark.classList.add("is-pending");
+    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>';
+  } else if (kind === "failed") {
+    mark.classList.add("is-failed");
+    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8" /></svg>';
+  } else {
+    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>';
+  }
+}
+
+function showPaymentStatus(kind, { reference = "" } = {}) {
+  const eyebrow = document.querySelector("#confirmation-eyebrow");
+  const title = document.querySelector("#confirmation-title");
+  const message = document.querySelector("#confirmation-message");
+  const closeButton = document.querySelector("#close-dialog");
+  const dialog = document.querySelector("#confirmation-dialog");
+  const ref = reference ? reference.slice(0, 8).toUpperCase() : "";
+
+  dialog.dataset.paymentState = kind;
+  closeButton.style.display = kind === "checking" ? "none" : "";
+
+  if (kind === "checking") {
+    setDialogIcon("pending");
+    eyebrow.textContent = "Confirming your payment";
+    title.textContent = "Just a moment…";
+    message.textContent = "We're confirming your payment with Billplz. This usually takes a few seconds.";
+  } else if (kind === "confirmed") {
+    setDialogIcon("success");
+    eyebrow.textContent = "Booking confirmed";
+    title.textContent = "Your appointment is booked.";
+    message.textContent = ref
+      ? `Reference ${ref}. Payment received — we look forward to seeing you.`
+      : "Payment received — we look forward to seeing you.";
+    closeButton.textContent = "Done";
+    closeButton.dataset.action = "home";
+  } else if (kind === "failed") {
+    setDialogIcon("failed");
+    eyebrow.textContent = "Payment not completed";
+    title.textContent = "We couldn't confirm your payment.";
+    message.textContent = "Your time slot was not reserved. Please try booking again.";
+    closeButton.textContent = "Try booking again";
+    closeButton.dataset.action = "retry";
+  } else if (kind === "timeout") {
+    setDialogIcon("pending");
+    eyebrow.textContent = "Still confirming";
+    title.textContent = "This is taking longer than expected.";
+    message.textContent = "Your payment may still be processing. Check again in a moment, or contact us if this continues.";
+    closeButton.textContent = "Check again";
+    closeButton.dataset.action = "recheck";
+  }
+
+  if (!dialog.open) dialog.showModal();
+}
+
+function stopPaymentPoll() {
+  if (paymentPollTimer) clearTimeout(paymentPollTimer);
+  paymentPollTimer = null;
+}
+
+async function pollPaymentStatus(token) {
+  stopPaymentPoll();
+  paymentPollAttempts += 1;
+  try {
+    const payload = await api.getHoldStatus(token);
+    const status = payload.hold?.status;
+    if (status === "confirmed") {
+      showPaymentStatus("confirmed", { reference: token });
+      return;
+    }
+    if (status === "payment_failed" || status === "cancelled" || status === "expired") {
+      showPaymentStatus("failed");
+      return;
+    }
+  } catch (_error) {
+    // Transient network error — keep polling rather than ending the flow early.
+  }
+  if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS) {
+    showPaymentStatus("timeout");
+    return;
+  }
+  paymentPollTimer = setTimeout(() => pollPaymentStatus(token), PAYMENT_POLL_INTERVAL_MS);
+}
+
+function initializePaymentReturn() {
+  const token = new URLSearchParams(window.location.search).get("bp_token");
+  if (!token) return false;
+  document.querySelector(".booking-shell").style.display = "none";
+  paymentPollAttempts = 0;
+  showPaymentStatus("checking");
+  pollPaymentStatus(token);
+  return true;
+}
+// -------------------------------------------------------------------------
 
 async function submitHold() {
   if (!detailsForm.reportValidity() || !state.time) return;
@@ -581,7 +694,30 @@ async function submitHold() {
       website: form.get("website"),
     });
     state.hold = payload.hold;
-    clearNotice();
+    state.appointment = null;
+
+    let holdNoticeMessage = null;
+    try {
+      nextButton.textContent = "Redirecting to payment…";
+      const pay = await api.payHold(payload.hold.token);
+      window.location.href = pay.url;
+      return; // Leaving the page for Billplz's hosted payment page.
+    } catch (payError) {
+      // Payment isn't configured yet (e.g. still on Billplz sandbox setup) —
+      // fall back to the test auto-confirm path if it's explicitly enabled.
+      if (window.BOOKING_CONFIG?.testAutoConfirm) {
+        try {
+          const confirmed = await api.confirmHold(payload.hold.token);
+          state.appointment = confirmed.appointment;
+        } catch (error) {
+          holdNoticeMessage = error.message || "The time was reserved, but automatic confirmation failed.";
+        }
+      } else {
+        holdNoticeMessage = payError.message || "Unable to start payment. Please try again.";
+      }
+    }
+    if (holdNoticeMessage) showNotice(holdNoticeMessage, true);
+    else clearNotice();
     showConfirmation({ hold: payload.hold });
   } catch (error) {
     showNotice(error.message || "Unable to reserve this time.", true);
@@ -656,9 +792,38 @@ document.addEventListener("keydown", (event) => {
 window.addEventListener("resize", () => {
   if (window.innerWidth > 900 && summarySheet.classList.contains("is-open")) closeSummary();
 });
-document.querySelector("#close-dialog").addEventListener("click", () => document.querySelector("#confirmation-dialog").close());
+document.querySelector("#close-dialog").addEventListener("click", () => {
+  const dialog = document.querySelector("#confirmation-dialog");
+  const closeButton = document.querySelector("#close-dialog");
+  const action = closeButton.dataset.action;
+  if (action === "retry") {
+    window.location.href = "./booking.html";
+    return;
+  }
+  if (action === "recheck") {
+    const token = new URLSearchParams(window.location.search).get("bp_token");
+    if (token) {
+      stopPaymentPoll();
+      paymentPollAttempts = 0;
+      showPaymentStatus("checking");
+      pollPaymentStatus(token);
+    }
+    return;
+  }
+  if (action === "home") {
+    window.location.href = "./index.html";
+    return;
+  }
+  dialog.close();
+});
+document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => {
+  if (document.querySelector("#confirmation-dialog").dataset.paymentState === "checking") {
+    event.preventDefault();
+  }
+});
 
 async function initializeBooking() {
+  if (initializePaymentReturn()) return;
   services = [];
   renderServices();
   renderDates();

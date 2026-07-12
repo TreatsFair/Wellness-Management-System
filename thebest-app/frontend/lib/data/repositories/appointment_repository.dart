@@ -1,7 +1,7 @@
+import '../../core/services/payment_service.dart';
 import '../services/supabase_table_service.dart';
 import 'customer_repository.dart';
 import 'repository_utils.dart';
-import 'transaction_repository.dart';
 
 class AppointmentRepository {
   AppointmentRepository({SupabaseTableService? table})
@@ -100,14 +100,17 @@ class AppointmentRepository {
   }
 
   Future<Map<String, dynamic>> cancelAppointment(String id) {
-    return updateAppointment(id, {
-      'status': 'cancelled',
-    });
+    return updateAppointment(id, {'status': 'cancelled'});
+  }
+
+  Future<Map<String, dynamic>> voidAppointment(String id) {
+    return updateAppointment(id, {'status': 'voided'});
   }
 
   Future<Map<String, dynamic>> completeAppointment(String id) {
     return updateAppointment(id, {
       'status': 'completed',
+      'actualCompletedAt': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
@@ -137,7 +140,9 @@ class AppointmentRepository {
       if (!sameTherapist && !sameRoom) continue;
 
       final existingStart = timeToMinutes(asString(row['startTime'], '00:00'));
-      final existingEnd = timeToMinutes(asString(row['endTime'], '00:00'));
+      final existingEnd =
+          timeToMinutes(asString(row['endTime'], '00:00')) +
+          asInt(row['bufferAfterMinutes']);
       if (start < existingEnd && end > existingStart) {
         return true;
       }
@@ -146,6 +151,9 @@ class AppointmentRepository {
     return false;
   }
 
+  /// Updates the appointment to in_progress and records the sale atomically
+  /// (single DB transaction — see checkout_appointment_with_payment). Customer
+  /// creation stays a separate, non-financial step before the atomic write.
   Future<Map<String, dynamic>> checkoutAppointment({
     required String appointmentId,
     required Map<String, dynamic> appointmentUpdates,
@@ -159,27 +167,84 @@ class AppointmentRepository {
         newCustomerValues!,
       );
       customerId = asString(customer['id']);
-      appointmentUpdates['customerId'] = customerId;
-      transactionValues['customerId'] = customerId;
     }
 
-    await updateAppointment(appointmentId, {
-      ...appointmentUpdates,
-      'status': 'completed',
-    });
+    final result = await PaymentService.checkoutAppointmentWithPayment(
+      appointmentId: appointmentId,
+      customerId: customerId,
+      customerName: asString(transactionValues['customerName']),
+      customerPhone: asString(transactionValues['customerPhone']),
+      bookedDate: appointmentUpdates['bookedDate']?.toString(),
+      bookedStartTime: appointmentUpdates['bookedStartTime']?.toString(),
+      bookedEndTime: appointmentUpdates['bookedEndTime']?.toString(),
+      bookedStartAt: appointmentUpdates['bookedStartAt']?.toString(),
+      bookedEndAt: appointmentUpdates['bookedEndAt']?.toString(),
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+      transactionNotes: asString(transactionValues['notes']),
+    );
 
-    return TransactionRepository().createTransaction({
-      ...transactionValues,
-      'appointmentId': appointmentId,
-      'paymentStatus': transactionValues['paymentStatus'] ?? 'paid',
+    if (!result.success) {
+      throw Exception(result.message);
+    }
+    return {
+      'appointmentId': result.appointmentId,
+      'transactionId': result.transactionId,
+    };
+  }
+
+  Future<void> completeAppointmentGroup(Iterable<String> appointmentIds) async {
+    for (final id in appointmentIds) {
+      await completeAppointment(id);
+    }
+  }
+
+  Future<Map<String, dynamic>> startAppointment(
+    String id, {
+    DateTime? startedAt,
+  }) {
+    return updateAppointment(id, {
+      'status': 'in_progress',
+      'actualStartedAt': (startedAt ?? DateTime.now()).toUtc().toIso8601String(),
     });
   }
 
+  Future<void> startAppointmentGroup(
+    Iterable<String> appointmentIds, {
+    DateTime? startedAt,
+  }) async {
+    final timestamp = startedAt ?? DateTime.now();
+    for (final id in appointmentIds) {
+      await startAppointment(id, startedAt: timestamp);
+    }
+  }
+
+  Future<void> voidAppointmentGroup(String appointmentGroupId) async {
+    final rows = await _table.findBy(
+      'appointment_group_id',
+      appointmentGroupId,
+    );
+    for (final row in rows) {
+      final id = asString(row['id']);
+      if (id.isNotEmpty) {
+        await voidAppointment(id);
+      }
+    }
+  }
+
+  /// Updates every appointment in the group to in_progress and records ONE
+  /// sale covering the group, atomically (see checkout_appointment_group_with_payment).
   Future<Map<String, dynamic>> checkoutAppointmentGroup({
     required String appointmentGroupId,
     required List<String> appointmentIds,
     required Map<String, dynamic> appointmentUpdates,
     required Map<String, dynamic> transactionValues,
+    Map<String, Map<String, dynamic>> appointmentUpdatesById = const {},
     Map<String, dynamic>? newCustomerValues,
   }) async {
     String? customerId = asString(appointmentUpdates['customerId']);
@@ -189,22 +254,48 @@ class AppointmentRepository {
         newCustomerValues!,
       );
       customerId = asString(customer['id']);
-      appointmentUpdates['customerId'] = customerId;
-      transactionValues['customerId'] = customerId;
     }
 
-    for (final appointmentId in appointmentIds) {
-      await updateAppointment(appointmentId, {
-        ...appointmentUpdates,
-        'status': 'completed',
-      });
-    }
+    final perAppointmentUpdates = <String, Map<String, dynamic>>{
+      for (final entry in appointmentUpdatesById.entries)
+        entry.key: {
+          if (entry.value['bookedDate'] != null)
+            'booked_date': entry.value['bookedDate'],
+          if (entry.value['bookedStartTime'] != null)
+            'booked_start_time': entry.value['bookedStartTime'],
+          if (entry.value['bookedEndTime'] != null)
+            'booked_end_time': entry.value['bookedEndTime'],
+          if (entry.value['bookedStartAt'] != null)
+            'booked_start_at': entry.value['bookedStartAt'],
+          if (entry.value['bookedEndAt'] != null)
+            'booked_end_at': entry.value['bookedEndAt'],
+        },
+    };
 
-    return TransactionRepository().createTransaction({
-      ...transactionValues,
-      'appointmentGroupId': appointmentGroupId,
-      'paymentStatus': transactionValues['paymentStatus'] ?? 'paid',
-    });
+    final result = await PaymentService.checkoutAppointmentGroupWithPayment(
+      appointmentGroupId: appointmentGroupId,
+      appointmentIds: appointmentIds,
+      customerId: customerId,
+      customerName: asString(transactionValues['customerName']),
+      customerPhone: asString(transactionValues['customerPhone']),
+      perAppointmentUpdates: perAppointmentUpdates,
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+      transactionNotes: asString(transactionValues['notes']),
+    );
+
+    if (!result.success) {
+      throw Exception(result.message);
+    }
+    return {
+      'appointmentGroupId': result.appointmentGroupId,
+      'transactionId': result.transactionId,
+    };
   }
 
   Future<void> deleteAppointment(String id) => _table.delete(id);

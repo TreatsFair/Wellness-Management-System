@@ -3,9 +3,10 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'data/repositories/auth_repository.dart';
 import 'core/supabase/supabase_config.dart';
+import 'core/theme/app_theme.dart';
 import 'core/utils/responsive.dart';
 import 'screens/auth/login_screen.dart';
-import 'screens/dashboard/dashboard_screen.dart';
+import 'widgets/app_shell.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,12 +27,7 @@ class MyApp extends StatelessWidget {
     return MaterialApp(
       title: 'Treats',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        scaffoldBackgroundColor: const Color(0xFFF0F0F0),
-        useMaterial3: true,
-        visualDensity: VisualDensity.compact,
-        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      ),
+      theme: AppTheme.light,
       builder: (context, child) {
         final mediaQuery = MediaQuery.of(context);
         final scale = Responsive.uiScale(mediaQuery.size);
@@ -53,7 +49,7 @@ class MyApp extends StatelessWidget {
             initialData: authRepository.currentSession,
             builder: (context, snapshot) {
               if (snapshot.hasData) {
-                return const DashboardScreen();
+                return const AppShell();
               }
 
               return const LoginScreen();

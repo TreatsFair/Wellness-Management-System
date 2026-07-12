@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/services/csp_service.dart';
+import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
@@ -32,6 +33,22 @@ String _clockLabel(String time) {
   return DateFormat('h:mm a').format(DateTime(2026, 1, 1, hour, minute));
 }
 
+String _paymentMethodLabel(String value) {
+  switch (value.trim().toLowerCase()) {
+    case 'qr_code':
+      return 'QR Code';
+    case 'credit_card':
+    case 'card':
+      return 'Credit Card';
+    case 'debit_card':
+      return 'Debit Card';
+    case 'cash':
+      return 'Cash';
+    default:
+      return value.trim().isEmpty ? 'Payment recorded' : value.trim();
+  }
+}
+
 DateTime? _readDateTime(Object? value) {
   final raw = value?.toString().trim() ?? '';
   if (raw.isEmpty) return null;
@@ -42,6 +59,22 @@ int? _minutesFromDate(DateTime? value, DateTime baseDate) {
   if (value == null) return null;
   final base = DateTime(baseDate.year, baseDate.month, baseDate.day);
   return value.difference(base).inMinutes;
+}
+
+String _durationLabel(int minutes) {
+  final safe = minutes.clamp(0, 24 * 60);
+  if (safe < 60) return '$safe mins';
+  final hours = safe ~/ 60;
+  final mins = safe % 60;
+  if (mins == 0) return hours == 1 ? '1 hr' : '$hours hrs';
+  return '${hours}h ${mins}m';
+}
+
+String _genderLabel(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized == 'f' || normalized == 'female') return 'Female';
+  if (normalized == 'm' || normalized == 'male') return 'Male';
+  return value.trim();
 }
 
 String _hourLabel(int hour) {
@@ -83,9 +116,16 @@ class _ScheduleAppointment {
   final String endTime;
   final DateTime? startAt;
   final DateTime? endAt;
+  final String bookedDateKey;
+  final String bookedStartTime;
+  final String bookedEndTime;
+  final DateTime? actualStartedAt;
+  final int bufferAfterMinutes;
   final String status;
+  final String type;
   final String customerName;
   final String customerPhone;
+  final String customerGender;
   final String serviceId;
   final String serviceName;
   final String serviceDescription;
@@ -95,6 +135,10 @@ class _ScheduleAppointment {
   final String roomName;
   final String notes;
   final double price;
+  final String receiptNumber;
+  final String paymentMethod;
+  final String paymentStatus;
+  final double paidAmount;
   final List<Map<String, dynamic>> serviceItems;
   final Map<String, dynamic> therapistCommissionData;
 
@@ -108,9 +152,16 @@ class _ScheduleAppointment {
     required this.endTime,
     required this.startAt,
     required this.endAt,
+    required this.bookedDateKey,
+    required this.bookedStartTime,
+    required this.bookedEndTime,
+    required this.actualStartedAt,
+    required this.bufferAfterMinutes,
     required this.status,
+    required this.type,
     required this.customerName,
     required this.customerPhone,
+    required this.customerGender,
     required this.serviceId,
     required this.serviceName,
     required this.serviceDescription,
@@ -120,6 +171,10 @@ class _ScheduleAppointment {
     required this.roomName,
     required this.notes,
     required this.price,
+    required this.receiptNumber,
+    required this.paymentMethod,
+    required this.paymentStatus,
+    required this.paidAmount,
     required this.serviceItems,
     required this.therapistCommissionData,
   });
@@ -130,6 +185,7 @@ class _ScheduleAppointment {
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
+    Map<String, dynamic>? transaction,
   }) {
     final customerId = data['customerId']?.toString() ?? '';
     final customer = customers[customerId];
@@ -158,12 +214,31 @@ class _ScheduleAppointment {
       endTime: data['endTime']?.toString() ?? '10:00',
       startAt: _readDateTime(data['startAt']),
       endAt: _readDateTime(data['endAt']),
+      bookedDateKey:
+          data['bookedDate']?.toString() ?? data['date']?.toString() ?? dateKey,
+      bookedStartTime:
+          data['bookedStartTime']?.toString() ??
+          data['startTime']?.toString() ??
+          '09:00',
+      bookedEndTime:
+          data['bookedEndTime']?.toString() ??
+          data['endTime']?.toString() ??
+          '10:00',
+      actualStartedAt: _readDateTime(data['actualStartedAt']),
+      bufferAfterMinutes: _readInt(data['bufferAfterMinutes'], 0),
       status: data['status']?.toString().trim().toLowerCase() ?? 'pending',
+      type: data['type']?.toString().trim().toLowerCase() ?? '',
       customerName: customerName,
       customerPhone:
           data['customerPhone']?.toString() ??
           customer?['phone']?.toString() ??
           '-',
+      customerGender: _genderLabel(
+        data['customerGender']?.toString() ??
+            data['gender']?.toString() ??
+            customer?['gender']?.toString() ??
+            '',
+      ),
       serviceId: serviceId,
       serviceName:
           data['serviceName']?.toString() ??
@@ -183,6 +258,10 @@ class _ScheduleAppointment {
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
       notes: data['notes']?.toString() ?? '',
       price: _readDouble(data['totalPrice'] ?? data['price']),
+      receiptNumber: transaction?['receiptNumber']?.toString() ?? '',
+      paymentMethod: transaction?['paymentMethod']?.toString() ?? '',
+      paymentStatus: transaction?['paymentStatus']?.toString() ?? '',
+      paidAmount: _readDouble(transaction?['totalAmount']),
       serviceItems: _readServiceItems(
         data['serviceItems'],
         serviceId: serviceId,
@@ -225,6 +304,10 @@ class _ScheduleAppointment {
             data['duration'] ?? linkedService?['duration'],
             60,
           ),
+          'bufferAfterMinutes': _readInt(
+            data['bufferAfterMinutes'] ?? linkedService?['bufferAfterMinutes'],
+            0,
+          ),
           'price': _readDouble(data['price'] ?? linkedService?['price']),
           'therapistCommission': _readDouble(
             data['therapistCommission'] ??
@@ -242,6 +325,7 @@ class _ScheduleAppointment {
         'id': serviceId,
         'name': serviceName,
         'duration': _readInt(service?['duration'], 60),
+        'bufferAfterMinutes': _readInt(service?['bufferAfterMinutes'], 0),
         'price': fallbackPrice > 0
             ? fallbackPrice
             : _readDouble(service?['price']),
@@ -284,21 +368,79 @@ class _ScheduleAppointment {
 
   int get hour => startMinutes ~/ 60;
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
+  int get cleanupEndMinutes => endMinutes + bufferAfterMinutes.clamp(0, 240);
+  int get blockDurationMinutes =>
+      (cleanupEndMinutes - startMinutes).clamp(0, 1440);
   String get startLabel => _clockLabel(startTime);
   String get endLabel => _clockLabel(endTime);
   String get timeRange => '$startLabel - $endLabel';
+  String get cleanupUntilLabel => bufferAfterMinutes <= 0
+      ? 'No cleanup buffer'
+      : 'Cleanup until ${_clockLabel(_minutesToTime(cleanupEndMinutes))} '
+            '(+$bufferAfterMinutes min)';
+  String get blockDurationLabel => bufferAfterMinutes <= 0
+      ? '$timeRange ($durationMinutes min)'
+      : '$timeRange ($durationMinutes min) + $bufferAfterMinutes min cleanup';
+  String get bookedTimeRange =>
+      '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
+  bool get hasActualTiming => actualStartedAt != null;
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get servicePriceLabel => '$serviceName - $priceLabel';
-  bool get isCompleted => status == 'completed';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
-  bool get isPending => !isCompleted && !isCancelled;
+
+  bool get isWalkIn {
+    return type == 'walkin' ||
+        type == 'walk_in' ||
+        type == 'walk-in' ||
+        customerId == 'walk_in_guest';
+  }
+
+  /// Real-world moment this service is scheduled to finish.
+  DateTime get _serviceEndDateTime {
+    final resolved = endAt?.toLocal();
+    if (resolved != null) return resolved;
+    return DateTime(
+      date.year,
+      date.month,
+      date.day,
+    ).add(Duration(minutes: endMinutes));
+  }
+
+  bool get serviceWindowEnded => DateTime.now().isAfter(_serviceEndDateTime);
+
+  bool get isCompleted {
+    if (isCancelled) return false;
+    if (status == 'completed') return true;
+    // Paid walk-ins auto-complete once their booked window has passed —
+    // no manual completion step is needed.
+    return isWalkIn && hasPayment && serviceWindowEnded;
+  }
+
+  bool get isInProgress {
+    if (isCancelled || isCompleted) return false;
+    // A paid walk-in is the service happening now, until its window ends.
+    if (isWalkIn) return hasPayment;
+    return status == 'in_progress';
+  }
+
+  bool get isPending => !isCompleted && !isInProgress && !isCancelled;
+  // Walk-ins move through their states automatically, so they expose no
+  // manual "start"/"complete" action.
+  bool get canAdvance => (isPending || isInProgress) && !isWalkIn;
+  bool get hasPayment =>
+      receiptNumber.isNotEmpty ||
+      paidAmount > 0 ||
+      paymentStatus.toLowerCase() == 'paid';
+  bool get isAwaiting => isPending && hasPayment && !isWalkIn;
+  String get durationLabel => _durationLabel(durationMinutes);
   bool get isGuestAccount =>
       customerId.trim().isEmpty || customerId == 'walk_in_guest';
 
   String get statusLabel {
     if (isCompleted) return 'Completed';
+    if (isInProgress) return 'In Progress';
     if (isCancelled) return 'Cancelled';
-    return 'Pending';
+    return isAwaiting ? 'Awaiting' : 'Payment Pending';
   }
 
   String get initials {
@@ -317,6 +459,17 @@ class _ScheduleAppointment {
         serviceName.toLowerCase().contains(q) ||
         therapistName.toLowerCase().contains(q) ||
         roomName.toLowerCase().contains(q);
+  }
+
+  Map<String, dynamic> serviceStartUpdates(DateTime startedAt) {
+    return {
+      'bookedDate': bookedDateKey,
+      'bookedStartTime': bookedStartTime,
+      'bookedEndTime': bookedEndTime,
+      if (startAt != null) 'bookedStartAt': startAt!.toUtc().toIso8601String(),
+      if (endAt != null) 'bookedEndAt': endAt!.toUtc().toIso8601String(),
+      'actualStartedAt': startedAt.toUtc().toIso8601String(),
+    };
   }
 }
 
@@ -338,24 +491,48 @@ class _AppointmentGroup {
   String get dateKey => primary.dateKey;
   String get customerName => primary.customerName;
   String get customerPhone => primary.customerPhone;
+  String get customerGender => primary.customerGender;
   String get initials => primary.initials;
   bool get isGuestAccount => primary.isGuestAccount;
   bool get isCancelled => appointments.every((a) => a.isCancelled);
   bool get isCompleted => appointments.every((a) => a.isCompleted);
-  bool get isPending => !isCompleted && !isCancelled;
+  bool get isInProgress => appointments.any((a) => a.isInProgress);
+  bool get isPending => !isCompleted && !isInProgress && !isCancelled;
+  // Walk-ins advance on their own, so no manual start/complete button.
+  bool get canAdvance => (isPending || isInProgress) && !primary.isWalkIn;
+  bool get hasPayment => primary.hasPayment;
+  bool get isAwaiting => appointments.any((a) => a.isAwaiting);
+  String get receiptNumber => primary.receiptNumber;
+  String get paymentMethod => primary.paymentMethod;
+  String get paymentStatus => primary.paymentStatus;
+  double get paidAmount => primary.paidAmount;
   String get statusLabel => isCompleted
       ? 'Completed'
+      : isInProgress
+      ? 'In Progress'
       : isCancelled
       ? 'Cancelled'
-      : 'Pending';
+      : isAwaiting
+      ? 'Awaiting'
+      : 'Payment Pending';
+  String get durationLabel => _durationLabel(durationMinutes);
 
   int get startMinutes =>
       appointments.map((a) => a.startMinutes).reduce((a, b) => a < b ? a : b);
   int get endMinutes =>
       appointments.map((a) => a.endMinutes).reduce((a, b) => a > b ? a : b);
+  int get cleanupEndMinutes => appointments
+      .map((a) => a.cleanupEndMinutes)
+      .reduce((a, b) => a > b ? a : b);
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
+  int get blockDurationMinutes =>
+      (cleanupEndMinutes - startMinutes).clamp(0, 1440);
   String get timeRange =>
       '${_clockLabel(_minutesToTime(startMinutes))} - ${_clockLabel(_minutesToTime(endMinutes))}';
+  String get cleanupUntilLabel =>
+      'Cleanup until ${_clockLabel(_minutesToTime(cleanupEndMinutes))}';
+  String get blockDurationLabel =>
+      '$timeRange ($durationMinutes min) + cleanup block until ${_clockLabel(_minutesToTime(cleanupEndMinutes))}';
   double get price => appointments.fold(0, (total, a) => total + a.price);
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
 
@@ -421,6 +598,87 @@ class _AppointmentGroup {
   }
 }
 
+class _AppointmentTherapist {
+  final String id;
+  final String name;
+  final String role;
+  final bool available;
+
+  const _AppointmentTherapist({
+    required this.id,
+    required this.name,
+    required this.role,
+    required this.available,
+  });
+
+  factory _AppointmentTherapist.fromMap(Map<String, dynamic> row) {
+    return _AppointmentTherapist(
+      id: row['id']?.toString() ?? '',
+      name: row['name']?.toString() ?? 'Therapist',
+      role: row['role']?.toString() ?? 'Therapist',
+      available: _readBool(row['availabilityStatus'], true),
+    );
+  }
+
+  String get initials {
+    final parts = name
+        .trim()
+        .split(RegExp(r'\s+'))
+        .where((part) => part.isNotEmpty)
+        .toList();
+    if (parts.isEmpty) return '?';
+    if (parts.length == 1) return parts.first[0].toUpperCase();
+    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
+  }
+}
+
+bool _readBool(Object? value, [bool fallback = false]) {
+  if (value is bool) return value;
+  if (value is num) return value != 0;
+  if (value is String) {
+    final normalized = value.trim().toLowerCase();
+    if (normalized == 'true' || normalized == 'yes' || normalized == '1') {
+      return true;
+    }
+    if (normalized == 'false' || normalized == 'no' || normalized == '0') {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+List<_AppointmentTherapist> _buildAppointmentTherapists(
+  List<Map<String, dynamic>> rows,
+  List<_ScheduleAppointment> appointments,
+) {
+  final therapists = rows
+      .where((row) {
+        final role = row['role']?.toString().toLowerCase() ?? 'therapist';
+        return role.contains('therapist');
+      })
+      .map(_AppointmentTherapist.fromMap)
+      .toList()
+    ..sort((a, b) => a.name.compareTo(b.name));
+
+  final knownIds = therapists.map((therapist) => therapist.id).toSet();
+  for (final appointment in appointments) {
+    if (appointment.therapistId.isEmpty ||
+        knownIds.contains(appointment.therapistId)) {
+      continue;
+    }
+    knownIds.add(appointment.therapistId);
+    therapists.add(
+      _AppointmentTherapist(
+        id: appointment.therapistId,
+        name: appointment.therapistName,
+        role: 'Therapist',
+        available: true,
+      ),
+    );
+  }
+  return therapists;
+}
+
 class AppointmentsScreen extends StatefulWidget {
   final String userRole;
 
@@ -434,12 +692,15 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _dashboardRepository = DashboardRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
+  final _transactionTable = SupabaseTableService('transactions');
 
   late DateTime _selectedDate;
   late DateTime _windowStart;
   final _searchController = TextEditingController();
   List<_ScheduleAppointment> _appointments = [];
+  List<_AppointmentTherapist> _therapists = [];
   _AppointmentGroup? _selectedGroup;
+  bool _showTabletTimeline = false;
   int _openHour = 9;
   int _closeHour = 21;
   bool _loading = true;
@@ -449,7 +710,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   void initState() {
     super.initState();
     _selectedDate = _stripTime(DateTime.now());
-    _windowStart = _startOfWeek(_selectedDate);
+    _windowStart = _windowStartFor(_selectedDate);
     _searchController.addListener(() => setState(() {}));
     _loadAppointments();
   }
@@ -460,10 +721,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     super.dispose();
   }
 
-  static DateTime _startOfWeek(DateTime date) {
-    final clean = _stripTime(date);
-    return clean.subtract(Duration(days: clean.weekday % 7));
-  }
+  // The day strip shows a 6-day window with the selected day second, so the
+  // user sees one day of context before and four days ahead.
+  static DateTime _windowStartFor(DateTime date) =>
+      _stripTime(date).subtract(const Duration(days: 1));
 
   String _dateKey(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
 
@@ -501,7 +762,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   List<DateTime> get _visibleDays =>
-      List.generate(7, (index) => _windowStart.add(Duration(days: index)));
+      List.generate(6, (index) => _windowStart.add(Duration(days: index)));
 
   List<_AppointmentGroup> get _appointmentGroups {
     final byGroup = <String, List<_ScheduleAppointment>>{};
@@ -557,6 +818,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
   int get _pendingCount => _selectedDayGroups.where((a) => a.isPending).length;
 
+  int get _inProgressCount =>
+      _selectedDayGroups.where((a) => a.isInProgress).length;
+
+  int get _completedCount =>
+      _selectedDayGroups.where((a) => a.isCompleted).length;
+
   double get _selectedDaySales =>
       _selectedDayGroups.fold<double>(0, (total, group) => total + group.price);
 
@@ -572,6 +839,39 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       final endKey = _dateKey(_windowStart.add(const Duration(days: 6)));
       final appointmentRows = await _appointmentRepository
           .getAppointmentsInDateRange(startKey, endKey);
+      final appointmentIds = appointmentRows
+          .map((data) => data['id']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+      final appointmentGroupIds = appointmentRows
+          .map((data) => data['appointmentGroupId']?.toString() ?? '')
+          .where((id) => id.isNotEmpty)
+          .toSet()
+          .toList();
+      final transactionResults = await Future.wait([
+        _transactionTable.findIn(
+          'appointment_id',
+          appointmentIds.cast<Object>(),
+        ),
+        _transactionTable.findIn(
+          'appointment_group_id',
+          appointmentGroupIds.cast<Object>(),
+        ),
+      ]);
+      final transactionsByAppointment = <String, Map<String, dynamic>>{};
+      final transactionsByGroup = <String, Map<String, dynamic>>{};
+      for (final transaction in [
+        ...transactionResults[0],
+        ...transactionResults[1],
+      ]) {
+        final appointmentId = transaction['appointmentId']?.toString() ?? '';
+        final groupId = transaction['appointmentGroupId']?.toString() ?? '';
+        if (appointmentId.isNotEmpty) {
+          transactionsByAppointment[appointmentId] = transaction;
+        }
+        if (groupId.isNotEmpty) transactionsByGroup[groupId] = transaction;
+      }
       final customerIds = appointmentRows
           .map((data) => data['customerId']?.toString() ?? '')
           .where((id) => id.isNotEmpty);
@@ -593,10 +893,16 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         'services',
         serviceIds,
       );
-      final therapists = await _dashboardRepository.loadByIds(
+      final therapistRows = await _dashboardRepository.listTherapists();
+      final allTherapists = {
+        for (final row in therapistRows) row['id']?.toString() ?? '': row,
+      };
+      allTherapists.remove('');
+      final linkedTherapists = await _dashboardRepository.loadByIds(
         'therapists',
-        therapistIds,
+        therapistIds.where((id) => !allTherapists.containsKey(id)),
       );
+      final therapists = {...allTherapists, ...linkedTherapists};
       final rooms = await _dashboardRepository.loadByIds('rooms', roomIds);
 
       final appointments =
@@ -615,6 +921,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   services: services,
                   therapists: therapists,
                   rooms: rooms,
+                  transaction:
+                      transactionsByAppointment[data['id']?.toString()] ??
+                      transactionsByGroup[data['appointmentGroupId']
+                          ?.toString()],
                 ),
               )
               .where((appointment) => !appointment.isCancelled)
@@ -628,6 +938,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       if (!mounted) return;
       setState(() {
         _appointments = appointments;
+        _therapists = _buildAppointmentTherapists(therapistRows, appointments);
         if (_selectedGroup != null) {
           final matches = _appointmentGroups
               .where((group) => group.id == _selectedGroup!.id)
@@ -660,7 +971,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
     setState(() {
       _selectedDate = _stripTime(picked);
-      _windowStart = _startOfWeek(picked);
+      _windowStart = _windowStartFor(picked);
       _selectedGroup = null;
     });
     _loadAppointments();
@@ -859,6 +1170,62 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     }
   }
 
+  Future<void> _completeService(_ScheduleAppointment appointment) async {
+    await _appointmentRepository.completeAppointment(appointment.id);
+    if (!mounted) return;
+    await _loadAppointments();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Service marked as completed'),
+        backgroundColor: Color(0xFF1B6B72),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _completeGroupService(_AppointmentGroup group) async {
+    await _appointmentRepository.completeAppointmentGroup(
+      group.appointments.map((appointment) => appointment.id),
+    );
+    if (!mounted) return;
+    await _loadAppointments();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Group service marked as completed'),
+        backgroundColor: Color(0xFF1B6B72),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _startService(_ScheduleAppointment appointment) async {
+    await _appointmentRepository.startAppointment(
+      appointment.id,
+      startedAt: DateTime.now(),
+    );
+    if (!mounted) return;
+    await _loadAppointments();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Customer arrived - service started')),
+    );
+  }
+
+  Future<void> _startGroupService(_AppointmentGroup group) async {
+    await _appointmentRepository.startAppointmentGroup(
+      group.appointments.map((appointment) => appointment.id),
+      startedAt: DateTime.now(),
+    );
+    if (!mounted) return;
+    await _loadAppointments();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Customers arrived - services started')),
+    );
+  }
+
   void _showMobileSummary(_AppointmentGroup group) {
     showModalBottomSheet<void>(
       context: context,
@@ -888,10 +1255,16 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       activeAppointmentId: appointment.id,
                     );
                   },
-                  onComplete: group.isPending
+                  onComplete: group.canAdvance
                       ? () async {
                           Navigator.pop(context);
-                          await _openGroupCheckout(group);
+                          if (group.isInProgress) {
+                            await _completeGroupService(group);
+                          } else if (group.hasPayment) {
+                            await _startGroupService(group);
+                          } else {
+                            await _openGroupCheckout(group);
+                          }
                         }
                       : null,
                   onCancel: group.isCompleted
@@ -909,10 +1282,16 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                     Navigator.pop(context);
                     await _openEdit(group.primary);
                   },
-                  onComplete: group.isPending
+                  onComplete: group.primary.canAdvance
                       ? () async {
                           Navigator.pop(context);
-                          await _openCheckout(group.primary);
+                          if (group.primary.isInProgress) {
+                            await _completeService(group.primary);
+                          } else if (group.primary.hasPayment) {
+                            await _startService(group.primary);
+                          } else {
+                            await _openCheckout(group.primary);
+                          }
                         }
                       : null,
                   onCancel: group.isCompleted
@@ -956,30 +1335,41 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   Widget build(BuildContext context) {
     final isTablet = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
-      backgroundColor: const Color(0xFFF4F8F2),
+      backgroundColor: const Color(0xFFF6F8FA),
+      floatingActionButton: null,
       body: SafeArea(child: isTablet ? _buildTablet() : _buildMobile()),
     );
   }
 
   Widget _buildMobile() {
-    return Column(
+    return Stack(
       children: [
-        _MobileScheduleHeader(
-          monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
-          onBack: () => Navigator.pop(context),
-          onOpenCalendar: _openCalendarPicker,
-          onAdd: _openBooking,
+        Column(
+          children: [
+            _MobileScheduleHeader(
+              selectedDate: _selectedDate,
+              onBack: () => Navigator.pop(context),
+            ),
+            _ScheduleCalendarStrip(
+              days: _visibleDays,
+              selectedDate: _selectedDate,
+              monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
+              appointmentsForDay: _appointmentsForDay,
+              onSelect: _selectDate,
+              onPrevious: () => _moveDays(-1),
+              onNext: () => _moveDays(1),
+              onOpenCalendar: _openCalendarPicker,
+              compact: true,
+            ),
+            Expanded(child: _buildMobileBody()),
+          ],
         ),
-        _ScheduleCalendarStrip(
-          days: _visibleDays,
-          selectedDate: _selectedDate,
-          appointmentsForDay: _appointmentsForDay,
-          onSelect: _selectDate,
-          onPrevious: () => _moveDays(-1),
-          onNext: () => _moveDays(1),
-          compact: true,
+        Positioned(
+          left: 16,
+          right: 16,
+          bottom: 14,
+          child: _StickyNewAppointmentButton(onPressed: _openBooking),
         ),
-        Expanded(child: _buildMobileBody()),
       ],
     );
   }
@@ -990,29 +1380,37 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
     final appointments = _selectedDayGroups;
     return ListView(
-      padding: const EdgeInsets.fromLTRB(18, 12, 18, 24),
+      padding: const EdgeInsets.fromLTRB(14, 10, 14, 90),
       children: [
         _MobileDaySummary(
-          date: _selectedDate,
           count: appointments.length,
           pending: _pendingCount,
+          inProgress: _inProgressCount,
+          completed: _completedCount,
           sales: _selectedDaySales,
         ),
-        const SizedBox(height: 14),
+        const SizedBox(height: 16),
         if (appointments.isEmpty)
           const _ScheduleEmptyState()
-        else
+        else ...[
+          const Text(
+            'Upcoming Appointments',
+            style: TextStyle(
+              fontSize: 17,
+              fontWeight: FontWeight.w900,
+              color: _scheduleInk,
+            ),
+          ),
+          const SizedBox(height: 10),
           _MobileTimeline(
             appointments: appointments,
-            openHour: _openHour,
-            closeHour: _closeHour,
-            selectedDate: _selectedDate,
             onTapAppointment: (appointment) {
               setState(() => _selectedGroup = appointment);
               _showMobileSummary(appointment);
             },
             onTapCluster: _showMobileCluster,
           ),
+        ],
       ],
     );
   }
@@ -1024,21 +1422,22 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           child: Column(
             children: [
               _TabletScheduleHeader(
-                monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
                 searchController: _searchController,
                 onBack: () => Navigator.pop(context),
-                onOpenCalendar: _openCalendarPicker,
                 onAdd: _openBooking,
               ),
               _ScheduleCalendarStrip(
                 days: _visibleDays,
                 selectedDate: _selectedDate,
+                monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
                 appointmentsForDay: _appointmentsForDay,
                 onSelect: _selectDate,
                 onPrevious: () => _moveDays(-1),
                 onNext: () => _moveDays(1),
+                onOpenCalendar: _openCalendarPicker,
                 compact: false,
               ),
+
               Expanded(child: _buildTabletBody()),
             ],
           ),
@@ -1066,8 +1465,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                         _selectedGroup!,
                         activeAppointmentId: appointment.id,
                       ),
-                      onComplete: _selectedGroup!.isPending
-                          ? () => _openGroupCheckout(_selectedGroup!)
+                      onComplete: _selectedGroup!.canAdvance
+                          ? () => _selectedGroup!.isInProgress
+                                ? _completeGroupService(_selectedGroup!)
+                                : _selectedGroup!.hasPayment
+                                ? _startGroupService(_selectedGroup!)
+                                : _openGroupCheckout(_selectedGroup!)
                           : null,
                       onCancel: _selectedGroup!.isCompleted
                           ? null
@@ -1077,8 +1480,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       appointment: _selectedGroup!.primary,
                       onClose: () => setState(() => _selectedGroup = null),
                       onEdit: () => _openEdit(_selectedGroup!.primary),
-                      onComplete: _selectedGroup!.isPending
-                          ? () => _openCheckout(_selectedGroup!.primary)
+                      onComplete: _selectedGroup!.primary.canAdvance
+                          ? () => _selectedGroup!.primary.isInProgress
+                                ? _completeService(_selectedGroup!.primary)
+                                : _selectedGroup!.primary.hasPayment
+                                ? _startService(_selectedGroup!.primary)
+                                : _openCheckout(_selectedGroup!.primary)
                           : null,
                       onCancel: _selectedGroup!.isCompleted
                           ? null
@@ -1096,241 +1503,431 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     if (_error != null) return _ScheduleError(onRetry: _loadAppointments);
 
     final appointments = _selectedDayGroups;
-    return ListView(
-      padding: const EdgeInsets.fromLTRB(28, 18, 28, 32),
-      children: [
-        _TabletDaySummary(
-          date: _selectedDate,
-          count: appointments.length,
-          pending: _pendingCount,
-        ),
-        const SizedBox(height: 12),
-        if (appointments.isEmpty)
-          const _ScheduleEmptyState()
-        else
-          _TabletTimeline(
-            appointments: appointments,
-            openHour: _openHour,
-            closeHour: _closeHour,
-            selectedDate: _selectedDate,
-            selectedId: _selectedGroup?.id,
-            onSelect: (appointment) =>
-                setState(() => _selectedGroup = appointment),
+    // The whole tablet body scrolls as one page, so the full day's schedule
+    // and every therapist are reachable together instead of two separate
+    // inner scroll areas.
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 12, 24, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _TabletDaySummary(
+            count: appointments.length,
+            pending: _pendingCount,
+            inProgress: _inProgressCount,
+            completed: _completedCount,
+            sales: _selectedDaySales,
           ),
-      ],
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: appointments.isEmpty
+                    ? const _ScheduleEmptyState()
+                    : _TabletScheduleSection(
+                        selectedDate: _selectedDate,
+                        showTimeline: _showTabletTimeline,
+                        onViewChanged: (showTimeline) =>
+                            setState(() => _showTabletTimeline = showTimeline),
+                        list: _TabletAppointmentList(
+                          appointments: appointments,
+                          selectedId: _selectedGroup?.id,
+                          onSelect: (appointment) =>
+                              setState(() => _selectedGroup = appointment),
+                          onEdit: (appointment) => appointment.isGroup
+                              ? _openEditGroup(appointment)
+                              : _openEdit(appointment.primary),
+                        ),
+                        timeline: _TabletTimeline(
+                          appointments: appointments,
+                          openHour: _openHour,
+                          closeHour: _closeHour,
+                          selectedDate: _selectedDate,
+                          selectedId: _selectedGroup?.id,
+                          onSelect: (appointment) =>
+                              setState(() => _selectedGroup = appointment),
+                        ),
+                      ),
+              ),
+              const SizedBox(width: 16),
+              SizedBox(
+                width: 330,
+                child: _AppointmentTherapistPanel(
+                  therapists: _therapists,
+                  appointments: appointments,
+                  selectedDate: _selectedDate,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
 
+// Shared brand palette for the schedule header/calendar chrome.
+const _scheduleGreen = Color(0xFF0F6B3E);
+const _scheduleAccent = Color(0xFF2F7D59);
+const _scheduleInk = Color(0xFF0F172A);
+const _scheduleMuted = Color(0xFF6B7280);
+const _scheduleBorder = Color(0xFFE5E7EB);
+
 class _MobileScheduleHeader extends StatelessWidget {
-  final String monthLabel;
+  final DateTime selectedDate;
   final VoidCallback onBack;
-  final VoidCallback onOpenCalendar;
-  final VoidCallback onAdd;
 
   const _MobileScheduleHeader({
-    required this.monthLabel,
+    required this.selectedDate,
     required this.onBack,
-    required this.onOpenCalendar,
-    required this.onAdd,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 12, 12, 8),
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+      color: Colors.white,
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          IconButton(
-            onPressed: onBack,
-            icon: const Icon(Icons.arrow_back),
-            color: const Color(0xFF111827),
-          ),
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerLeft,
-              child: InkWell(
-                onTap: onOpenCalendar,
-                borderRadius: BorderRadius.circular(12),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 8,
-                  ),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFFE5E7EB)),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(
-                        Icons.calendar_today_outlined,
-                        size: 16,
-                        color: Color(0xFF2F7D59),
-                      ),
-                      const SizedBox(width: 8),
-                      Flexible(
-                        child: Text(
-                          monthLabel,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w800,
-                            color: Color(0xFF111827),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      const Icon(
-                        Icons.keyboard_arrow_down,
-                        size: 18,
-                        color: Color(0xFF6B7280),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: IconButton(
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back_rounded, size: 26),
+              color: _scheduleInk,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Back',
             ),
           ),
-          SizedBox(
-            width: 42,
-            height: 42,
-            child: FilledButton(
-              onPressed: onAdd,
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFF2F7D59),
-                padding: EdgeInsets.zero,
-                shape: const CircleBorder(),
-              ),
-              child: const Icon(Icons.add, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Appointments',
+                  style: TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w900,
+                    color: _scheduleInk,
+                    height: 1.05,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  DateFormat('EEEE, d MMMM yyyy').format(selectedDate),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF64748B),
+                    height: 1.1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: IconButton(
+              onPressed: () {},
+              icon: const Icon(Icons.notifications_none_rounded, size: 25),
+              color: _scheduleInk,
+              visualDensity: VisualDensity.compact,
+              tooltip: 'Notifications',
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _StickyNewAppointmentButton extends StatelessWidget {
+  final VoidCallback onPressed;
+
+  const _StickyNewAppointmentButton({required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x260F6B3E),
+            blurRadius: 20,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: FilledButton.icon(
+        onPressed: onPressed,
+        icon: const Icon(Icons.add_rounded, size: 24),
+        label: const Text(
+          'New Appointment',
+          style: TextStyle(fontSize: 15.5, fontWeight: FontWeight.w900),
+        ),
+        style: FilledButton.styleFrom(
+          minimumSize: const Size.fromHeight(50),
+          backgroundColor: _scheduleGreen,
+          foregroundColor: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          elevation: 0,
+        ),
+      ),
+    );
+  }
+}
+
+class _TodayCalendarButton extends StatelessWidget {
+  final bool compact;
+  final VoidCallback onPressed;
+
+  const _TodayCalendarButton({
+    required this.compact,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final height = compact ? 38.0 : 38.0;
+    return SizedBox(
+      height: height,
+      child: OutlinedButton(
+        onPressed: onPressed,
+        style: OutlinedButton.styleFrom(
+          padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 16),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(compact ? 10 : 10),
+          ),
+          side: const BorderSide(color: Color(0xFFE5E7EB)),
+          backgroundColor: Colors.white,
+          foregroundColor: _scheduleInk,
+        ),
+        child: const Text(
+          'Today',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
       ),
     );
   }
 }
 
 class _TabletScheduleHeader extends StatelessWidget {
-  final String monthLabel;
   final TextEditingController searchController;
   final VoidCallback onBack;
-  final VoidCallback onOpenCalendar;
   final VoidCallback onAdd;
 
   const _TabletScheduleHeader({
-    required this.monthLabel,
     required this.searchController,
     required this.onBack,
-    required this.onOpenCalendar,
     required this.onAdd,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.fromLTRB(22, 10, 22, 10),
+      padding: const EdgeInsets.fromLTRB(16, 12, 22, 12),
       decoration: const BoxDecoration(
         color: Colors.white,
-        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+        border: Border(bottom: BorderSide(color: _scheduleBorder)),
       ),
       child: Row(
         children: [
-          IconButton(onPressed: onBack, icon: const Icon(Icons.arrow_back)),
-          const SizedBox(width: 4),
-          InkWell(
-            onTap: onOpenCalendar,
-            borderRadius: BorderRadius.circular(10),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: const Color(0xFFE5E7EB)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(
-                    Icons.calendar_today_outlined,
-                    size: 16,
-                    color: Color(0xFF2F7D59),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    monthLabel,
-                    style: const TextStyle(
-                      fontSize: 19,
-                      fontWeight: FontWeight.w800,
-                      color: Color(0xFF111827),
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  const Icon(
-                    Icons.keyboard_arrow_down,
-                    size: 18,
-                    color: Color(0xFF6B7280),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const Spacer(),
-          SizedBox(
-            width: 330,
-            child: TextField(
-              controller: searchController,
-              style: const TextStyle(fontSize: 14),
-              decoration: InputDecoration(
-                hintText: 'Search customers, services...',
-                hintStyle: const TextStyle(fontSize: 14),
-                prefixIcon: const Icon(Icons.search, size: 20),
-                suffixIcon: const Padding(
-                  padding: EdgeInsets.all(10),
-                  child: Text(
-                    'Ctrl K',
-                    style: TextStyle(
-                      fontSize: 10,
-                      color: Color(0xFF6B7280),
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                filled: true,
-                fillColor: Colors.white,
-                contentPadding: const EdgeInsets.symmetric(vertical: 11),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(10),
-                  borderSide: const BorderSide(color: Color(0xFFE5E7EB)),
-                ),
-              ),
-            ),
-          ),
+          _HeaderIconButton(icon: Icons.arrow_back_rounded, onPressed: onBack),
           const SizedBox(width: 14),
-          OutlinedButton.icon(
+          const Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Appointments',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    color: _scheduleInk,
+                    height: 1.05,
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  'Manage bookings and daily schedule',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: _scheduleMuted,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 16),
+          SizedBox(
+            width: 300,
+            child: _HeaderSearchField(controller: searchController),
+          ),
+          const SizedBox(width: 12),
+          FilledButton.icon(
             onPressed: onAdd,
-            icon: const Icon(Icons.add, size: 17),
+            icon: const Icon(Icons.add_rounded, size: 19),
             label: const Text(
               'New Appointment',
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w700),
             ),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: const Color(0xFF1B6B72),
-              side: const BorderSide(color: Color(0xFF1B6B72)),
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            style: FilledButton.styleFrom(
+              backgroundColor: _scheduleGreen,
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 16),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(10),
+                borderRadius: BorderRadius.circular(12),
               ),
+              elevation: 0,
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// Standardised square icon button (back / secondary actions) with a subtle
+// outline, matching the chrome used across the app's screens.
+class _HeaderIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onPressed;
+
+  const _HeaderIconButton({required this.icon, required this.onPressed});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 42,
+      height: 42,
+      child: Material(
+        color: Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: const BorderSide(color: _scheduleBorder),
+        ),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(12),
+          child: Icon(icon, size: 20, color: _scheduleInk),
+        ),
+      ),
+    );
+  }
+}
+
+class _HeaderSearchField extends StatelessWidget {
+  final TextEditingController controller;
+
+  const _HeaderSearchField({required this.controller});
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+      decoration: InputDecoration(
+        isDense: true,
+        hintText: 'Search customers, services, therapists...',
+        hintStyle: const TextStyle(
+          fontSize: 13.5,
+          color: Color(0xFF9CA3AF),
+          fontWeight: FontWeight.w500,
+        ),
+        prefixIcon: const Icon(
+          Icons.search_rounded,
+          size: 20,
+          color: _scheduleMuted,
+        ),
+        filled: true,
+        fillColor: const Color(0xFFF3F4F6),
+        contentPadding: const EdgeInsets.symmetric(vertical: 13),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(12),
+          borderSide: const BorderSide(color: _scheduleAccent, width: 1.4),
+        ),
+      ),
+    );
+  }
+}
+
+// Month/date jump button, shown inside the calendar strip.
+class _MonthPickerButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onTap;
+  final bool compact;
+
+  const _MonthPickerButton({
+    required this.label,
+    required this.onTap,
+    this.compact = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: Container(
+          padding: EdgeInsets.symmetric(
+            horizontal: compact ? 10 : 12,
+            vertical: compact ? 8 : 9,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: _scheduleBorder),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(
+                Icons.calendar_today_rounded,
+                size: 16,
+                color: _scheduleAccent,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: compact ? 13 : 14,
+                  fontWeight: FontWeight.w800,
+                  color: _scheduleInk,
+                ),
+              ),
+              const SizedBox(width: 4),
+              const Icon(
+                Icons.keyboard_arrow_down_rounded,
+                size: 18,
+                color: _scheduleMuted,
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -1521,55 +2118,145 @@ class _WeekdayLabel extends StatelessWidget {
 class _ScheduleCalendarStrip extends StatelessWidget {
   final List<DateTime> days;
   final DateTime selectedDate;
+  final String monthLabel;
   final List<_ScheduleAppointment> Function(DateTime date) appointmentsForDay;
   final ValueChanged<DateTime> onSelect;
   final VoidCallback onPrevious;
   final VoidCallback onNext;
+  final VoidCallback onOpenCalendar;
   final bool compact;
 
   const _ScheduleCalendarStrip({
     required this.days,
     required this.selectedDate,
+    required this.monthLabel,
     required this.appointmentsForDay,
     required this.onSelect,
     required this.onPrevious,
     required this.onNext,
+    required this.onOpenCalendar,
     required this.compact,
   });
 
   @override
   Widget build(BuildContext context) {
+    final today = _stripTime(DateTime.now());
+    if (compact) {
+      return Container(
+        color: Colors.white,
+        padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                _MonthPickerButton(
+                  label: monthLabel,
+                  onTap: onOpenCalendar,
+                  compact: true,
+                ),
+                const Spacer(),
+                _CalendarNavButton(
+                  icon: Icons.chevron_left,
+                  compact: true,
+                  onPressed: onPrevious,
+                ),
+                const SizedBox(width: 10),
+                _TodayCalendarButton(
+                  compact: true,
+                  onPressed: () => onSelect(today),
+                ),
+                const SizedBox(width: 10),
+                _CalendarNavButton(
+                  icon: Icons.chevron_right,
+                  compact: true,
+                  onPressed: onNext,
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              height: 66,
+              child: ListView.separated(
+                scrollDirection: Axis.horizontal,
+                itemCount: days.length,
+                separatorBuilder: (_, _) => const SizedBox(width: 7),
+                itemBuilder: (context, index) {
+                  final day = days[index];
+                  return SizedBox(
+                    width: 50,
+                    child: _DayTile(
+                      day: day,
+                      selected: _stripTime(day) == _stripTime(selectedDate),
+                      count: appointmentsForDay(day).length,
+                      compact: true,
+                      onTap: () => onSelect(day),
+                    ),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     return Container(
       color: Colors.white,
-      padding: EdgeInsets.fromLTRB(
-        compact ? 12 : 24,
-        10,
-        compact ? 12 : 24,
-        12,
-      ),
-      child: Row(
+      padding: const EdgeInsets.fromLTRB(24, 10, 24, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (!compact) ...[
-            _CalendarNavButton(
-              icon: Icons.chevron_left,
-              compact: compact,
-              onPressed: onPrevious,
-            ),
-            const SizedBox(width: 10),
-          ],
-          Expanded(
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        DateFormat('EEEE, d MMMM yyyy').format(selectedDate),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 21,
+                          fontWeight: FontWeight.w900,
+                          color: _scheduleInk,
+                          height: 1,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    _MonthPickerButton(label: monthLabel, onTap: onOpenCalendar),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 14),
+              Align(
+                alignment: Alignment.centerRight,
+                child: _CalendarNavCluster(
+                  compact: false,
+                  onPrevious: onPrevious,
+                  onToday: () => onSelect(today),
+                  onNext: onNext,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 72,
             child: Row(
               children: days.map((day) {
                 final selected = _stripTime(day) == _stripTime(selectedDate);
                 final count = appointmentsForDay(day).length;
                 return Expanded(
                   child: Padding(
-                    padding: EdgeInsets.symmetric(horizontal: compact ? 2 : 6),
+                    padding: const EdgeInsets.symmetric(horizontal: 5),
                     child: _DayTile(
                       day: day,
                       selected: selected,
                       count: count,
-                      compact: compact,
+                      compact: false,
                       onTap: () => onSelect(day),
                     ),
                   ),
@@ -1577,14 +2264,46 @@ class _ScheduleCalendarStrip extends StatelessWidget {
               }).toList(),
             ),
           ),
-          if (!compact) ...[
-            const SizedBox(width: 10),
-            _CalendarNavButton(
-              icon: Icons.chevron_right,
-              compact: compact,
-              onPressed: onNext,
-            ),
-          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _CalendarNavCluster extends StatelessWidget {
+  final bool compact;
+  final VoidCallback onPrevious;
+  final VoidCallback onToday;
+  final VoidCallback onNext;
+
+  const _CalendarNavCluster({
+    required this.compact,
+    required this.onPrevious,
+    required this.onToday,
+    required this.onNext,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: compact ? 58 : 44,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          _CalendarNavButton(
+            icon: Icons.chevron_left,
+            compact: compact,
+            onPressed: onPrevious,
+          ),
+          SizedBox(width: compact ? 10 : 10),
+          _TodayCalendarButton(compact: compact, onPressed: onToday),
+          SizedBox(width: compact ? 10 : 10),
+          _CalendarNavButton(
+            icon: Icons.chevron_right,
+            compact: compact,
+            onPressed: onNext,
+          ),
         ],
       ),
     );
@@ -1604,7 +2323,7 @@ class _CalendarNavButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final size = compact ? 34.0 : 44.0;
+    final size = compact ? 36.0 : 38.0;
     return SizedBox(
       width: size,
       height: size,
@@ -1613,14 +2332,14 @@ class _CalendarNavButton extends StatelessWidget {
         style: OutlinedButton.styleFrom(
           padding: EdgeInsets.zero,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(compact ? 17 : 12),
+            borderRadius: BorderRadius.circular(compact ? 12 : 12),
           ),
           side: const BorderSide(color: Color(0xFFE5E7EB)),
           backgroundColor: Colors.white,
         ),
         child: Icon(
           icon,
-          size: compact ? 18 : 22,
+          size: compact ? 17 : 20,
           color: const Color(0xFF111827),
         ),
       ),
@@ -1645,59 +2364,96 @@ class _DayTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final countLabel = compact
+        ? ''
+        : '$count booking${count == 1 ? '' : 's'}';
+    final selectedColor = compact
+        ? const Color(0xFFE2F3EB)
+        : const Color(0xFF0F7A43);
+    final selectedText = compact ? const Color(0xFF0F6B3E) : Colors.white;
+    final selectedSubtext = compact
+        ? const Color(0xFF0F6B3E)
+        : Colors.white;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 150),
-        height: compact ? 68 : 92,
+        height: compact ? 62 : 68,
+        padding: EdgeInsets.symmetric(
+          horizontal: compact ? 3 : 8,
+          vertical: compact ? 5 : 7,
+        ),
         decoration: BoxDecoration(
-          color: selected ? const Color(0xFF2F7D59) : Colors.white,
-          borderRadius: BorderRadius.circular(compact ? 8 : 10),
-          border: Border.all(
-            color: selected ? const Color(0xFF2F7D59) : const Color(0xFFE5E7EB),
-          ),
+          color: selected ? selectedColor : Colors.white,
+          borderRadius: BorderRadius.circular(compact ? 18 : 10),
+          border: compact && !selected
+              ? null
+              : Border.all(
+                  color: selected ? selectedColor : const Color(0xFFE5E7EB),
+                ),
           boxShadow: selected
-              ? const [
+              ? [
                   BoxShadow(
-                    color: Color(0x1F2F7D59),
-                    blurRadius: 10,
-                    offset: Offset(0, 4),
+                    color: compact
+                        ? const Color(0x180F6B3E)
+                        : const Color(0x220F7A43),
+                    blurRadius: compact ? 12 : 14,
+                    offset: const Offset(0, 5),
                   ),
                 ]
               : null,
         ),
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              DateFormat('EEE').format(day).toUpperCase(),
-              style: TextStyle(
-                fontSize: compact ? 9 : 12,
-                fontWeight: FontWeight.w800,
-                color: selected ? Colors.white : const Color(0xFF111827),
+        // FittedBox keeps the day / date / count stack from overflowing the
+        // fixed tile height, even when the OS text scale is bumped up.
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                compact
+                    ? DateFormat('EEE').format(day)
+                    : DateFormat('EEE').format(day).toUpperCase(),
+                style: TextStyle(
+                  fontSize: compact ? 11 : 10,
+                  height: 1.1,
+                  fontWeight: FontWeight.w800,
+                  color: selected
+                      ? selectedText
+                      : compact
+                      ? const Color(0xFF475569)
+                      : const Color(0xFF111827),
+                ),
               ),
-            ),
-            const SizedBox(height: 4),
-            Text(
-              DateFormat('d').format(day),
-              style: TextStyle(
-                fontSize: compact ? 17 : 28,
-                fontWeight: FontWeight.w900,
-                color: selected ? Colors.white : const Color(0xFF111827),
+              SizedBox(height: compact ? 3 : 3),
+              Text(
+                DateFormat('d').format(day),
+                style: TextStyle(
+                  fontSize: compact ? 21 : 20,
+                  height: 1.05,
+                  fontWeight: FontWeight.w900,
+                  color: selected ? selectedText : const Color(0xFF111827),
+                ),
               ),
-            ),
-            const SizedBox(height: 3),
-            Text(
-              selected ? 'Today' : '$count booking${count == 1 ? '' : 's'}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontSize: compact ? 9 : 12,
-                fontWeight: FontWeight.w700,
-                color: selected ? Colors.white : const Color(0xFF6B7280),
-              ),
-            ),
-          ],
+              if (!compact) ...[
+                const SizedBox(height: 3),
+                Text(
+                  countLabel,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10,
+                    height: 1.1,
+                    fontWeight: FontWeight.w700,
+                    color: selected
+                        ? selectedSubtext
+                        : const Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
@@ -1705,15 +2461,183 @@ class _DayTile extends StatelessWidget {
 }
 
 class _MobileDaySummary extends StatelessWidget {
-  final DateTime date;
   final int count;
   final int pending;
+  final int inProgress;
+  final int completed;
   final double sales;
 
   const _MobileDaySummary({
-    required this.date,
     required this.count,
     required this.pending,
+    required this.inProgress,
+    required this.completed,
+    required this.sales,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 14, 14, 12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x0D000000),
+            blurRadius: 20,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _MobileStatCell(
+                  icon: Icons.calendar_today_outlined,
+                  label: 'Total',
+                  value: '$count',
+                  color: const Color(0xFF6D4AFF),
+                ),
+              ),
+              Expanded(
+                child: _MobileStatCell(
+                  icon: Icons.schedule_outlined,
+                  label: 'In Progress',
+                  value: '$inProgress',
+                  color: const Color(0xFFF97316),
+                ),
+              ),
+              Expanded(
+                child: _MobileStatCell(
+                  icon: Icons.check_circle_outline,
+                  label: 'Completed',
+                  value: '$completed',
+                  color: const Color(0xFF059669),
+                ),
+              ),
+              Expanded(
+                child: _MobileStatCell(
+                  icon: Icons.hourglass_empty_rounded,
+                  label: 'Awaiting',
+                  value: '$pending',
+                  color: const Color(0xFF6D4AFF),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF0FDF4),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.payments_outlined,
+                  size: 16,
+                  color: Color(0xFF0F766E),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    "Today's Sales",
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F766E),
+                    ),
+                  ),
+                ),
+                Text(
+                  'RM ${sales.toStringAsFixed(0)}',
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w900,
+                    color: _scheduleInk,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _MobileStatCell extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _MobileStatCell({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.12),
+            shape: BoxShape.circle,
+          ),
+          child: Icon(icon, color: color, size: 18),
+        ),
+        const SizedBox(height: 7),
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w900,
+            color: _scheduleInk,
+            height: 1,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            fontSize: 10.5,
+            fontWeight: FontWeight.w800,
+            color: color,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TabletDaySummary extends StatelessWidget {
+  final int count;
+  final int pending;
+  final int inProgress;
+  final int completed;
+  final double sales;
+
+  const _TabletDaySummary({
+    required this.count,
+    required this.pending,
+    required this.inProgress,
+    required this.completed,
     required this.sales,
   });
 
@@ -1722,113 +2646,1075 @@ class _MobileDaySummary extends StatelessWidget {
     return Row(
       children: [
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '${DateFormat('EEE, d MMM').format(date).toUpperCase()} - TODAY',
-                style: const TextStyle(
-                  fontSize: 11,
-                  color: Color(0xFF6B7280),
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 3),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    '$count booking${count == 1 ? '' : 's'}',
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF111827),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 3),
-                    child: Text(
-                      'RM ${sales.toStringAsFixed(0)}',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF6B7280),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
+          child: _TabletStatCard(
+            icon: Icons.calendar_today_outlined,
+            label: "Total Appointments",
+            value: count,
+            color: const Color(0xFF2563EB),
           ),
         ),
-        _CountPill(color: const Color(0xFF16A34A), value: count - pending),
-        const SizedBox(width: 6),
-        _CountPill(color: const Color(0xFF2563EB), value: pending),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _TabletStatCard(
+            icon: Icons.play_circle_outline,
+            label: 'In Progress',
+            value: inProgress,
+            color: const Color(0xFFF97316),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _TabletStatCard(
+            icon: Icons.check_circle_outline,
+            label: 'Completed',
+            value: completed,
+            color: const Color(0xFF059669),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _TabletStatCard(
+            icon: Icons.pending_actions_outlined,
+            label: 'Awaiting',
+            value: pending,
+            color: const Color(0xFF7C3AED),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          child: _TabletMoneyStatCard(
+            icon: Icons.payments_outlined,
+            label: 'Sales',
+            value: 'RM ${sales.toStringAsFixed(0)}',
+            color: const Color(0xFF0F766E),
+          ),
+        ),
       ],
     );
   }
 }
 
-class _TabletDaySummary extends StatelessWidget {
-  final DateTime date;
-  final int count;
-  final int pending;
+class _TabletStatCard extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final int value;
+  final Color color;
 
-  const _TabletDaySummary({
-    required this.date,
-    required this.count,
-    required this.pending,
+  const _TabletStatCard({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: Text(
-            DateFormat('EEEE, d MMMM yyyy').format(date),
+    return Container(
+      constraints: const BoxConstraints(minHeight: 78),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x06000000),
+            blurRadius: 16,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: color, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF334155),
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  '$value',
+                  style: const TextStyle(
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                    height: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabletMoneyStatCard extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String value;
+  final Color color;
+
+  const _TabletMoneyStatCard({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(minHeight: 78),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x06000000),
+            blurRadius: 16,
+            offset: Offset(0, 6),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(icon, color: color, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                    color: Color(0xFF334155),
+                  ),
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 19,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                    height: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabletScheduleSection extends StatelessWidget {
+  final DateTime selectedDate;
+  final bool showTimeline;
+  final ValueChanged<bool> onViewChanged;
+  final Widget list;
+  final Widget timeline;
+
+  const _TabletScheduleSection({
+    required this.selectedDate,
+    required this.showTimeline,
+    required this.onViewChanged,
+    required this.list,
+    required this.timeline,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFDDE5EE)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x07000000),
+            blurRadius: 18,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  'Schedule for ${DateFormat('EEEE, d MMMM yyyy').format(selectedDate)}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w900,
+                    color: _scheduleInk,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              const _ScheduleStatusFilterButton(),
+              const SizedBox(width: 10),
+              _ScheduleViewToggle(
+                showTimeline: showTimeline,
+                onChanged: onViewChanged,
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          showTimeline ? timeline : list,
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleStatusFilterButton extends StatelessWidget {
+  const _ScheduleStatusFilterButton();
+
+  @override
+  Widget build(BuildContext context) {
+    return OutlinedButton.icon(
+      onPressed: () {},
+      icon: const Icon(Icons.filter_alt_outlined, size: 17),
+      label: const Text('All Status'),
+      style: OutlinedButton.styleFrom(
+        foregroundColor: _scheduleInk,
+        backgroundColor: Colors.white,
+        side: const BorderSide(color: Color(0xFFE5E7EB)),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        textStyle: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _ScheduleViewToggle extends StatelessWidget {
+  final bool showTimeline;
+  final ValueChanged<bool> onChanged;
+
+  const _ScheduleViewToggle({
+    required this.showTimeline,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ScheduleViewButton(
+            icon: Icons.list_rounded,
+            label: 'List',
+            selected: !showTimeline,
+            onTap: () => onChanged(false),
+          ),
+          _ScheduleViewButton(
+            icon: Icons.schedule_outlined,
+            label: 'Timeline',
+            selected: showTimeline,
+            onTap: () => onChanged(true),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleViewButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ScheduleViewButton({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? Colors.white : Colors.transparent,
+      borderRadius: BorderRadius.circular(7),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(7),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(7),
+            border: selected
+                ? Border.all(color: const Color(0xFFCFE9DD))
+                : Border.all(color: Colors.transparent),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                size: 17,
+                color: selected ? _scheduleGreen : const Color(0xFF475569),
+              ),
+              const SizedBox(width: 7),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                  color: selected ? _scheduleGreen : _scheduleInk,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TabletAppointmentList extends StatelessWidget {
+  final List<_AppointmentGroup> appointments;
+  final String? selectedId;
+  final ValueChanged<_AppointmentGroup> onSelect;
+  final ValueChanged<_AppointmentGroup> onEdit;
+
+  const _TabletAppointmentList({
+    required this.appointments,
+    required this.selectedId,
+    required this.onSelect,
+    required this.onEdit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final sorted = [...appointments]
+      ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+
+    // Show every booking for the day, inserting a time band whenever the
+    // start time changes so bookings at different times read as groups.
+    final rows = <Widget>[const _TabletAppointmentListHeader()];
+    String? lastTimeLabel;
+    for (var i = 0; i < sorted.length; i++) {
+      final appointment = sorted[i];
+      final timeLabel = _clockLabel(_minutesToTime(appointment.startMinutes));
+      if (timeLabel != lastTimeLabel) {
+        rows.add(_TabletTimeBand(label: timeLabel));
+        lastTimeLabel = timeLabel;
+      }
+      rows.add(
+        _TabletAppointmentListRow(
+          appointment: appointment,
+          selected: selectedId == appointment.id,
+          isLast: i == sorted.length - 1,
+          onTap: () => onSelect(appointment),
+          onEdit: () => onEdit(appointment),
+        ),
+      );
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border.all(color: const Color(0xFFE5E7EB)),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Column(children: rows),
+      ),
+    );
+  }
+}
+
+/// Slim time separator between bookings that start at different times.
+class _TabletTimeBand extends StatelessWidget {
+  final String label;
+
+  const _TabletTimeBand({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF6FAF7),
+        border: Border(
+          top: BorderSide(color: Color(0xFFE5E7EB)),
+          bottom: BorderSide(color: Color(0xFFE5E7EB)),
+        ),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.schedule_rounded, size: 14, color: _scheduleGreen),
+          const SizedBox(width: 6),
+          Text(
+            label,
             style: const TextStyle(
-              fontSize: 21,
+              fontSize: 12,
               fontWeight: FontWeight.w900,
-              color: Color(0xFF111827),
+              color: _scheduleGreen,
+              letterSpacing: 0.2,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// Fixed column widths shared by the header and every row so the labels line
+// up with their cells. Customer + Booking details flex to fill the rest.
+const double _apptColTime = 120;
+const double _apptColStatus = 132;
+const double _apptColAmount = 80;
+const double _apptColActions = 52;
+
+class _TabletAppointmentListHeader extends StatelessWidget {
+  const _TabletAppointmentListHeader();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 42,
+      // Left inset matches the 4px status border + 16px row padding below.
+      padding: const EdgeInsets.only(left: 20, right: 16),
+      decoration: const BoxDecoration(
+        color: Color(0xFFFBFCFE),
+        border: Border(bottom: BorderSide(color: Color(0xFFE5E7EB))),
+      ),
+      child: const Row(
+        children: [
+          SizedBox(width: _apptColTime, child: _TabletColumnLabel('Time')),
+          Expanded(flex: 5, child: _TabletColumnLabel('Customer')),
+          Expanded(flex: 7, child: _TabletColumnLabel('Booking details')),
+          SizedBox(
+            width: _apptColStatus,
+            child: _TabletColumnLabel('Payment status'),
+          ),
+          SizedBox(
+            width: _apptColAmount,
+            child: _TabletColumnLabel('Amount', align: TextAlign.right),
+          ),
+          SizedBox(
+            width: _apptColActions,
+            child: _TabletColumnLabel('Actions', align: TextAlign.center),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TabletColumnLabel extends StatelessWidget {
+  final String label;
+  final TextAlign align;
+
+  const _TabletColumnLabel(this.label, {this.align = TextAlign.left});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      textAlign: align,
+      style: const TextStyle(
+        fontSize: 11,
+        fontWeight: FontWeight.w900,
+        color: Color(0xFF475569),
+      ),
+    );
+  }
+}
+
+class _TabletAppointmentListRow extends StatelessWidget {
+  final _AppointmentGroup appointment;
+  final bool selected;
+  final bool isLast;
+  final VoidCallback onTap;
+  final VoidCallback onEdit;
+
+  const _TabletAppointmentListRow({
+    required this.appointment,
+    required this.selected,
+    required this.isLast,
+    required this.onTap,
+    required this.onEdit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = _statusColorsForGroup(appointment);
+    final serviceLabel = _appointmentServiceLabel(appointment);
+    final startClock = _clockLabel(
+      _minutesToTime(appointment.primary.startMinutes),
+    );
+    final endClock = _clockLabel(
+      _minutesToTime(appointment.primary.endMinutes),
+    );
+    final timeRange = _compactTimeRange(startClock, endClock);
+    final durationLabel = '${appointment.primary.durationMinutes} min';
+    final customerDetailParts = [
+      if (appointment.customerGender.isNotEmpty) appointment.customerGender,
+      if (appointment.customerPhone.trim().isNotEmpty &&
+          appointment.customerPhone.trim() != '-')
+        appointment.customerPhone,
+    ];
+    final customerDetail = customerDetailParts.isEmpty
+        ? 'Customer details unavailable'
+        : customerDetailParts.join(' · ');
+
+    return Material(
+      color: selected ? colors.bg : Colors.white,
+      child: InkWell(
+        onTap: onTap,
+        child: Container(
+          constraints: const BoxConstraints(minHeight: 88),
+          decoration: BoxDecoration(
+            border: Border(
+              // Coloured status indicator, constant width so columns stay
+              // aligned whether or not the row is selected.
+              left: BorderSide(color: colors.accent, width: 4),
+              bottom: BorderSide(
+                color: isLast ? Colors.transparent : const Color(0xFFE5E7EB),
+              ),
+            ),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Time
+              SizedBox(
+                width: _apptColTime,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        timeRange,
+                        maxLines: 2,
+                        softWrap: true,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w900,
+                          color: _scheduleInk,
+                          height: 1.15,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        durationLabel,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Customer
+              Expanded(
+                flex: 5,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        appointment.customerName,
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          color: _scheduleInk,
+                          height: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        customerDetail,
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Booking details
+              Expanded(
+                flex: 7,
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        serviceLabel,
+                        maxLines: 2,
+                        softWrap: true,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w800,
+                          color: _scheduleInk,
+                          height: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 14,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          _BookingMeta(
+                            icon: Icons.person_outline,
+                            text: appointment.therapistName,
+                          ),
+                          _BookingMeta(
+                            icon: Icons.meeting_room_outlined,
+                            text: appointment.roomName,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              // Payment status
+              SizedBox(
+                width: _apptColStatus,
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: _ListStatusChip(
+                    label: appointment.statusLabel,
+                    colors: colors,
+                  ),
+                ),
+              ),
+              // Amount
+              SizedBox(
+                width: _apptColAmount,
+                child: Text(
+                  appointment.priceLabel,
+                  textAlign: TextAlign.right,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w900,
+                    color: colors.accent,
+                  ),
+                ),
+              ),
+              // Actions
+              SizedBox(
+                width: _apptColActions,
+                child: Center(
+                  child: _ListIconButton(
+                    icon: Icons.edit_outlined,
+                    onTap: onEdit,
+                    tooltip: 'Edit appointment',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Compresses "10:00 AM" + "11:00 AM" into "10:00–11:00 AM" when the
+/// meridiems match, otherwise keeps both.
+String _compactTimeRange(String start, String end) {
+  final s = start.split(' ');
+  final e = end.split(' ');
+  if (s.length == 2 && e.length == 2 && s[1] == e[1]) {
+    return '${s[0]}–${e[0]} ${e[1]}';
+  }
+  return '$start – $end';
+}
+
+/// Small icon + label used on the booking-details second line. The label
+/// wraps rather than clipping when the service or room name is long.
+class _BookingMeta extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _BookingMeta({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 14, color: const Color(0xFF94A3B8)),
+        ),
+        const SizedBox(width: 5),
+        Flexible(
+          child: Text(
+            text,
+            softWrap: true,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF475569),
             ),
           ),
         ),
-        _LegendPill(color: const Color(0xFF16A34A), label: '$count Bookings'),
-        const SizedBox(width: 10),
-        _LegendPill(color: const Color(0xFF2563EB), label: '$pending Pending'),
       ],
     );
   }
 }
 
-class _CountPill extends StatelessWidget {
-  final Color color;
-  final int value;
+class _ListStatusChip extends StatelessWidget {
+  final String label;
+  final _AppointmentStatusStyle colors;
 
-  const _CountPill({required this.color, required this.value});
+  const _ListStatusChip({required this.label, required this.colors});
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      constraints: const BoxConstraints(maxWidth: 130),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: colors.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 11.5,
+          fontWeight: FontWeight.w800,
+          color: colors.accent,
+        ),
+      ),
+    );
+  }
+}
+
+class _ListIconButton extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final String tooltip;
+
+  const _ListIconButton({
+    required this.icon,
+    required this.onTap,
+    required this.tooltip,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(9),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(9),
+          child: Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: const Color(0xFFE5E7EB)),
+            ),
+            child: Icon(icon, size: 20, color: _scheduleInk),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AppointmentTherapistPanel extends StatelessWidget {
+  final List<_AppointmentTherapist> therapists;
+  final List<_AppointmentGroup> appointments;
+  final DateTime selectedDate;
+
+  const _AppointmentTherapistPanel({
+    required this.therapists,
+    required this.appointments,
+    required this.selectedDate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFDDE5EE)),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x07000000),
+            blurRadius: 18,
+            offset: Offset(0, 8),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Therapists',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+              ),
+              Text(
+                '${therapists.length}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF0F766E),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          const Text(
+            'Availability for the selected day',
+            style: TextStyle(
+              fontSize: 12,
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 14),
+          if (therapists.isEmpty)
+            const _TherapistPanelEmpty()
+          else
+            // Shrink-wrapped so every therapist shows and the whole tablet
+            // page scrolls as one, rather than this panel scrolling on its own.
+            for (final (index, item) in _sortedTherapistsForDay(
+              therapists: therapists,
+              appointments: appointments,
+              selectedDate: selectedDate,
+            ).indexed) ...[
+              if (index > 0) const SizedBox(height: 10),
+              _TherapistStatusTile(
+                therapist: item.therapist,
+                status: item.status,
+              ),
+            ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TherapistPanelEmpty extends StatelessWidget {
+  const _TherapistPanelEmpty();
+
+  @override
+  Widget build(BuildContext context) {
+    return const Center(
+      child: Text(
+        'No therapists found',
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w700,
+          color: Color(0xFF64748B),
+        ),
+      ),
+    );
+  }
+}
+
+class _TherapistStatusTile extends StatelessWidget {
+  final _AppointmentTherapist therapist;
+  final _TherapistDayStatus status;
+
+  const _TherapistStatusTile({
+    required this.therapist,
+    required this.status,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _avatarColor(therapist.name);
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFBFCFE),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFE2E8F0)),
       ),
       child: Row(
+        children: [
+          CircleAvatar(
+            radius: 20,
+            backgroundColor: color.withValues(alpha: 0.12),
+            child: Text(
+              therapist.initials,
+              style: TextStyle(
+                fontWeight: FontWeight.w900,
+                color: color,
+              ),
+            ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  therapist.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  status.detail,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                    color: Color(0xFF64748B),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          _TherapistStatusPill(status: status),
+        ],
+      ),
+    );
+  }
+}
+
+class _TherapistStatusPill extends StatelessWidget {
+  final _TherapistDayStatus status;
+
+  const _TherapistStatusPill({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: status.color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Container(
             width: 6,
             height: 6,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+            decoration: BoxDecoration(
+              color: status.color,
+              shape: BoxShape.circle,
+            ),
           ),
-          const SizedBox(width: 5),
+          const SizedBox(width: 4),
           Text(
-            '$value',
-            style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+            status.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w900,
+              color: status.color,
+            ),
           ),
         ],
       ),
@@ -1836,34 +3722,131 @@ class _CountPill extends StatelessWidget {
   }
 }
 
-class _LegendPill extends StatelessWidget {
-  final Color color;
+class _TherapistDayStatus {
   final String label;
+  final String detail;
+  final Color color;
 
-  const _LegendPill({required this.color, required this.label});
+  const _TherapistDayStatus({
+    required this.label,
+    required this.detail,
+    required this.color,
+  });
+}
 
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Text(label, style: const TextStyle(fontWeight: FontWeight.w800)),
-        ],
+class _TherapistSortItem {
+  final _AppointmentTherapist therapist;
+  final _TherapistDayStatus status;
+
+  const _TherapistSortItem({required this.therapist, required this.status});
+}
+
+List<_TherapistSortItem> _sortedTherapistsForDay({
+  required List<_AppointmentTherapist> therapists,
+  required List<_AppointmentGroup> appointments,
+  required DateTime selectedDate,
+}) {
+  final items = therapists.map((therapist) {
+    return _TherapistSortItem(
+      therapist: therapist,
+      status: _therapistDayStatus(
+        therapist: therapist,
+        appointments: appointments,
+        selectedDate: selectedDate,
       ),
     );
+  }).toList();
+  items.sort((a, b) {
+    final rank = _therapistStatusRank(a.status)
+        .compareTo(_therapistStatusRank(b.status));
+    if (rank != 0) return rank;
+    return a.therapist.name.compareTo(b.therapist.name);
+  });
+  return items;
+}
+
+int _therapistStatusRank(_TherapistDayStatus status) {
+  final label = status.label.toLowerCase();
+  final detail = status.detail.toLowerCase();
+  if (label == 'in session' || label == 'cleaning') return 0;
+  if (label == 'available' && !detail.startsWith('next')) return 1;
+  if (label == 'available' && detail.startsWith('next')) return 2;
+  if (label == 'open' || detail.contains('no bookings')) return 3;
+  return 4;
+}
+
+_TherapistDayStatus _therapistDayStatus({
+  required _AppointmentTherapist therapist,
+  required List<_AppointmentGroup> appointments,
+  required DateTime selectedDate,
+}) {
+  if (!therapist.available) {
+    return const _TherapistDayStatus(
+      label: 'Unavailable',
+      detail: 'Not taking appointments',
+      color: Color(0xFF64748B),
+    );
   }
+
+  final assigned = appointments
+      .where(
+        (group) => group.appointments.any(
+          (appointment) => appointment.therapistId == therapist.id,
+        ),
+      )
+      .toList();
+  final today = _stripTime(DateTime.now());
+  final selectedToday = _stripTime(selectedDate) == today;
+  if (!selectedToday) {
+    return _TherapistDayStatus(
+      label: assigned.isEmpty ? 'Open' : '${assigned.length} booked',
+      detail: assigned.isEmpty ? 'No bookings' : 'Selected day schedule',
+      color: assigned.isEmpty ? const Color(0xFF10B981) : const Color(0xFF2563EB),
+    );
+  }
+
+  final now = DateTime.now();
+  final nowMinutes = now.hour * 60 + now.minute;
+  final active = assigned.where((group) {
+    return nowMinutes >= group.startMinutes &&
+        nowMinutes < group.cleanupEndMinutes;
+  }).toList();
+  if (active.isNotEmpty) {
+    active.sort((a, b) => a.cleanupEndMinutes.compareTo(b.cleanupEndMinutes));
+    final current = active.first;
+    if (nowMinutes >= current.endMinutes) {
+      return _TherapistDayStatus(
+        label: 'Cleaning',
+        detail:
+            'Until ${_clockLabel(_minutesToTime(current.cleanupEndMinutes))}',
+        color: const Color(0xFFF59E0B),
+      );
+    }
+    return _TherapistDayStatus(
+      label: 'In session',
+      detail: 'Until ${_clockLabel(_minutesToTime(current.endMinutes))}',
+      color: const Color(0xFFF97316),
+    );
+  }
+
+  final upcoming = assigned
+      .where((group) => group.startMinutes > nowMinutes)
+      .toList()
+    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  if (upcoming.isNotEmpty) {
+    return _TherapistDayStatus(
+      label: 'Available',
+      detail: 'Next ${_clockLabel(_minutesToTime(upcoming.first.startMinutes))}',
+      color: const Color(0xFF10B981),
+    );
+  }
+  return _TherapistDayStatus(
+    label: 'Available',
+    detail: assigned.isEmpty
+        ? 'No bookings today'
+        : '${assigned.length} ${assigned.length == 1 ? 'booking' : 'bookings'}',
+    color: const Color(0xFF10B981),
+  );
 }
 
 class _TimelinePlacement {
@@ -1876,6 +3859,25 @@ class _TimelinePlacement {
     required this.lane,
     required this.laneCount,
   });
+}
+
+// Resolved geometry for one timeline card, so heights can be capped against
+// following cards that would otherwise be overlapped by the readable minimum.
+class _TimelineCardRect {
+  final _TimelinePlacement placement;
+  final double left;
+  final double width;
+  final double top;
+  final double rawHeight;
+  double height;
+
+  _TimelineCardRect({
+    required this.placement,
+    required this.left,
+    required this.width,
+    required this.top,
+    required this.rawHeight,
+  }) : height = rawHeight;
 }
 
 double _calculateTop(int startMinutes, int openHour, double hourHeight) {
@@ -1938,7 +3940,9 @@ List<_TimelinePlacement> _assignOverlapLanes(
       placements.add(
         _TimelinePlacement(
           appointment: appointment,
-          lane: laneByAppointment[appointment.id] ?? 0,
+          lane: (laneByAppointment[appointment.id] ?? 0)
+              .clamp(0, laneCount - 1)
+              .toInt(),
           laneCount: laneCount,
         ),
       );
@@ -1949,101 +3953,118 @@ List<_TimelinePlacement> _assignOverlapLanes(
 
 class _MobileTimeline extends StatelessWidget {
   final List<_AppointmentGroup> appointments;
-  final int openHour;
-  final int closeHour;
-  final DateTime selectedDate;
   final ValueChanged<_AppointmentGroup> onTapAppointment;
   final ValueChanged<List<_AppointmentGroup>> onTapCluster;
 
   const _MobileTimeline({
     required this.appointments,
-    required this.openHour,
-    required this.closeHour,
-    required this.selectedDate,
     required this.onTapAppointment,
     required this.onTapCluster,
   });
 
   @override
   Widget build(BuildContext context) {
-    const hourHeight = 72.0;
-    const labelWidth = 38.0;
-    const gutter = 10.0;
-    final totalHeight = (closeHour - openHour) * hourHeight;
     final groups = _buildOverlapGroups(appointments);
-
-    return SizedBox(
-      height: totalHeight,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final canvasWidth = constraints.maxWidth - labelWidth - gutter;
-          return Stack(
-            clipBehavior: Clip.none,
-            children: [
-              _TimelineGrid(
-                openHour: openHour,
-                closeHour: closeHour,
-                hourHeight: hourHeight,
-                labelWidth: labelWidth,
-                gutter: gutter,
-                showNowLine:
-                    _stripTime(selectedDate) == _stripTime(DateTime.now()),
-              ),
-              for (final group in groups)
-                _buildMobilePositionedGroup(
-                  group: group,
-                  openHour: openHour,
-                  hourHeight: hourHeight,
-                  left: labelWidth + gutter,
-                  width: canvasWidth,
-                ),
-            ],
-          );
-        },
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) ...[
+          _MobileAgendaTimeHeader(
+            appointments: groups[groupIndex],
+            onTap: groups[groupIndex].length > 1
+                ? () => onTapCluster(groups[groupIndex])
+                : null,
+          ),
+          const SizedBox(height: 8),
+          for (var index = 0; index < groups[groupIndex].length; index++) ...[
+            _MobileAppointmentCard(
+              appointment: groups[groupIndex][index],
+              onTap: () => onTapAppointment(groups[groupIndex][index]),
+            ),
+            if (index != groups[groupIndex].length - 1)
+              const SizedBox(height: 8),
+          ],
+          if (groupIndex != groups.length - 1) const SizedBox(height: 18),
+        ],
+      ],
     );
   }
+}
 
-  Widget _buildMobilePositionedGroup({
-    required List<_AppointmentGroup> group,
-    required int openHour,
-    required double hourHeight,
-    required double left,
-    required double width,
-  }) {
-    final start = group
-        .map((a) => a.startMinutes)
+class _MobileAgendaTimeHeader extends StatelessWidget {
+  final List<_AppointmentGroup> appointments;
+  final VoidCallback? onTap;
+
+  const _MobileAgendaTimeHeader({required this.appointments, this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final start = appointments
+        .map((appointment) => appointment.startMinutes)
         .reduce((a, b) => a < b ? a : b);
-    final end = group.map((a) => a.endMinutes).reduce((a, b) => a > b ? a : b);
-    final top = _calculateTop(start, openHour, hourHeight);
-    final height = _calculateHeight(
-      start,
-      end,
-      hourHeight,
-    ).clamp(42.0, 220.0).toDouble();
-
-    if (group.length == 1) {
-      final appointment = group.first;
-      return Positioned(
-        top: top,
-        left: left,
-        width: width,
-        height: height,
-        child: _MobileTimelineBlock(
-          appointment: appointment,
-          onTap: () => onTapAppointment(appointment),
+    final end = appointments
+        .map((appointment) => appointment.endMinutes)
+        .reduce((a, b) => a > b ? a : b);
+    final concurrent = appointments.length > 1;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: concurrent
+                    ? const Color(0xFFF3E8FF)
+                    : const Color(0xFFE8F5F1),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Icon(
+                concurrent ? Icons.layers_outlined : Icons.schedule_outlined,
+                size: 18,
+                color: concurrent
+                    ? const Color(0xFF7C3AED)
+                    : const Color(0xFF176B68),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    concurrent
+                        ? '${appointments.length} concurrent bookings'
+                        : _clockLabel(_minutesToTime(start)),
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF17202A),
+                    ),
+                  ),
+                  if (concurrent)
+                    Text(
+                      '${_clockLabel(_minutesToTime(start))} - ${_clockLabel(_minutesToTime(end))}',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF667085),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+            if (concurrent)
+              const Icon(
+                Icons.open_in_new,
+                size: 16,
+                color: Color(0xFF667085),
+              ),
+          ],
         ),
-      );
-    }
-
-    return Positioned(
-      top: top,
-      left: left,
-      width: width,
-      height: height,
-      child: _MobileCollapsedBlock(
-        appointments: group,
-        onTap: () => onTapCluster(group),
       ),
     );
   }
@@ -2080,6 +4101,58 @@ class _TabletTimeline extends StatelessWidget {
         builder: (context, constraints) {
           final canvasLeft = labelWidth + gutter;
           final canvasWidth = constraints.maxWidth - canvasLeft;
+          const spacing = 10.0;
+
+          // Resolve each card's geometry first.
+          final rects = <_TimelineCardRect>[];
+          for (final placement in placements) {
+            final laneWidth =
+                (canvasWidth - spacing * (placement.laneCount - 1)) /
+                placement.laneCount;
+            rects.add(
+              _TimelineCardRect(
+                placement: placement,
+                left: canvasLeft + placement.lane * (laneWidth + spacing),
+                width: laneWidth,
+                top: _calculateTop(
+                  placement.appointment.startMinutes,
+                  openHour,
+                  hourHeight,
+                ),
+                rawHeight: _calculateHeight(
+                  placement.appointment.startMinutes,
+                  placement.appointment.endMinutes,
+                  hourHeight,
+                ),
+              ),
+            );
+          }
+
+          // Short appointments get a readable minimum height, but a card must
+          // never grow past the top of a following card that shares its
+          // horizontal band, otherwise touching/back-to-back slots overlap.
+          const laneGap = 4.0;
+          for (final rect in rects) {
+            var height = rect.rawHeight.clamp(42.0, 260.0).toDouble();
+            double? nextTop;
+            for (final other in rects) {
+              if (identical(other, rect)) continue;
+              if (other.top <= rect.top + 0.5) continue;
+              final overlapsHorizontally =
+                  other.left < rect.left + rect.width - 0.5 &&
+                  other.left + other.width > rect.left + 0.5;
+              if (!overlapsHorizontally) continue;
+              if (nextTop == null || other.top < nextTop) nextTop = other.top;
+            }
+            if (nextTop != null) {
+              final available = nextTop - rect.top - laneGap;
+              if (available < height) {
+                height = available.clamp(20.0, 260.0).toDouble();
+              }
+            }
+            rect.height = height;
+          }
+
           return Stack(
             clipBehavior: Clip.none,
             children: [
@@ -2092,51 +4165,21 @@ class _TabletTimeline extends StatelessWidget {
                 showNowLine:
                     _stripTime(selectedDate) == _stripTime(DateTime.now()),
               ),
-              for (final placement in placements)
-                _buildTabletPositionedCard(
-                  placement: placement,
-                  openHour: openHour,
-                  hourHeight: hourHeight,
-                  canvasLeft: canvasLeft,
-                  canvasWidth: canvasWidth,
+              for (final rect in rects)
+                Positioned(
+                  top: rect.top,
+                  left: rect.left,
+                  width: rect.width,
+                  height: rect.height,
+                  child: _TabletAppointmentCardTile(
+                    appointment: rect.placement.appointment,
+                    selected: selectedId == rect.placement.appointment.id,
+                    onTap: () => onSelect(rect.placement.appointment),
+                  ),
                 ),
             ],
           );
         },
-      ),
-    );
-  }
-
-  Widget _buildTabletPositionedCard({
-    required _TimelinePlacement placement,
-    required int openHour,
-    required double hourHeight,
-    required double canvasLeft,
-    required double canvasWidth,
-  }) {
-    const spacing = 10.0;
-    final appointment = placement.appointment;
-    final laneWidth =
-        (canvasWidth - spacing * (placement.laneCount - 1)) /
-        placement.laneCount;
-    final left = canvasLeft + placement.lane * (laneWidth + spacing);
-    final top = _calculateTop(appointment.startMinutes, openHour, hourHeight);
-    final height = _calculateHeight(
-      appointment.startMinutes,
-      appointment.endMinutes,
-      hourHeight,
-    ).clamp(88.0, 260.0).toDouble();
-
-    return Positioned(
-      top: top,
-      left: left,
-      width: laneWidth,
-      height: height,
-      child: _TabletAppointmentCardTile(
-        appointment: appointment,
-        selected: selectedId == appointment.id,
-        forceDotOnlyStatus: placement.laneCount >= 4,
-        onTap: () => onSelect(appointment),
       ),
     );
   }
@@ -2243,6 +4286,7 @@ class _TimelineGrid extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _MobileTimelineBlock extends StatelessWidget {
   final _AppointmentGroup appointment;
   final VoidCallback onTap;
@@ -2251,10 +4295,7 @@ class _MobileTimelineBlock extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(
-      appointment.isPending,
-      appointment.isCompleted,
-    );
+    final colors = _statusColorsForGroup(appointment);
     return GestureDetector(
       onTap: onTap,
       child: Container(
@@ -2317,7 +4358,7 @@ class _MobileTimelineBlock extends StatelessWidget {
                 ),
                 const SizedBox(width: 8),
                 SizedBox(
-                  width: 150,
+                  width: compact ? 112 : 138,
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     crossAxisAlignment: CrossAxisAlignment.end,
@@ -2335,6 +4376,14 @@ class _MobileTimelineBlock extends StatelessWidget {
                           ),
                         ),
                       ),
+                      if (!compact) ...[
+                        const SizedBox(height: 6),
+                        _TimelineStatusBadge(
+                          label: appointment.statusLabel,
+                          colors: colors,
+                          compact: true,
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -2347,6 +4396,7 @@ class _MobileTimelineBlock extends StatelessWidget {
   }
 }
 
+// ignore: unused_element
 class _MobileCollapsedBlock extends StatelessWidget {
   final List<_AppointmentGroup> appointments;
   final VoidCallback onTap;
@@ -2359,7 +4409,11 @@ class _MobileCollapsedBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final first = appointments.first;
-    final colors = _statusColorsFor(first.isPending, first.isCompleted);
+    final colors = _statusColorsFor(
+      first.isPending,
+      first.isCompleted,
+      first.isInProgress,
+    );
     final start = appointments
         .map((a) => a.startMinutes)
         .reduce((a, b) => a.compareTo(b) < 0 ? a : b);
@@ -2443,90 +4497,189 @@ class _MobileAppointmentCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(
-      appointment.isPending,
-      appointment.isCompleted,
+    final colors = _statusColorsForGroup(appointment);
+    final startClock = _clockLabel(
+      _minutesToTime(appointment.primary.startMinutes),
     );
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: colors.bg,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: const Color(0xFFE5E7EB)),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x0D000000),
-              blurRadius: 8,
-              offset: Offset(0, 2),
-            ),
-          ],
-        ),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final compact = constraints.maxWidth < 310;
-            return Row(
-              children: [
-                Container(
-                  width: 3,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: colors.accent,
-                    borderRadius: BorderRadius.circular(99),
+    final endClock = _clockLabel(
+      _minutesToTime(appointment.primary.endMinutes),
+    );
+    final timeLabel =
+        '${_compactTimeRange(startClock, endClock)} · '
+        '${appointment.primary.durationMinutes} min';
+    return Material(
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: colors.border),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Container(
+                width: 4,
+                decoration: BoxDecoration(
+                  color: colors.accent,
+                  borderRadius: const BorderRadius.horizontal(
+                    left: Radius.circular(12),
                   ),
                 ),
-                const SizedBox(width: 9),
-                Expanded(
+              ),
+              // Left: customer, service, time.
+              Expanded(
+                flex: 6,
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 12, 10, 12),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
                     children: [
                       Text(
                         appointment.customerName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 13,
+                          fontSize: 15,
                           fontWeight: FontWeight.w900,
-                          color: Color(0xFF111827),
+                          color: _scheduleInk,
+                          height: 1.15,
                         ),
                       ),
-                      const SizedBox(height: 5),
+                      const SizedBox(height: 4),
                       Text(
-                        compact
-                            ? appointment.priceLabel
-                            : appointment.servicePriceLabel,
-                        maxLines: 1,
+                        _appointmentServiceLabel(appointment),
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 11,
-                          color: Color(0xFF4B5563),
+                          fontSize: 13.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF334155),
+                          height: 1.2,
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      _MobileCardInfoRow(
+                        icon: Icons.schedule_outlined,
+                        label: timeLabel,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Container(width: 1, color: const Color(0xFFE5E7EB)),
+              // Right: status, therapist, room, price.
+              Expanded(
+                flex: 5,
+                child: Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: _MobileAppointmentStatusTag(
+                          label: appointment.statusLabel,
+                          colors: colors,
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      _MobileCardInfoRow(
+                        icon: Icons.person_outline,
+                        label: appointment.therapistName,
+                      ),
+                      const SizedBox(height: 6),
+                      _MobileCardInfoRow(
+                        icon: Icons.location_on_outlined,
+                        label: appointment.roomName,
+                      ),
+                      const SizedBox(height: 10),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Text(
+                          appointment.priceLabel,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w900,
+                            color: colors.accent,
+                            height: 1,
+                          ),
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: 150,
-                  child: FittedBox(
-                    fit: BoxFit.scaleDown,
-                    alignment: Alignment.centerRight,
-                    child: Text(
-                      appointment.timeRange,
-                      maxLines: 1,
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(
-                        fontSize: 10,
-                        color: Color(0xFF111827),
-                        fontWeight: FontWeight.w800,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileCardInfoRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _MobileCardInfoRow({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 15, color: const Color(0xFF64748B)),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF475569),
+              height: 1.25,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MobileAppointmentStatusTag extends StatelessWidget {
+  final String label;
+  final _AppointmentStatusStyle colors;
+
+  const _MobileAppointmentStatusTag({
+    required this.label,
+    required this.colors,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 128),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: colors.accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        label,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontSize: 10.8,
+          fontWeight: FontWeight.w900,
+          color: colors.accent,
         ),
       ),
     );
@@ -2536,22 +4689,17 @@ class _MobileAppointmentCard extends StatelessWidget {
 class _TabletAppointmentCardTile extends StatelessWidget {
   final _AppointmentGroup appointment;
   final bool selected;
-  final bool forceDotOnlyStatus;
   final VoidCallback onTap;
 
   const _TabletAppointmentCardTile({
     required this.appointment,
     required this.selected,
-    required this.forceDotOnlyStatus,
     required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(
-      appointment.isPending,
-      appointment.isCompleted,
-    );
+    final colors = _statusColorsForGroup(appointment);
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -2573,96 +4721,254 @@ class _TabletAppointmentCardTile extends StatelessWidget {
         ),
         child: LayoutBuilder(
           builder: (context, constraints) {
-            final compact = constraints.maxHeight < 112;
-            final tight =
-                constraints.maxWidth < 220 || constraints.maxHeight < 104;
-            final veryCompact =
-                constraints.maxWidth < 180 || constraints.maxHeight < 86;
-            final priceOnly =
-                constraints.maxWidth < 150 || constraints.maxHeight < 66;
-            final dotOnly =
-                forceDotOnlyStatus ||
-                priceOnly ||
-                constraints.maxWidth < 145 ||
-                constraints.maxHeight < 58;
+            final width = constraints.maxWidth;
+            final height = constraints.maxHeight;
+            final serviceLabel = _appointmentServiceLabel(appointment);
+            final serviceCount = _appointmentServiceCount(appointment);
+            // Full-width single-lane cards span the whole row; narrower cards
+            // are stacked beside concurrent bookings. The card background is
+            // already tinted by status, so no status badge/dot is drawn.
+            final fullRow = width >= 460;
+            final timeText = width >= 240
+                ? appointment.timeRange
+                : appointment.durationLabel;
 
-            return Padding(
-              padding: EdgeInsets.all(compact || tight ? 9 : 14),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Container(
-                    width: 4,
-                    decoration: BoxDecoration(
-                      color: colors.accent,
-                      borderRadius: BorderRadius.circular(99),
-                    ),
-                  ),
-                  SizedBox(width: tight ? 8 : 10),
-                  Expanded(
-                    child: priceOnly
-                        ? Align(
-                            alignment: Alignment.centerLeft,
-                            child: Text(
-                              appointment.priceLabel,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: Color(0xFF111827),
-                                fontWeight: FontWeight.w900,
-                              ),
-                            ),
-                          )
-                        : Column(
-                            mainAxisAlignment: compact
-                                ? MainAxisAlignment.spaceBetween
-                                : MainAxisAlignment.start,
+            final accent = Container(
+              width: 4,
+              decoration: BoxDecoration(
+                color: colors.accent,
+                borderRadius: BorderRadius.circular(99),
+              ),
+            );
+
+            // THICK full-row card: plenty of height -> stack every detail,
+            // wrapping the service names across up to three lines.
+            if (fullRow && height >= 122) {
+              return Padding(
+                padding: const EdgeInsets.fromLTRB(12, 11, 14, 11),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    accent,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              Expanded(
+                                child: Text(
+                                  appointment.customerName,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 15,
+                                    color: Color(0xFF0F172A),
+                                    fontWeight: FontWeight.w900,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 10),
                               Text(
-                                appointment.customerName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
+                                appointment.priceLabel,
                                 style: TextStyle(
-                                  fontSize: tight ? 13 : 15,
-                                  color: const Color(0xFF111827),
+                                  fontSize: 14,
+                                  color: colors.accent,
                                   fontWeight: FontWeight.w900,
-                                ),
-                              ),
-                              Text(
-                                appointment.timeRange,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  fontSize: tight ? 11 : 13,
-                                  color: const Color(0xFF374151),
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                              Text(
-                                veryCompact
-                                    ? appointment.priceLabel
-                                    : appointment.servicePriceLabel,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  color: Color(0xFF4B5563),
-                                  fontWeight: FontWeight.w700,
                                 ),
                               ),
                             ],
                           ),
+                          const SizedBox(height: 5),
+                          _CardDetailLine(
+                            icon: Icons.schedule_outlined,
+                            text:
+                                '${appointment.timeRange}  ·  ${appointment.durationLabel}',
+                            color: colors.accent,
+                          ),
+                          const SizedBox(height: 4),
+                          _CardDetailLine(
+                            icon: Icons.spa_outlined,
+                            text: serviceCount > 1
+                                ? '$serviceLabel  ($serviceCount services)'
+                                : serviceLabel,
+                            maxLines: height >= 172 ? 3 : 2,
+                            emphasize: true,
+                          ),
+                          const SizedBox(height: 4),
+                          _CardDetailLine(
+                            icon: Icons.person_outline,
+                            text: appointment.therapistName,
+                          ),
+                          if (height >= 156) ...[
+                            const SizedBox(height: 4),
+                            _CardDetailLine(
+                              icon: Icons.meeting_room_outlined,
+                              text: appointment.roomName,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            // THIN full-row card: keep every detail on a single row of columns
+            // (name | time | service | therapist | price). The time collapses
+            // to its duration when the range is too long to fit its column.
+            if (fullRow) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    accent,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Expanded(
+                            flex: 18,
+                            child: Text(
+                              appointment.customerName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: Color(0xFF0F172A),
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                          ),
+                          const _ThinCardDivider(),
+                          Expanded(
+                            flex: 15,
+                            child: _AdaptiveTimeText(
+                              full: appointment.timeRange,
+                              fallback: appointment.durationLabel,
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                color: Color(0xFF334155),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          const _ThinCardDivider(),
+                          Expanded(
+                            flex: 24,
+                            child: _ThinCardIconCell(
+                              icon: Icons.spa_outlined,
+                              text: serviceLabel,
+                            ),
+                          ),
+                          const _ThinCardDivider(),
+                          Expanded(
+                            flex: 18,
+                            child: _ThinCardIconCell(
+                              icon: Icons.person_outline,
+                              text: appointment.therapistName,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            appointment.priceLabel,
+                            maxLines: 1,
+                            style: TextStyle(
+                              fontSize: 12.5,
+                              color: colors.accent,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }
+
+            // STACKED narrow card (concurrent bookings): stack name, service,
+            // then time, with the price pinned center-right. When multiple
+            // services would crowd the price, show the count instead of every
+            // service name.
+            final tiny = height < 48;
+            final showService = height >= 66;
+            final smallText = width < 170 || tiny;
+            final narrowServiceText = serviceCount > 1
+                ? '$serviceCount services'
+                : serviceLabel;
+            return Padding(
+              padding: EdgeInsets.symmetric(
+                horizontal: tiny ? 7 : 9,
+                vertical: tiny ? 4 : 6,
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  accent,
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          appointment.customerName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: smallText ? 12 : 13,
+                            color: const Color(0xFF0F172A),
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        if (showService) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            narrowServiceText,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF475569),
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 3),
+                        Text(
+                          timeText,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: smallText ? 10.5 : 11.5,
+                            color: const Color(0xFF374151),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
                   Align(
                     alignment: Alignment.centerRight,
-                    child: _TimelineStatusBadge(
-                      label: appointment.statusLabel,
-                      colors: colors,
-                      compact: tight,
-                      dotOnly: dotOnly,
+                    child: Text(
+                      appointment.priceLabel,
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: smallText ? 11 : 12,
+                        color: colors.accent,
+                        fontWeight: FontWeight.w900,
+                      ),
                     ),
                   ),
                 ],
@@ -2673,6 +4979,149 @@ class _TabletAppointmentCardTile extends StatelessWidget {
       ),
     );
   }
+}
+
+// Slim vertical separator between the columns of a thin full-row card.
+class _ThinCardDivider extends StatelessWidget {
+  const _ThinCardDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 22,
+      margin: const EdgeInsets.symmetric(horizontal: 10),
+      color: const Color(0xFFDDE5EE),
+    );
+  }
+}
+
+// A single icon + wrapping text line used inside the thick timeline card.
+class _CardDetailLine extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final int maxLines;
+  final bool emphasize;
+  final Color? color;
+
+  const _CardDetailLine({
+    required this.icon,
+    required this.text,
+    this.maxLines = 1,
+    this.emphasize = false,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textColor = color ?? const Color(0xFF475569);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 14, color: textColor),
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: maxLines,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: emphasize ? 12.5 : 12,
+              color: emphasize ? const Color(0xFF334155) : textColor,
+              fontWeight: emphasize ? FontWeight.w800 : FontWeight.w700,
+              height: 1.2,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// A single-line icon + text column used inside the thin full-row card.
+class _ThinCardIconCell extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _ThinCardIconCell({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: const Color(0xFF64748B)),
+        const SizedBox(width: 6),
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 12,
+              color: Color(0xFF334155),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+// Shows the full time range when it fits its column, otherwise falls back to
+// the shorter duration label (e.g. "21 mins") so the thin card stays on one row.
+class _AdaptiveTimeText extends StatelessWidget {
+  final String full;
+  final String fallback;
+  final TextStyle style;
+
+  const _AdaptiveTimeText({
+    required this.full,
+    required this.fallback,
+    required this.style,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final painter = TextPainter(
+          text: TextSpan(text: full, style: style),
+          maxLines: 1,
+          textDirection: Directionality.of(context),
+        )..layout();
+        final fits = painter.width <= constraints.maxWidth;
+        return Text(
+          fits ? full : fallback,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+      },
+    );
+  }
+}
+
+String _appointmentServiceLabel(_AppointmentGroup appointment) {
+  final names = appointment.serviceItems
+      .map((item) => item['name']?.toString().trim() ?? '')
+      .where((name) => name.isNotEmpty)
+      .toSet()
+      .toList();
+  if (names.isEmpty) return appointment.serviceName;
+  return names.join(', ');
+}
+
+int _appointmentServiceCount(_AppointmentGroup appointment) {
+  final names = appointment.serviceItems
+      .map((item) => item['name']?.toString().trim() ?? '')
+      .where((name) => name.isNotEmpty)
+      .toSet();
+  return names.isEmpty ? 1 : names.length;
 }
 
 class _AppointmentStatusStyle {
@@ -2708,7 +5157,7 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = _statusColorsFor(group.isPending, group.isCompleted);
+    final colors = _statusColorsForGroup(group);
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
@@ -2807,13 +5256,30 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
             _SummaryItem(
               icon: Icons.schedule_outlined,
               label: 'Time',
-              title: group.timeRange,
+              title: group.blockDurationLabel,
+              subtitle: group.primary.hasActualTiming
+                  ? 'Booked: ${group.primary.bookedTimeRange}  |  Actual start: ${DateFormat('h:mm a').format(group.primary.actualStartedAt!.toLocal())}'
+                  : group.cleanupUntilLabel,
             ),
             _SummaryItem(
               icon: Icons.payments_outlined,
               label: 'Price',
               title: 'RM ${group.price.toStringAsFixed(0)}',
             ),
+            if (group.hasPayment) ...[
+              _SummaryItem(
+                icon: Icons.receipt_long_outlined,
+                label: 'Receipt',
+                title: group.receiptNumber,
+              ),
+              _SummaryItem(
+                icon: Icons.verified_outlined,
+                label: 'Payment',
+                title:
+                    '${_paymentMethodLabel(group.paymentMethod)} - ${group.paymentStatus.toLowerCase() == 'paid' ? 'Paid' : group.paymentStatus}',
+                subtitle: 'RM ${group.paidAmount.toStringAsFixed(2)} paid',
+              ),
+            ],
             const SizedBox(height: 6),
             const Text(
               'Service Details',
@@ -2831,23 +5297,31 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
                 onEdit: () => onEditPax(group.appointments[index]),
               ),
             const SizedBox(height: 12),
+            if (onComplete != null)
+              _PanelActionButton(
+                icon: group.isInProgress
+                    ? Icons.task_alt_outlined
+                    : group.hasPayment
+                    ? Icons.login_rounded
+                    : Icons.point_of_sale_outlined,
+                label: group.isInProgress
+                    ? 'Complete Group Service'
+                    : group.hasPayment
+                    ? 'Check-In'
+                    : 'Confirm Payment',
+                color: const Color(0xFF15803D),
+                onPressed: onComplete!,
+              ),
             _PanelActionButton(
               icon: Icons.edit_outlined,
               label: 'Edit Appointment',
               color: const Color(0xFFF59E0B),
               onPressed: onEditGroup,
             ),
-            if (onComplete != null)
-              _PanelActionButton(
-                icon: Icons.point_of_sale_outlined,
-                label: 'Confirm Group Payment',
-                color: const Color(0xFF15803D),
-                onPressed: onComplete!,
-              ),
             if (onCancel != null)
               _PanelActionButton(
                 icon: Icons.delete_outline,
-                label: 'Cancel Group Booking',
+                label: 'Cancel Booking',
                 color: const Color(0xFFE53935),
                 onPressed: onCancel!,
               ),
@@ -2927,7 +5401,7 @@ class _GroupPaxDetailCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  '${appointment.therapistName} - ${appointment.roomName} - ${appointment.priceLabel}',
+                  '${appointment.therapistName} - ${appointment.roomName} - ${appointment.priceLabel} - ${appointment.cleanupUntilLabel}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -2952,29 +5426,78 @@ class _GroupPaxDetailCard extends StatelessWidget {
 }
 
 _AppointmentStatusStyle _statusColors(_ScheduleAppointment appointment) {
-  return _statusColorsFor(appointment.isPending, appointment.isCompleted);
+  return _statusColorsFor(
+    appointment.isPending,
+    appointment.isCompleted,
+    appointment.isInProgress,
+    appointment.hasPayment,
+  );
 }
 
-_AppointmentStatusStyle _statusColorsFor(bool isPending, bool isCompleted) {
-  if (isPending) {
+_AppointmentStatusStyle _statusColorsForGroup(_AppointmentGroup group) {
+  return _statusColorsFor(
+    group.isPending,
+    group.isCompleted,
+    group.isInProgress,
+    group.hasPayment,
+  );
+}
+
+_AppointmentStatusStyle _statusColorsFor(
+  bool isPending,
+  bool isCompleted, [
+  bool isInProgress = false,
+  bool hasPayment = false,
+]) {
+  if (isCompleted) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF059669),
+      bg: Color(0xFFF0FDF4),
+      border: Color(0xFF86EFAC),
+    );
+  }
+  if (isInProgress) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFF97316),
+      bg: Color(0xFFFFF7ED),
+      border: Color(0xFFFED7AA),
+    );
+  }
+  // Paid but not yet started = Awaiting (online bookings) -> blue.
+  if (isPending && hasPayment) {
     return const _AppointmentStatusStyle(
       accent: Color(0xFF2563EB),
       bg: Color(0xFFEFF6FF),
       border: Color(0xFF93C5FD),
     );
   }
-  if (isCompleted) {
+  // Pending in-app booking that still needs payment -> purple.
+  if (isPending) {
     return const _AppointmentStatusStyle(
-      accent: Color(0xFF15803D),
-      bg: Color(0xFFF0FDF4),
-      border: Color(0xFF86EFAC),
+      accent: Color(0xFF7C3AED),
+      bg: Color(0xFFF5F3FF),
+      border: Color(0xFFC4B5FD),
     );
   }
   return const _AppointmentStatusStyle(
-    accent: Color(0xFF2F7D59),
-    bg: Color(0xFFF0F7F0),
-    border: Color(0xFFB7DCB9),
+    accent: Color(0xFF2563EB),
+    bg: Color(0xFFEFF6FF),
+    border: Color(0xFF93C5FD),
   );
+}
+
+Color _avatarColor(String value) {
+  const colors = [
+    Color(0xFF2563EB),
+    Color(0xFF0F766E),
+    Color(0xFF7C3AED),
+    Color(0xFFDB2777),
+    Color(0xFF0891B2),
+    Color(0xFF059669),
+  ];
+  if (value.trim().isEmpty) return colors.first;
+  final hash = value.codeUnits.fold<int>(0, (total, unit) => total + unit);
+  return colors[hash % colors.length];
 }
 
 class _AppointmentSummaryPanel extends StatelessWidget {
@@ -3089,14 +5612,31 @@ class _AppointmentSummaryPanel extends StatelessWidget {
             _SummaryItem(
               icon: Icons.schedule_outlined,
               label: 'Time',
-              title:
-                  '${appointment.timeRange} (${appointment.durationMinutes} min)',
+              title: appointment.blockDurationLabel,
+              subtitle: appointment.hasActualTiming
+                  ? 'Booked: ${appointment.bookedTimeRange}  |  Actual start: ${DateFormat('h:mm a').format(appointment.actualStartedAt!.toLocal())}'
+                  : appointment.cleanupUntilLabel,
             ),
             _SummaryItem(
               icon: Icons.payments_outlined,
               label: 'Price',
               title: 'RM ${appointment.price.toStringAsFixed(0)}',
             ),
+            if (appointment.hasPayment) ...[
+              _SummaryItem(
+                icon: Icons.receipt_long_outlined,
+                label: 'Receipt',
+                title: appointment.receiptNumber,
+              ),
+              _SummaryItem(
+                icon: Icons.verified_outlined,
+                label: 'Payment',
+                title:
+                    '${_paymentMethodLabel(appointment.paymentMethod)} - ${appointment.paymentStatus.toLowerCase() == 'paid' ? 'Paid' : appointment.paymentStatus}',
+                subtitle:
+                    'RM ${appointment.paidAmount.toStringAsFixed(2)} paid',
+              ),
+            ],
             if (appointment.notes.trim().isNotEmpty) ...[
               const SizedBox(height: 4),
               const Text(
@@ -3127,19 +5667,27 @@ class _AppointmentSummaryPanel extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 18),
+            if (onComplete != null)
+              _PanelActionButton(
+                icon: appointment.isInProgress
+                    ? Icons.task_alt_outlined
+                    : appointment.hasPayment
+                    ? Icons.login_rounded
+                    : Icons.point_of_sale_outlined,
+                label: appointment.isInProgress
+                    ? 'Complete Service'
+                    : appointment.hasPayment
+                    ? 'Check-In'
+                    : 'Confirm Payment',
+                color: const Color(0xFF15803D),
+                onPressed: onComplete!,
+              ),
             _PanelActionButton(
               icon: Icons.edit_outlined,
               label: 'Edit Appointment',
               color: const Color(0xFFF59E0B),
               onPressed: onEdit,
             ),
-            if (onComplete != null)
-              _PanelActionButton(
-                icon: Icons.point_of_sale_outlined,
-                label: 'Confirm Payment',
-                color: const Color(0xFF15803D),
-                onPressed: onComplete!,
-              ),
             if (onCancel != null)
               _PanelActionButton(
                 icon: Icons.delete_outline,
@@ -3184,38 +5732,15 @@ class _TimelineStatusBadge extends StatelessWidget {
   final String label;
   final _AppointmentStatusStyle colors;
   final bool compact;
-  final bool dotOnly;
 
   const _TimelineStatusBadge({
     required this.label,
     required this.colors,
     this.compact = false,
-    this.dotOnly = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    if (dotOnly) {
-      return Tooltip(
-        message: label,
-        child: Container(
-          width: 11,
-          height: 11,
-          decoration: BoxDecoration(
-            color: colors.accent,
-            shape: BoxShape.circle,
-            boxShadow: [
-              BoxShadow(
-                color: colors.accent.withValues(alpha: 0.24),
-                blurRadius: 7,
-                spreadRadius: 1,
-              ),
-            ],
-          ),
-        ),
-      );
-    }
-
     final dotSize = compact ? 6.0 : 7.0;
     return Container(
       padding: EdgeInsets.symmetric(
@@ -3448,19 +5973,6 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       final customerName = _resolvedCustomerName();
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
-      final therapistCommissionAmount =
-          CommissionRepository.commissionForServices(
-            widget.appointment.serviceItems,
-            staff: widget.appointment.therapistCommissionData,
-            role: 'Therapist',
-          );
-      final counterCommissionAmount = counterStaff == null
-          ? 0.0
-          : CommissionRepository.commissionForServices(
-              widget.appointment.serviceItems,
-              staff: counterStaff,
-              role: 'Counter',
-            );
       final shouldSaveCustomerProfile =
           widget.appointment.isGuestAccount &&
           _saveCustomerProfile &&
@@ -3477,29 +5989,23 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                 'notes': 'Created from appointment checkout',
               }
             : null,
-        appointmentUpdates: {'customerId': customerId},
+        appointmentUpdates: {
+          'customerId': customerId,
+          ...widget.appointment.serviceStartUpdates(DateTime.now()),
+        },
         transactionValues: {
           'customerId': customerId,
           'customerName': customerName,
           'customerPhone': _phone.text.trim().isNotEmpty
               ? _phone.text.trim()
               : widget.appointment.customerPhone,
-          'serviceId': widget.appointment.serviceId,
-          'serviceName': widget.appointment.serviceName,
-          'serviceItems': widget.appointment.serviceItems,
-          'itemCount': widget.appointment.serviceItems.length,
-          'therapistId': widget.appointment.therapistId,
-          'therapistName': widget.appointment.therapistName,
           if (counterStaff != null) ...{
             'counterStaffId': counterStaff['id'],
             'counterStaffName': counterStaff['name'],
           },
-          'roomName': widget.appointment.roomName,
           'servicePrice': _servicePrice,
           'sstAmount': _sstAmount,
           'totalAmount': _totalAmount,
-          'therapistCommissionAmount': therapistCommissionAmount,
-          'counterCommissionAmount': counterCommissionAmount,
           'source': 'appointment',
           'paymentMethod': _paymentMethod,
           'paymentStatus': 'paid',
@@ -3510,7 +6016,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Payment recorded and booking completed'),
+          content: Text('Payment recorded - service is now in progress'),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
@@ -3521,7 +6027,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to confirm booking: $e'),
+          content: Text('Unable to confirm booking: ${friendlyErrorMessage(e)}'),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -3656,7 +6162,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                       final compact = constraints.maxWidth < 460;
                       final width = compact
                           ? constraints.maxWidth
-                          : (constraints.maxWidth - 24) / 3;
+                          : (constraints.maxWidth - 36) / 4;
                       return Wrap(
                         spacing: 12,
                         runSpacing: 12,
@@ -3685,10 +6191,22 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                             width: width,
                             child: _CheckoutPaymentMethodCard(
                               icon: Icons.credit_card_outlined,
-                              label: 'Card',
-                              isSelected: _paymentMethod == 'card',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'card'),
+                              label: 'Credit Card',
+                              isSelected: _paymentMethod == 'credit_card',
+                              onTap: () => setState(
+                                () => _paymentMethod = 'credit_card',
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: width,
+                            child: _CheckoutPaymentMethodCard(
+                              icon: Icons.credit_card,
+                              label: 'Debit Card',
+                              isSelected: _paymentMethod == 'debit_card',
+                              onTap: () => setState(
+                                () => _paymentMethod = 'debit_card',
+                              ),
                             ),
                           ),
                         ],
@@ -3711,7 +6229,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                               ),
                             )
                           : const Icon(Icons.check, size: 18),
-                      label: const Text('Confirm Payment & Complete'),
+                      label: const Text('Confirm Payment & Start Service'),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
                         disabledBackgroundColor: const Color(0xFFBDBDBD),
@@ -3810,18 +6328,6 @@ class _AppointmentGroupCheckoutSheetState
     return widget.group.isGuestAccount ? 'Guest' : widget.group.customerName;
   }
 
-  double _therapistCommissionTotal() {
-    var total = 0.0;
-    for (final appointment in widget.group.appointments) {
-      total += CommissionRepository.commissionForServices(
-        appointment.serviceItems,
-        staff: appointment.therapistCommissionData,
-        role: 'Therapist',
-      );
-    }
-    return total;
-  }
-
   Future<void> _confirmCheckout() async {
     if (!_canConfirm) return;
     setState(() => _saving = true);
@@ -3831,18 +6337,11 @@ class _AppointmentGroupCheckoutSheetState
       final customerName = _resolvedCustomerName();
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
-      final therapistCommissionAmount = _therapistCommissionTotal();
-      final counterCommissionAmount = counterStaff == null
-          ? 0.0
-          : CommissionRepository.commissionForServices(
-              widget.group.serviceItems,
-              staff: counterStaff,
-              role: 'Counter',
-            );
       final shouldSaveCustomerProfile =
           widget.group.isGuestAccount &&
           _saveCustomerProfile &&
           _hasMemberDetails;
+      final serviceStartedAt = DateTime.now();
 
       await _appointmentRepository.checkoutAppointmentGroup(
         appointmentGroupId: widget.group.appointmentGroupId,
@@ -3857,28 +6356,23 @@ class _AppointmentGroupCheckoutSheetState
               }
             : null,
         appointmentUpdates: {'customerId': customerId},
+        appointmentUpdatesById: {
+          for (final appointment in widget.group.appointments)
+            appointment.id: appointment.serviceStartUpdates(serviceStartedAt),
+        },
         transactionValues: {
           'customerId': customerId,
           'customerName': customerName,
           'customerPhone': _phone.text.trim().isNotEmpty
               ? _phone.text.trim()
               : widget.group.customerPhone,
-          'serviceId': widget.group.primary.serviceId,
-          'serviceName': widget.group.serviceName,
-          'serviceItems': widget.group.serviceItems,
-          'itemCount': widget.group.serviceItems.length,
-          'therapistId': widget.group.primary.therapistId,
-          'therapistName': widget.group.therapistName,
           if (counterStaff != null) ...{
             'counterStaffId': counterStaff['id'],
             'counterStaffName': counterStaff['name'],
           },
-          'roomName': widget.group.roomName,
           'servicePrice': _servicePrice,
           'sstAmount': _sstAmount,
           'totalAmount': _totalAmount,
-          'therapistCommissionAmount': therapistCommissionAmount,
-          'counterCommissionAmount': counterCommissionAmount,
           'source': 'appointment',
           'paymentMethod': _paymentMethod,
           'paymentStatus': 'paid',
@@ -3889,7 +6383,9 @@ class _AppointmentGroupCheckoutSheetState
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Group payment recorded and booking completed'),
+          content: Text(
+            'Group payment recorded - services are now in progress',
+          ),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
@@ -3900,7 +6396,9 @@ class _AppointmentGroupCheckoutSheetState
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to confirm group booking: $e'),
+          content: Text(
+            'Unable to confirm group booking: ${friendlyErrorMessage(e)}',
+          ),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -4035,7 +6533,7 @@ class _AppointmentGroupCheckoutSheetState
                       final compact = constraints.maxWidth < 460;
                       final width = compact
                           ? constraints.maxWidth
-                          : (constraints.maxWidth - 24) / 3;
+                          : (constraints.maxWidth - 36) / 4;
                       return Wrap(
                         spacing: 12,
                         runSpacing: 12,
@@ -4064,10 +6562,22 @@ class _AppointmentGroupCheckoutSheetState
                             width: width,
                             child: _CheckoutPaymentMethodCard(
                               icon: Icons.credit_card_outlined,
-                              label: 'Card',
-                              isSelected: _paymentMethod == 'card',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'card'),
+                              label: 'Credit Card',
+                              isSelected: _paymentMethod == 'credit_card',
+                              onTap: () => setState(
+                                () => _paymentMethod = 'credit_card',
+                              ),
+                            ),
+                          ),
+                          SizedBox(
+                            width: width,
+                            child: _CheckoutPaymentMethodCard(
+                              icon: Icons.credit_card,
+                              label: 'Debit Card',
+                              isSelected: _paymentMethod == 'debit_card',
+                              onTap: () => setState(
+                                () => _paymentMethod = 'debit_card',
+                              ),
                             ),
                           ),
                         ],
@@ -4090,7 +6600,7 @@ class _AppointmentGroupCheckoutSheetState
                               ),
                             )
                           : const Icon(Icons.check, size: 18),
-                      label: const Text('Confirm Payment & Complete'),
+                      label: const Text('Confirm Payment & Start Services'),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
                         disabledBackgroundColor: const Color(0xFFBDBDBD),
@@ -4150,7 +6660,9 @@ class _CheckoutRecapCard extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Text(
-                  '${appointment.durationMinutes} min',
+                  appointment.bufferAfterMinutes > 0
+                      ? '${appointment.durationMinutes} + ${appointment.bufferAfterMinutes} min'
+                      : '${appointment.durationMinutes} min',
                   style: const TextStyle(
                     fontSize: 12,
                     fontWeight: FontWeight.w800,
@@ -4169,6 +6681,11 @@ class _CheckoutRecapCard extends StatelessWidget {
           Text(
             '${DateFormat('EEE, d MMM yyyy').format(appointment.date)} - ${appointment.timeRange}',
             style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+          ),
+          const SizedBox(height: 3),
+          Text(
+            appointment.cleanupUntilLabel,
+            style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
           ),
         ],
       ),
@@ -4282,6 +6799,15 @@ class _GroupCheckoutPaxRow extends StatelessWidget {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                appointment.bufferAfterMinutes > 0
+                    ? '${appointment.durationMinutes} min service + ${appointment.bufferAfterMinutes} min cleanup'
+                    : '${appointment.durationMinutes} min service',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
               ),
             ],
           ),
@@ -4533,7 +7059,9 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to save appointment: $e'),
+          content: Text(
+            'Unable to save appointment: ${friendlyErrorMessage(e)}',
+          ),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),

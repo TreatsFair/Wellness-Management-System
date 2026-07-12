@@ -96,10 +96,7 @@ class DashboardRepository {
     final rows = await appointmentsForDate(dateKey(DateTime.now()));
     return rows.where((row) {
       final status = asString(row['status']).toLowerCase();
-      final type = asString(row['type']).toLowerCase();
-      if (type == 'walkin' || type == 'walk-in' || type == 'walk_in') {
-        return false;
-      }
+      if (_isWalkInAppointmentRow(row)) return false;
       return status != 'cancelled' && status != 'canceled';
     }).length;
   }
@@ -116,7 +113,11 @@ class DashboardRepository {
   Future<int> getPendingAppointmentCount() async {
     final rows = await appointmentsForDate(dateKey(DateTime.now()));
     return rows
-        .where((row) => asString(row['status']).toLowerCase() == 'pending')
+        .where(
+          (row) =>
+              !_isWalkInAppointmentRow(row) &&
+              asString(row['status']).toLowerCase() == 'pending',
+        )
         .length;
   }
 
@@ -143,4 +144,9 @@ class DashboardRepository {
       'therapistStatus': await getTherapistStatus(),
     };
   }
+}
+
+bool _isWalkInAppointmentRow(Map<String, dynamic> row) {
+  final type = asString(row['type']).toLowerCase();
+  return type == 'walkin' || type == 'walk-in' || type == 'walk_in';
 }

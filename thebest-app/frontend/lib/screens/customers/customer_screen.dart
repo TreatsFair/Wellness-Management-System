@@ -226,8 +226,11 @@ class _CustomerOrder {
         return 'Cash';
       case 'qr_code':
         return 'QR Code';
+      case 'credit_card':
       case 'card':
-        return 'Card';
+        return 'Credit Card';
+      case 'debit_card':
+        return 'Debit Card';
       default:
         return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
     }
@@ -239,8 +242,11 @@ class _CustomerOrder {
         return Icons.payments_outlined;
       case 'qr_code':
         return Icons.qr_code_2_outlined;
+      case 'credit_card':
       case 'card':
         return Icons.credit_card_outlined;
+      case 'debit_card':
+        return Icons.credit_card;
       default:
         return Icons.receipt_long_outlined;
     }

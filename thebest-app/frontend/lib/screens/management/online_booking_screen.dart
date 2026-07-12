@@ -418,8 +418,6 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
       image,
       price,
       order,
-      before,
-      after,
       capacity,
       start,
       end;
@@ -440,8 +438,6 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
     );
     price = TextEditingController(text: '${i['display_price'] ?? ''}');
     order = TextEditingController(text: '${i['display_order'] ?? 0}');
-    before = TextEditingController(text: '${i['buffer_before_minutes'] ?? 0}');
-    after = TextEditingController(text: '${i['buffer_after_minutes'] ?? 0}');
     capacity = TextEditingController(
       text: '${i['maximum_concurrent_bookings'] ?? 3}',
     );
@@ -476,8 +472,6 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
       image,
       price,
       order,
-      before,
-      after,
       capacity,
       start,
       end,
@@ -530,7 +524,7 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
                   Padding(
                     padding: const EdgeInsets.only(top: 8),
                     child: Text(
-                      'Scheduling duration: ${internal['duration']} minutes (read-only)',
+                      'Scheduling duration: ${internal['duration']} minutes • Cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes (inherited)',
                     ),
                   ),
                 const SizedBox(height: 12),
@@ -566,7 +560,7 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
                 const Padding(
                   padding: EdgeInsets.only(top: 8),
                   child: Text(
-                    'Buffers reserve the therapist and room around the appointment for preparation or cleanup. Customers only see the actual treatment time.',
+                    'The cleanup buffer is controlled by the linked internal service and reserves both therapist and room. Customers only see treatment time.',
                     style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
                   ),
                 ),
@@ -605,26 +599,28 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
                         number: true,
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _field(
-                        before,
-                        'Buffer before (min)',
-                        '0',
-                        number: true,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _field(
-                        after,
-                        'Buffer after (min)',
-                        '0',
-                        number: true,
-                      ),
-                    ),
                   ],
                 ),
+                if (internal != null) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    width: double.infinity,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF8FAFC),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: const Color(0xFFE5E7EB)),
+                    ),
+                    child: Text(
+                      'After-service cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Color(0xFF374151),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                ],
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Use custom service hours'),
@@ -695,8 +691,12 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
                   'display_price': double.tryParse(price.text) ?? 0,
                   'display_order': int.tryParse(order.text) ?? 0,
                   'show_price': showPrice,
-                  'buffer_before_minutes': int.tryParse(before.text) ?? 0,
-                  'buffer_after_minutes': int.tryParse(after.text) ?? 0,
+                  'buffer_before_minutes': 0,
+                  'buffer_after_minutes':
+                      int.tryParse(
+                        internal?['buffer_after_minutes']?.toString() ?? '',
+                      ) ??
+                      5,
                   'maximum_concurrent_bookings':
                       int.tryParse(capacity.text) ?? 3,
                   'use_custom_hours': custom,

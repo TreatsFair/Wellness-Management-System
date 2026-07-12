@@ -35,7 +35,7 @@ create table if not exists public.online_booking_services (
   show_price boolean not null default true,
   display_order integer not null default 0,
   buffer_before_minutes integer not null default 0 check (buffer_before_minutes between 0 and 240),
-  buffer_after_minutes integer not null default 0 check (buffer_after_minutes between 0 and 240),
+  buffer_after_minutes integer not null default 5 check (buffer_after_minutes between 0 and 240),
   maximum_concurrent_bookings integer not null default 3 check (maximum_concurrent_bookings between 1 and 100),
   use_custom_hours boolean not null default false,
   created_at timestamptz not null default now(),
@@ -104,7 +104,7 @@ create table if not exists public.therapist_unavailability (
 alter table public.booking_holds
   add column if not exists online_booking_service_id uuid references public.online_booking_services(id) on delete restrict,
   add column if not exists buffer_before_minutes integer not null default 0,
-  add column if not exists buffer_after_minutes integer not null default 0;
+  add column if not exists buffer_after_minutes integer not null default 5;
 
 alter table public.appointments
   add column if not exists online_booking_service_id uuid references public.online_booking_services(id) on delete set null;

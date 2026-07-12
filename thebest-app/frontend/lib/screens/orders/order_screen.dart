@@ -1,14 +1,15 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/services/csp_service.dart';
+import '../../core/services/payment_service.dart';
+import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
-import '../../data/repositories/transaction_repository.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -24,8 +25,7 @@ String _normalizeRoomType(Object? value) {
 int _orderTimeToMinutes(String time) {
   final parts = time.split(':');
   if (parts.length < 2) return 0;
-  return (int.tryParse(parts[0]) ?? 0) * 60 +
-      (int.tryParse(parts[1]) ?? 0);
+  return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }
 
 String _orderMinutesToTime(int minutes) {
@@ -45,6 +45,7 @@ String _databaseTimeFromLabel(String label) {
 class _WalkInService {
   final String id, name, imageUrl, roomType, category;
   final int duration;
+  final int bufferAfterMinutes;
   final double price;
   final double therapistCommission;
   final double counterCommission;
@@ -56,6 +57,7 @@ class _WalkInService {
     required this.roomType,
     required this.category,
     required this.duration,
+    required this.bufferAfterMinutes,
     required this.price,
     required this.therapistCommission,
     required this.counterCommission,
@@ -69,6 +71,7 @@ class _WalkInService {
       roomType: _normalizeRoomType(d['roomType']),
       category: d['category']?.toString().trim() ?? 'Services',
       duration: _parseInt(d['duration'], fallback: 60),
+      bufferAfterMinutes: _parseInt(d['bufferAfterMinutes'], fallback: 0),
       price: _parseDouble(d['price']),
       therapistCommission: _parseDouble(d['therapistCommission']),
       counterCommission: _parseDouble(d['counterCommission']),
@@ -198,11 +201,8 @@ class _WalkInCustomer {
     );
   }
 
-  static _WalkInCustomer get anonymous => const _WalkInCustomer(
-    id: 'walk_in_guest',
-    name: 'Guest',
-    phone: '',
-  );
+  static _WalkInCustomer get anonymous =>
+      const _WalkInCustomer(id: 'walk_in_guest', name: 'Guest', phone: '');
 }
 
 // ── Start Time Option ─────────────────────────────────────────────
@@ -246,9 +246,8 @@ class _WalkInAllocation {
 
   String get startTimeValue => _databaseTimeFromLabel(startTime.timeLabel);
 
-  String get endTimeValue => _orderMinutesToTime(
-    _orderTimeToMinutes(startTimeValue) + duration,
-  );
+  String get endTimeValue =>
+      _orderMinutesToTime(_orderTimeToMinutes(startTimeValue) + duration);
 
   List<Map<String, dynamic>> get serviceItems => services
       .map(
@@ -301,7 +300,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
-  final _transactionRepository = TransactionRepository();
   final _commissionRepository = CommissionRepository();
 
   // Step tracking
@@ -401,10 +399,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _loadTherapistsLive() async {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
-    final nowTime =
-        '${now.hour.toString().padLeft(2, '0')}:'
-        '${now.minute.toString().padLeft(2, '0')}';
-
     final therapistRows = await _therapistRepository.getActiveTherapists();
 
     final therapists = <_WalkInTherapist>[];
@@ -424,14 +418,17 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       for (final d in activeAppointments) {
         final startTime = d['startTime'] as String? ?? '00:00';
         final endTime = d['endTime'] as String? ?? '00:00';
+        final bufferAfter = _parseInt(d['bufferAfterMinutes'], fallback: 0);
+        final startMinutes = _orderTimeToMinutes(startTime);
+        final blockedEndMinutes = _orderTimeToMinutes(endTime) + bufferAfter;
+        final nowMinutes = now.hour * 60 + now.minute;
 
-        if (startTime.compareTo(nowTime) <= 0 &&
-            endTime.compareTo(nowTime) > 0) {
+        if (startMinutes <= nowMinutes && blockedEndMinutes > nowMinutes) {
           isFree = false;
-          busyUntil = endTime;
+          busyUntil = _orderMinutesToTime(blockedEndMinutes);
 
           // Calculate minutes until free
-          final endParts = endTime.split(':');
+          final endParts = busyUntil.split(':');
           final endDateTime = DateTime(
             now.year,
             now.month,
@@ -472,7 +469,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Future<void> _loadZonesLive() async {
-    final today = DateFormat('yyyy-MM-dd').format(DateTime.now());
+    final now = DateTime.now();
+    final today = DateFormat('yyyy-MM-dd').format(now);
+    final nowMinutes = now.hour * 60 + now.minute;
 
     final roomRows = await _roomRepository.getActiveRooms();
 
@@ -485,10 +484,16 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       final activeAppointments = await _appointmentRepository
           .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', today);
 
-      final freeSlots = (totalSlots - activeAppointments.length).clamp(
-        0,
-        totalSlots,
-      );
+      final occupiedNow = activeAppointments.where((appointment) {
+        final start = _orderTimeToMinutes(
+          appointment['startTime']?.toString() ?? '00:00',
+        );
+        final end =
+            _orderTimeToMinutes(appointment['endTime']?.toString() ?? '00:00') +
+            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
+        return start <= nowMinutes && end > nowMinutes;
+      }).length;
+      final freeSlots = (totalSlots - occupiedNow).clamp(0, totalSlots);
 
       zones.add(
         _WalkInZone(
@@ -704,6 +709,18 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     var bEnd = _orderTimeToMinutes(b.endTimeValue);
     if (aEnd <= aStart) aEnd += 24 * 60;
     if (bEnd <= bStart) bEnd += 24 * 60;
+    aEnd += a.services.fold<int>(
+      0,
+      (buffer, service) => service.bufferAfterMinutes > buffer
+          ? service.bufferAfterMinutes
+          : buffer,
+    );
+    bEnd += b.services.fold<int>(
+      0,
+      (buffer, service) => service.bufferAfterMinutes > buffer
+          ? service.bufferAfterMinutes
+          : buffer,
+    );
     return aStart < bEnd && aEnd > bStart;
   }
 
@@ -804,10 +821,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   // ── Computed Values ────────────────────────────────────────────
 
-  int get _serviceDuration => _selectedServices.fold(
-    0,
-    (total, service) => total + service.duration,
-  );
+  int get _serviceDuration =>
+      _selectedServices.fold(0, (total, service) => total + service.duration);
 
   String get _serviceNameSummary {
     if (_selectedServices.isEmpty) return '';
@@ -822,10 +837,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         .toSet();
     return types.length == 1 ? types.first : '';
   }
-
-  List<Map<String, dynamic>> get _orderServiceItems => _checkoutAllocations
-      .expand((allocation) => allocation.serviceItems)
-      .toList();
 
   double get _orderServicePrice => _checkoutAllocations.fold(
     0,
@@ -862,47 +873,73 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         if (mounted) _showPaxConflict(conflict);
         return;
       }
-      final counterStaff = await _commissionRepository.getAvailableCounterStaff();
-      final therapistCommissionAmount = allocations.fold<double>(
-        0,
-        (total, allocation) =>
-            total +
-            CommissionRepository.commissionForServices(
-              allocation.serviceItems,
-              staff: allocation.therapist.commissionData,
-              role: 'Therapist',
-            ),
-      );
-      final counterCommissionAmount = counterStaff == null
-          ? 0.0
-          : CommissionRepository.commissionForServices(
-              _orderServiceItems,
-              staff: counterStaff,
-              role: 'Counter',
-            );
       final date = DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+      // Confirm the chosen staff/room are still free before taking payment. This
+      // mirrors the DB enforcement trigger (existing appointments + pending online
+      // booking holds), so the cashier gets a clear message up front instead of a
+      // raw error part-way through checkout.
+      for (final allocation in allocations) {
+        final availability = await CspService.validateSlot(
+          date: date,
+          startTime: allocation.startTimeValue,
+          endTime: allocation.endTimeValue,
+          therapistId: allocation.therapist.id,
+          roomId: allocation.zone.id,
+        );
+        if (!availability.therapistAvailable) {
+          if (mounted) {
+            _showPaxConflict(
+              '${allocation.therapist.name} is no longer free at '
+              '${allocation.startTime.timeLabel}. Pick another therapist or time.',
+            );
+          }
+          return;
+        }
+        if (availability.roomFull) {
+          if (mounted) {
+            _showPaxConflict(
+              '${allocation.zone.name} is full at '
+              '${allocation.startTime.timeLabel}. Pick another room or time.',
+            );
+          }
+          return;
+        }
+      }
+
+      final counterStaff = await _commissionRepository
+          .getAvailableCounterStaff();
       final notes = _transactionNotesController.text.trim();
-      CspCreateResult appointmentResult;
+      PaymentResult paymentResult;
 
       if (allocations.length == 1) {
         final allocation = allocations.first;
-        appointmentResult = await CspService.createAppointment(
+        paymentResult = await PaymentService.createWalkInAppointmentWithPayment(
           customerId: _selectedCustomer!.id,
           therapistId: allocation.therapist.id,
           roomId: allocation.zone.id,
           serviceId: allocation.primaryService.id,
-          serviceName: allocation.serviceNameSummary,
-          serviceItems: allocation.serviceItems,
-          itemCount: allocation.services.length,
           date: date,
           startTime: allocation.startTimeValue,
           endTime: allocation.endTimeValue,
-          totalPrice: allocation.servicePrice,
-          type: 'walkin',
+          servicePrice: allocation.servicePrice,
+          serviceName: allocation.serviceNameSummary,
+          serviceItems: allocation.serviceItems,
+          itemCount: allocation.services.length,
           notes: notes,
+          customerName: _selectedCustomer!.name,
+          customerPhone: _selectedCustomer!.phone,
+          counterStaffId: counterStaff?['id']?.toString(),
+          counterStaffName: counterStaff?['name']?.toString(),
+          sstAmount: _orderSstAmount,
+          totalAmount: _orderTotalAmount,
+          paymentMethod: _paymentMethod!,
+          receiptNumber: _receiptNumber,
+          transactionNotes: notes,
         );
       } else {
-        appointmentResult = await CspService.createAppointmentGroup(
+        paymentResult =
+            await PaymentService.createWalkInAppointmentGroupWithPayment(
           customerId: _selectedCustomer!.id,
           groupName: _selectedCustomer!.name,
           paxCount: allocations.length,
@@ -910,16 +947,25 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           allocations: allocations
               .map((allocation) => allocation.toCspAllocation(notes: notes))
               .toList(),
-          type: 'walkin',
           notes: notes,
+          customerName: _selectedCustomer!.name,
+          customerPhone: _selectedCustomer!.phone,
+          counterStaffId: counterStaff?['id']?.toString(),
+          counterStaffName: counterStaff?['name']?.toString(),
+          servicePrice: _orderServicePrice,
+          sstAmount: _orderSstAmount,
+          totalAmount: _orderTotalAmount,
+          paymentMethod: _paymentMethod!,
+          receiptNumber: _receiptNumber,
+          transactionNotes: notes,
         );
       }
 
-      if (!appointmentResult.success) {
+      if (!paymentResult.success) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
-              content: Text(appointmentResult.message),
+              content: Text(paymentResult.message),
               backgroundColor: const Color(0xFFE53935),
               behavior: SnackBarBehavior.floating,
             ),
@@ -927,49 +973,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         }
         return;
       }
-
-      final primaryAllocation = allocations.first;
-      final transactionValues = <String, dynamic>{
-        'customerId': _selectedCustomer!.id,
-        'customerName': _selectedCustomer!.name,
-        'customerPhone': _selectedCustomer!.phone,
-        'serviceId': primaryAllocation.primaryService.id,
-        'serviceName': _orderServiceNameSummary,
-        'serviceItems': _orderServiceItems,
-        'itemCount': _orderServiceItems.length,
-        'therapistId': primaryAllocation.therapist.id,
-        'therapistName': allocations.length == 1
-            ? primaryAllocation.therapist.name
-            : '${allocations.length} staff assigned',
-        if (counterStaff != null) ...{
-          'counterStaffId': counterStaff['id'],
-          'counterStaffName': counterStaff['name'],
-        },
-        'roomId': primaryAllocation.zone.id,
-        'roomName': allocations.length == 1
-            ? primaryAllocation.zone.name
-            : '${allocations.length} resources',
-        'servicePrice': _orderServicePrice,
-        'sstAmount': _orderSstAmount,
-        'totalAmount': _orderTotalAmount,
-        'therapistCommissionAmount': therapistCommissionAmount,
-        'counterCommissionAmount': counterCommissionAmount,
-        'source': 'walkin',
-        'paymentMethod': _paymentMethod,
-        'paymentStatus': 'paid',
-        'receiptNumber': _receiptNumber,
-        'notes': _transactionNotesController.text.trim(),
-      };
-      final appointmentId = appointmentResult.appointmentId;
-      final appointmentGroupId = appointmentResult.appointmentGroupId;
-      if (appointmentId != null) {
-        transactionValues['appointmentId'] = appointmentId;
-      }
-      if (appointmentGroupId != null) {
-        transactionValues['appointmentGroupId'] = appointmentGroupId;
-      }
-
-      await _transactionRepository.createTransaction(transactionValues);
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -985,7 +988,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('Error: $e'),
+            content: Text('Error: ${friendlyErrorMessage(e)}'),
             backgroundColor: const Color(0xFFE53935),
             behavior: SnackBarBehavior.floating,
           ),
@@ -1396,7 +1399,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               ),
               _PaxStepperButton(
                 icon: Icons.remove,
-                onTap: _paxCount <= 1 ? null : () => _setPaxCount(_paxCount - 1),
+                onTap: _paxCount <= 1
+                    ? null
+                    : () => _setPaxCount(_paxCount - 1),
               ),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -1498,9 +1503,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   Widget _buildAvailabilitySection() {
     final compatibleZones = _zones
-        .where(
-          (z) => _requiredRoomType.isEmpty || z.type == _requiredRoomType,
-        )
+        .where((z) => _requiredRoomType.isEmpty || z.type == _requiredRoomType)
         .toList();
 
     return Column(
@@ -1699,9 +1702,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           ),
           _WalkInSummaryRow(
             label: 'Duration',
-            value: _selectedServices.isNotEmpty
-                ? '$_serviceDuration min'
-                : '—',
+            value: _selectedServices.isNotEmpty ? '$_serviceDuration min' : '—',
           ),
           _WalkInSummaryRow(
             label: 'Therapist',
@@ -1732,7 +1733,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 allocation: _allocationSlots[i],
                 selected: i == _activePaxIndex,
                 onTap: () => _selectPax(i),
-                onClear: _allocationSlots[i] == null ? null : () => _clearPax(i),
+                onClear: _allocationSlots[i] == null
+                    ? null
+                    : () => _clearPax(i),
               ),
               const SizedBox(height: 8),
             ],
@@ -2105,7 +2108,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   final compactMethods = isPhone && constraints.maxWidth < 430;
                   final itemWidth = compactMethods
                       ? constraints.maxWidth
-                      : (constraints.maxWidth - 24) / 3;
+                      : (constraints.maxWidth - 36) / 4;
                   return Wrap(
                     spacing: 12,
                     runSpacing: 12,
@@ -2133,9 +2136,20 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                         width: itemWidth,
                         child: _PaymentMethodCard(
                           icon: Icons.credit_card_outlined,
-                          label: 'Card',
-                          isSelected: _paymentMethod == 'card',
-                          onTap: () => setState(() => _paymentMethod = 'card'),
+                          label: 'Credit Card',
+                          isSelected: _paymentMethod == 'credit_card',
+                          onTap: () =>
+                              setState(() => _paymentMethod = 'credit_card'),
+                        ),
+                      ),
+                      SizedBox(
+                        width: itemWidth,
+                        child: _PaymentMethodCard(
+                          icon: Icons.credit_card,
+                          label: 'Debit Card',
+                          isSelected: _paymentMethod == 'debit_card',
+                          onTap: () =>
+                              setState(() => _paymentMethod = 'debit_card'),
                         ),
                       ),
                     ],
@@ -2258,12 +2272,16 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
+    final dateOfBirth = _dobController.text.trim();
+    final joinDate = _joinDateController.text.trim();
     final data = {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
       'gender': _genderController.text.trim(),
-      'dateOfBirth': _dobController.text.trim(),
-      'joinDate': _joinDateController.text.trim(),
+      // date_of_birth/join_date are DATE columns — an empty string is not a
+      // valid date and Postgres rejects it, so omit rather than send ''.
+      if (dateOfBirth.isNotEmpty) 'dateOfBirth': dateOfBirth,
+      if (joinDate.isNotEmpty) 'joinDate': joinDate,
       'notes': _notesController.text.trim(),
     };
 
@@ -2272,13 +2290,13 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
       final customerId = savedRow['id']?.toString() ?? '';
       if (!mounted) return;
       Navigator.of(context).pop(widget.customerBuilder(customerId, data));
-    } catch (_) {
+    } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Unable to save customer'),
-          backgroundColor: Color(0xFFE53935),
+        SnackBar(
+          content: Text('Unable to save customer: ${friendlyErrorMessage(e)}'),
+          backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -2663,10 +2681,7 @@ class _QuickGenderDropdown extends StatelessWidget {
   final String label;
   final TextEditingController controller;
 
-  const _QuickGenderDropdown({
-    required this.label,
-    required this.controller,
-  });
+  const _QuickGenderDropdown({required this.label, required this.controller});
 
   String? get _value {
     final normalized = controller.text.trim().toLowerCase();
@@ -2836,10 +2851,7 @@ class _PaxStepperButton extends StatelessWidget {
   final IconData icon;
   final VoidCallback? onTap;
 
-  const _PaxStepperButton({
-    required this.icon,
-    required this.onTap,
-  });
+  const _PaxStepperButton({required this.icon, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -3680,76 +3692,76 @@ class _WalkInPaxSummaryCard extends StatelessWidget {
           ),
         ),
         child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 30,
-            height: 30,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFFE8F5F5),
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Text(
-              '$index',
-              style: const TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-                color: Color(0xFF1B6B72),
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 30,
+              height: 30,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F5F5),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Text(
+                '$index',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF1B6B72),
+                ),
               ),
             ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item?.serviceNameSummary ?? 'Pax $index',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1A1A2E),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    item?.serviceNameSummary ?? 'Pax $index',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1A1A2E),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  item == null
-                      ? 'Tap to configure service, staff, zone, and time'
-                      : '${item.therapist.name} - ${item.zone.name}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w500,
-                    color: Color(0xFF64748B),
+                  const SizedBox(height: 4),
+                  Text(
+                    item == null
+                        ? 'Tap to configure service, staff, zone, and time'
+                        : '${item.therapist.name} - ${item.zone.name}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w500,
+                      color: Color(0xFF64748B),
+                    ),
                   ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  item == null
-                      ? (selected ? 'Editing' : 'Not configured')
-                      : '${item.startTime.timeLabel} - RM ${item.servicePrice.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF1B6B72),
+                  const SizedBox(height: 2),
+                  Text(
+                    item == null
+                        ? (selected ? 'Editing' : 'Not configured')
+                        : '${item.startTime.timeLabel} - RM ${item.servicePrice.toStringAsFixed(2)}',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF1B6B72),
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
-          if (onClear != null)
-            IconButton(
-              onPressed: onClear,
-              icon: const Icon(Icons.close, size: 18),
-              color: const Color(0xFFE53935),
-              tooltip: 'Clear pax',
-            ),
-        ],
-      ),
+            if (onClear != null)
+              IconButton(
+                onPressed: onClear,
+                icon: const Icon(Icons.close, size: 18),
+                color: const Color(0xFFE53935),
+                tooltip: 'Clear pax',
+              ),
+          ],
+        ),
       ),
     );
   }
