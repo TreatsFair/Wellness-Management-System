@@ -15,11 +15,17 @@ const _line = Color(0xFFE5E7EB);
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
+bool _sameDay(DateTime left, DateTime right) =>
+    _stripDate(left) == _stripDate(right);
+
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
   final text = value.toString();
   return text.trim().isEmpty ? fallback : text;
 }
+
+String _normalizeStaffName(String value) =>
+    value.trim().toLowerCase().replaceAll(RegExp(r'\s+'), ' ');
 
 double _asDouble(Object? value, [double fallback = 0]) {
   if (value is num) return value.toDouble();
@@ -42,10 +48,44 @@ List<Map<String, dynamic>> _asMapList(Object? value) {
       .toList();
 }
 
+// Postgres timestamptz values (created_at, actual_completed_at, ...) arrive as
+// ISO strings with an offset, which DateTime.parse reads as UTC. Convert to the
+// device's local (Malaysia) zone so bill times display in KL and the two-axis
+// day bucketing compares against the same local calendar day. Naive timestamps
+// (e.g. start_at) parse as local already, so toLocal() is a harmless no-op there.
 DateTime _asDateTime(Object? value) {
-  if (value is DateTime) return value;
-  if (value is String) return DateTime.tryParse(value) ?? DateTime.now();
+  if (value is DateTime) return value.toLocal();
+  if (value is String) {
+    return (DateTime.tryParse(value) ?? DateTime.now()).toLocal();
+  }
   return DateTime.now();
+}
+
+DateTime? _tryDateTime(Object? value) {
+  if (value is DateTime) return value.toLocal();
+  if (value is String) return DateTime.tryParse(value)?.toLocal();
+  return null;
+}
+
+DateTime? _historyServiceCompletedAt({
+  required Map<String, dynamic> appointment,
+  required List<Map<String, dynamic>> groupAppointments,
+  required DateTime? fallback,
+}) {
+  if (appointment.isNotEmpty) return _tryDateTime(appointment['actualCompletedAt']);
+  if (groupAppointments.isEmpty) return fallback;
+
+  DateTime? latest;
+  for (final item in groupAppointments) {
+    final status = _asString(item['status']).toLowerCase();
+    if (status == 'cancelled' || status == 'canceled' || status == 'no_show') {
+      continue;
+    }
+    final completedAt = _tryDateTime(item['actualCompletedAt']);
+    if (completedAt == null) return null;
+    if (latest == null || completedAt.isAfter(latest)) latest = completedAt;
+  }
+  return latest;
 }
 
 String _normalizeOrderSource({
@@ -57,7 +97,7 @@ String _normalizeOrderSource({
   final source = _asString(txSource).trim().toLowerCase();
   if (source == 'walkin' || source == 'walk-in') return 'walkin';
   if (source == 'appointment' || source == 'booking') return 'appointment';
-  if (source == 'online') return 'online';
+  if (source == 'online' || source == 'online_booking') return 'online';
 
   final type = _asString(appointmentType).trim().toLowerCase();
   if (type == 'walkin' || type == 'walk-in') return 'walkin';
@@ -117,9 +157,8 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     });
 
     try {
-      final transactionRows = await _transactionRepository.getSalesHistory(
-        _selectedDate,
-      );
+      await _appointmentRepository.completeDueAppointments();
+      final transactionRows = await _transactionRepository.listTransactions();
 
       final transactionDocs = transactionRows.where((row) {
         final status = _asString(row['paymentStatus']).toLowerCase();
@@ -130,17 +169,36 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       final appointmentIds = transactionData
           .map((d) => _asString(d['appointmentId']))
           .where((id) => id.isNotEmpty);
+      final appointmentGroupIds = transactionData
+          .map((d) => _asString(d['appointmentGroupId']))
+          .where((id) => id.isNotEmpty)
+          .toSet();
       final customerIds = transactionData
           .map((d) => _asString(d['customerId']))
           .where((id) => id.isNotEmpty);
 
       final appointments = await _loadDocMap('appointments', appointmentIds);
+      final groupAppointmentRows = await _dashboardRepository.loadWhereIn(
+        'appointments',
+        'appointment_group_id',
+        appointmentGroupIds.cast<Object>(),
+      );
+      final appointmentsByGroup = <String, List<Map<String, dynamic>>>{};
+      for (final appointment in groupAppointmentRows) {
+        final groupId = _asString(appointment['appointmentGroupId']);
+        if (groupId.isEmpty) continue;
+        appointmentsByGroup.putIfAbsent(groupId, () => []).add(appointment);
+      }
       final linkedCustomerIds = appointments.values
+          .map((d) => _asString(d['customerId']))
+          .where((id) => id.isNotEmpty);
+      final groupCustomerIds = groupAppointmentRows
           .map((d) => _asString(d['customerId']))
           .where((id) => id.isNotEmpty);
       final serviceIds = [
         ...transactionData.map((d) => _asString(d['serviceId'])),
         ...appointments.values.map((d) => _asString(d['serviceId'])),
+        ...groupAppointmentRows.map((d) => _asString(d['serviceId'])),
         ...transactionData.expand(
           (d) => _asMapList(
             d['serviceItems'] ?? d['service_items'] ?? d['items'],
@@ -150,15 +208,18 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       final therapistIds = [
         ...transactionData.map((d) => _asString(d['therapistId'])),
         ...appointments.values.map((d) => _asString(d['therapistId'])),
+        ...groupAppointmentRows.map((d) => _asString(d['therapistId'])),
       ].where((id) => id.isNotEmpty);
       final roomIds = [
         ...transactionData.map((d) => _asString(d['roomId'])),
         ...appointments.values.map((d) => _asString(d['roomId'])),
+        ...groupAppointmentRows.map((d) => _asString(d['roomId'])),
       ].where((id) => id.isNotEmpty);
 
       final customers = await _loadDocMap('customers', [
         ...customerIds,
         ...linkedCustomerIds,
+        ...groupCustomerIds,
       ]);
       final services = await _loadDocMap('services', serviceIds);
       final therapists = await _loadDocMap('therapists', therapistIds);
@@ -169,18 +230,26 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
             (transaction) => _HistoryOrder.fromTransaction(
               transaction,
               appointments: appointments,
+              appointmentsByGroup: appointmentsByGroup,
               customers: customers,
               services: services,
               therapists: therapists,
               rooms: rooms,
             ),
           )
-          .toList();
+          .where(
+            (order) =>
+                _sameDay(order.paidAt, _selectedDate) ||
+                (order.serviceCompletedAt != null &&
+                    _sameDay(order.serviceCompletedAt!, _selectedDate)),
+          )
+          .toList()
+        ..sort((a, b) => b.displayAt.compareTo(a.displayAt));
 
       if (!mounted) return;
       setState(() {
         _orders = orders;
-        _summary = _HistorySummary.fromOrders(orders);
+        _summary = _HistorySummary.fromOrders(orders, _selectedDate);
         _therapists = therapists;
         _loading = false;
       });
@@ -545,6 +614,7 @@ class _HistoryOrder {
   final String customerName;
   final String customerPhone;
   final String serviceName;
+  final String therapistId;
   final String therapistName;
   final String roomName;
   final String paymentMethod;
@@ -557,6 +627,8 @@ class _HistoryOrder {
   final double totalAmount;
   final double therapistCommissionAmount;
   final double counterCommissionAmount;
+  final DateTime paidAt;
+  final DateTime? serviceCompletedAt;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -570,6 +642,7 @@ class _HistoryOrder {
     required this.customerName,
     required this.customerPhone,
     required this.serviceName,
+    required this.therapistId,
     required this.therapistName,
     required this.roomName,
     required this.paymentMethod,
@@ -582,6 +655,8 @@ class _HistoryOrder {
     required this.totalAmount,
     required this.therapistCommissionAmount,
     required this.counterCommissionAmount,
+    required this.paidAt,
+    required this.serviceCompletedAt,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -589,6 +664,7 @@ class _HistoryOrder {
   factory _HistoryOrder.fromTransaction(
     Map<String, dynamic> tx, {
     required Map<String, Map<String, dynamic>> appointments,
+    required Map<String, List<Map<String, dynamic>>> appointmentsByGroup,
     required Map<String, Map<String, dynamic>> customers,
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
@@ -597,6 +673,15 @@ class _HistoryOrder {
     final appointmentId = _asString(tx['appointmentId']);
     final appointmentGroupId = _asString(tx['appointmentGroupId']);
     final appointment = appointments[appointmentId] ?? {};
+    final groupAppointments = appointmentsByGroup[appointmentGroupId] ?? const [];
+    final hasLinkedAppointment =
+        appointment.isNotEmpty || groupAppointments.isNotEmpty;
+    final paidAt = _tryDateTime(tx['paidAt']) ?? _asDateTime(tx['createdAt']);
+    final serviceCompletedAt = _historyServiceCompletedAt(
+      appointment: appointment,
+      groupAppointments: groupAppointments,
+      fallback: hasLinkedAppointment ? null : paidAt,
+    );
     final source = _normalizeOrderSource(
       txSource: tx['source'],
       appointmentType: appointment['type'],
@@ -651,6 +736,19 @@ class _HistoryOrder {
                     ),
                   ),
                 ),
+                'assignedTherapistId': _asString(
+                  item['assignedTherapistId'],
+                  therapistId,
+                ),
+                'assignedTherapistName': _asString(
+                  item['assignedTherapistName'],
+                  _asString(therapist['name'], _asString(tx['therapistName'])),
+                ),
+                'assignedRoomId': _asString(item['assignedRoomId'], roomId),
+                'assignedRoomName': _asString(
+                  item['assignedRoomName'],
+                  _asString(room['name'], _asString(tx['roomName'])),
+                ),
               };
             })
             .toList();
@@ -697,6 +795,7 @@ class _HistoryOrder {
       customerName: customerName,
       customerPhone: customerPhone,
       serviceName: serviceName,
+      therapistId: therapistId,
       therapistName: therapistName,
       roomName: roomName,
       paymentMethod: _asString(tx['paymentMethod'], 'unknown'),
@@ -712,7 +811,9 @@ class _HistoryOrder {
       ),
       therapistCommissionAmount: _asDouble(tx['therapistCommissionAmount']),
       counterCommissionAmount: _asDouble(tx['counterCommissionAmount']),
-      createdAt: _asDateTime(tx['createdAt']),
+      paidAt: paidAt,
+      serviceCompletedAt: serviceCompletedAt,
+      createdAt: paidAt,
       updatedAt: _asDateTime(tx['updatedAt'] ?? tx['createdAt']),
     );
   }
@@ -720,7 +821,12 @@ class _HistoryOrder {
   bool get isAppointmentBooking => source == 'appointment' || source == 'online';
   bool get isWalkIn => source == 'walkin';
   bool get isVoided => paymentStatus == 'voided';
+  bool get isServiceCompleted => serviceCompletedAt != null;
+  DateTime get displayAt => serviceCompletedAt ?? paidAt;
+  String get serviceStateLabel =>
+      isServiceCompleted ? 'Service Completed' : 'Service Pending';
   String get sourceLabel {
+    if (source == 'online') return 'Online Booking';
     if (isAppointmentBooking) return 'Appointment booking';
     if (isWalkIn) return 'Walk-in';
     return source.isEmpty ? 'Walk-in' : source;
@@ -736,6 +842,9 @@ class _HistoryOrder {
         return 'Credit Card';
       case 'debit_card':
         return 'Debit Card';
+      case 'billplz':
+      case 'online':
+        return 'Online';
       default:
         return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
     }
@@ -886,13 +995,27 @@ class _HistorySummary {
     totalTherapistCommission: 0,
   );
 
-  factory _HistorySummary.fromOrders(List<_HistoryOrder> orders) {
+  factory _HistorySummary.fromOrders(
+    List<_HistoryOrder> orders,
+    DateTime selectedDate,
+  ) {
     final paidOrders = orders.where((order) => !order.isVoided).toList();
+    final collectionOrders = paidOrders
+        .where((order) => _sameDay(order.paidAt, selectedDate))
+        .toList();
+    final serviceOrders = paidOrders
+        .where(
+          (order) =>
+              order.serviceCompletedAt != null &&
+              _sameDay(order.serviceCompletedAt!, selectedDate),
+        )
+        .toList();
     final paymentTotals = {
       'cash': 0.0,
       'qr_code': 0.0,
       'credit_card': 0.0,
       'debit_card': 0.0,
+      'online': 0.0,
       'other': 0.0,
     };
     final customers = <String>{};
@@ -902,28 +1025,34 @@ class _HistorySummary {
     var itemCount = 0;
     var totalTherapistCommission = 0.0;
 
-    for (final order in paidOrders) {
+    for (final order in collectionOrders) {
       collection += order.totalAmount;
-      serviceNet += order.servicePrice;
       sst += order.sstAmount;
-      itemCount += order.itemCount;
-      totalTherapistCommission += order.therapistCommissionAmount;
       customers.add(
         order.customerId.isNotEmpty ? order.customerId : order.customerName,
       );
-      if (paymentTotals.containsKey(order.paymentMethod)) {
-        paymentTotals[order.paymentMethod] =
-            paymentTotals[order.paymentMethod]! + order.totalAmount;
+      final method = (order.paymentMethod == 'billplz' ||
+              order.paymentMethod == 'online')
+          ? 'online'
+          : order.paymentMethod;
+      if (paymentTotals.containsKey(method)) {
+        paymentTotals[method] = paymentTotals[method]! + order.totalAmount;
       } else {
         paymentTotals['other'] = paymentTotals['other']! + order.totalAmount;
       }
+    }
+
+    for (final order in serviceOrders) {
+      serviceNet += order.servicePrice;
+      itemCount += order.itemCount;
+      totalTherapistCommission += order.therapistCommissionAmount;
     }
 
     return _HistorySummary(
       collection: collection,
       serviceNet: serviceNet,
       sst: sst,
-      orderCount: paidOrders.length,
+      orderCount: collectionOrders.length,
       itemCount: itemCount,
       customerCount: customers.where((id) => id.trim().isNotEmpty).length,
       paymentTotals: paymentTotals,
@@ -1039,6 +1168,12 @@ class _HistorySidePanel extends StatelessWidget {
                 iconColor: const Color(0xFFF59E0B),
                 label: 'Debit Card',
                 value: _money(summary.paymentTotals['debit_card'] ?? 0),
+              ),
+              _SideMetricRow(
+                icon: Icons.language_outlined,
+                iconColor: const Color(0xFF0EA5E9),
+                label: 'Online',
+                value: _money(summary.paymentTotals['online'] ?? 0),
               ),
               if ((summary.paymentTotals['other'] ?? 0) > 0)
                 _SideMetricRow(
@@ -1629,8 +1764,8 @@ class _HistoryOrderCard extends StatelessWidget {
               child: _OrderTextBlock(
                 title: order.receiptNumber,
                 subtitle: order.isVoided
-                    ? 'Voided · ${DateFormat('hh:mm a, dd/MM/yyyy').format(order.createdAt)}'
-                    : DateFormat('hh:mm a, dd/MM/yyyy').format(order.createdAt),
+                    ? 'Voided · ${DateFormat('hh:mm a, dd/MM/yyyy').format(order.displayAt)}'
+                    : DateFormat('hh:mm a, dd/MM/yyyy').format(order.displayAt),
               ),
             ),
             Expanded(
@@ -1734,7 +1869,7 @@ class _HistoryOrderCard extends StatelessWidget {
         ),
         const SizedBox(height: 8),
         Text(
-          '${DateFormat('hh:mm a').format(order.createdAt)} - ${order.customerName}',
+          '${DateFormat('hh:mm a').format(order.displayAt)} - ${order.customerName}',
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
           style: const TextStyle(
@@ -1973,7 +2108,7 @@ class _OrderDetailSheet extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             Text(
-              DateFormat('EEEE, d MMM yyyy - hh:mm a').format(order.createdAt),
+              DateFormat('EEEE, d MMM yyyy - hh:mm a').format(order.displayAt),
               style: const TextStyle(
                 color: _muted,
                 fontSize: 13,
@@ -2431,8 +2566,6 @@ class _WeekdayLabel extends StatelessWidget {
 String _money(double value) => value.toStringAsFixed(2);
 
 String _maskedPhone(String value) {
-  final digits = value.replaceAll(RegExp(r'\D'), '');
-  if (digits.length >= 4) return '......${digits.substring(digits.length - 4)}';
   return value.trim().isEmpty || value == '-' ? '-' : value;
 }
 
@@ -2643,7 +2776,9 @@ class _ServicesBreakdownScreenState extends State<_ServicesBreakdownScreen> {
   ];
 
   List<_ServiceBreakdownItem> get _filteredItems {
-    final paidOrders = widget.orders.where((order) => !order.isVoided);
+    final paidOrders = widget.orders.where(
+      (order) => !order.isVoided && order.isServiceCompleted,
+    );
     final grouped = <String, _ServiceBreakdownItem>{};
 
     for (final order in paidOrders) {
@@ -2956,7 +3091,9 @@ class _CustomerBreakdownScreen extends StatelessWidget {
 
   Map<String, List<_HistoryOrder>> get _byCustomer {
     final map = <String, List<_HistoryOrder>>{};
-    for (final order in orders.where((order) => !order.isVoided)) {
+    for (final order in orders.where(
+      (order) => !order.isVoided && order.isServiceCompleted,
+    )) {
       final key = order.customerId.isNotEmpty
           ? order.customerId
           : order.customerName;
@@ -2978,7 +3115,7 @@ class _CustomerBreakdownScreen extends StatelessWidget {
     final entries = grouped.entries.toList()
       ..sort((a, b) => _latestUpdateFor(b.value).compareTo(_latestUpdateFor(a.value)));
     final totalRevenue = orders
-        .where((order) => !order.isVoided)
+        .where((order) => !order.isVoided && order.isServiceCompleted)
         .fold<double>(0, (total, order) => total + order.totalAmount);
 
     final content = Container(
@@ -3480,8 +3617,14 @@ class _StaffCommissionScreen extends StatelessWidget {
 
   Map<String, _StaffEarning> _computeEarnings() {
     final earnings = <String, _StaffEarning>{};
+    final therapistIdByName = {
+      for (final entry in therapists.entries)
+        _normalizeStaffName(_asString(entry.value['name'])): entry.key,
+    }..remove('');
 
-    for (final order in orders.where((order) => !order.isVoided)) {
+    for (final order in orders.where(
+      (order) => !order.isVoided && order.isServiceCompleted,
+    )) {
       final items = order.rawServiceItems.isNotEmpty
           ? order.rawServiceItems
           : [
@@ -3503,11 +3646,24 @@ class _StaffCommissionScreen extends StatelessWidget {
         );
         var therapistId = _asString(item['assignedTherapistId']);
         if (therapistId.isEmpty) {
+          therapistId =
+              therapistIdByName[_normalizeStaffName(therapistName)] ??
+              order.therapistId;
+        }
+        if (therapistId.isEmpty) {
           therapistId = therapistName.isNotEmpty ? therapistName : 'unknown';
         }
+        final resolvedTherapistName = _asString(
+          therapists[therapistId]?['name'],
+          therapistName,
+        );
         byTherapist
             .putIfAbsent(therapistId, () => [])
-            .add({...item, 'assignedTherapistName': therapistName});
+            .add({
+              ...item,
+              'assignedTherapistId': therapistId,
+              'assignedTherapistName': resolvedTherapistName,
+            });
       }
 
       for (final entry in byTherapist.entries) {
@@ -3821,7 +3977,7 @@ class _StaffOrderLineTile extends StatelessWidget {
                 ),
               ),
               Text(
-                DateFormat('hh:mm a').format(line.order.createdAt),
+                DateFormat('hh:mm a').format(line.order.displayAt),
                 style: const TextStyle(
                   color: _muted,
                   fontSize: 11,

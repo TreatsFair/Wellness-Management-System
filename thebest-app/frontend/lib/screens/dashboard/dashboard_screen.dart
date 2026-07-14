@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
+import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
@@ -242,6 +243,10 @@ bool _isPaid(Map<String, dynamic> data) {
   return status.isEmpty || status == 'paid';
 }
 
+bool _isVoidedPayment(Map<String, dynamic> data) {
+  return _asString(data['paymentStatus']).toLowerCase().trim() == 'voided';
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -253,6 +258,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _authRepository = AuthRepository();
   final _profileRepository = ProfileRepository();
   final _dashboardRepository = DashboardRepository();
+  final _appointmentRepository = AppointmentRepository();
   final _settingsRepository = SettingsRepository();
   final _businessHoursTable = SupabaseTableService('business_settings');
   final _outletsTable = SupabaseTableService('outlets');
@@ -291,6 +297,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     try {
+      await _appointmentRepository.completeDueAppointments();
+      await _appointmentRepository.markPastAppointmentsNoShow();
       final now = DateTime.now();
       final today = _stripDate(now);
       final tomorrow = today.add(const Duration(days: 1));
@@ -315,7 +323,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .recentTransactions(limit: 8);
 
       final activeAppointments = appointments.where(
-        (data) => !_isCancelled(data) && !_isWalkInAppointment(data),
+        (data) =>
+            !_isCancelled(data) &&
+            !_isVoidedPayment(data) &&
+            !_isWalkInAppointment(data),
       );
       final todayAppointments = activeAppointments
           .where((data) => _asString(data['date']) == todayKey)

@@ -10,6 +10,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'business_name': 'businessName',
   'busy_until': 'busyUntil',
   'close_time': 'closeTime',
+  'auto_extend_late_arrivals': 'autoExtendLateArrivals',
   'created_at': 'createdAt',
   'created_by': 'createdBy',
   'cashier_id': 'cashierId',
@@ -28,6 +29,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'image_url': 'imageUrl',
   'is_active': 'isActive',
   'online_booking_enabled': 'onlineBookingEnabled',
+  'late_grace_minutes': 'lateGraceMinutes',
   'public_open_time': 'publicOpenTime',
   'public_close_time': 'publicCloseTime',
   'slot_interval_minutes': 'slotIntervalMinutes',
@@ -71,6 +73,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'paid_at': 'paidAt',
   'payment_method': 'paymentMethod',
   'payment_status': 'paymentStatus',
+  'no_show_threshold_minutes': 'noShowThresholdMinutes',
   'photo_url': 'photoUrl',
   'profile_image_url': 'profileImageUrl',
   'receipt_number': 'receiptNumber',
@@ -84,6 +87,10 @@ const Map<String, String> _snakeToCamelAliases = {
   'service_price': 'servicePrice',
   'service_commissions': 'serviceCommissions',
   'sst_amount': 'sstAmount',
+  'sst_enabled': 'sstEnabled',
+  'sst_pricing_mode': 'sstPricingMode',
+  'sst_rate_percent': 'sstRatePercent',
+  'sst_rounding_mode': 'sstRoundingMode',
   'start_at': 'startAt',
   'start_time': 'startTime',
   'end_at': 'endAt',
@@ -96,6 +103,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'therapist_commission_amount': 'therapistCommissionAmount',
   'updated_at': 'updatedAt',
   'updated_by': 'updatedBy',
+  'delay_warning_minutes': 'delayWarningMinutes',
 };
 
 final Map<String, String> _camelToSnakeAliases = {

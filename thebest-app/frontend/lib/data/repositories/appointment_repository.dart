@@ -1,3 +1,4 @@
+import '../../core/outlets/outlet_context.dart';
 import '../../core/services/payment_service.dart';
 import '../services/supabase_table_service.dart';
 import 'customer_repository.dart';
@@ -33,6 +34,31 @@ class AppointmentRepository {
     );
   }
 
+  Future<int> markPastAppointmentsNoShow() async {
+    final result = await _table.client.rpc(
+      'mark_past_appointments_no_show',
+      params: {'p_outlet_id': OutletContext.activeOutletId.value},
+    );
+    if (result is int) return result;
+    if (result is num) return result.toInt();
+    return int.tryParse(result?.toString() ?? '') ?? 0;
+  }
+
+  /// Makes "service finished" real in the database. The app never writes
+  /// status='completed' from a manual action (that button was removed in
+  /// favor of an automatic display label) -- this is the server-side
+  /// counterpart that actually persists completion once the service window
+  /// has passed, and credits online-booking commission at that same moment.
+  Future<int> completeDueAppointments() async {
+    final result = await _table.client.rpc(
+      'complete_due_appointments',
+      params: {'p_outlet_id': OutletContext.activeOutletId.value},
+    );
+    if (result is int) return result;
+    if (result is num) return result.toInt();
+    return int.tryParse(result?.toString() ?? '') ?? 0;
+  }
+
   Future<List<Map<String, dynamic>>> getAppointmentsByCustomer(
     String customerId,
   ) {
@@ -65,6 +91,9 @@ class AppointmentRepository {
     final rows = await _table.findBy('room_id', roomId, orderBy: 'start_time');
     return rows.where((row) {
       if (!_isScheduledAppointmentRow(row)) return false;
+      if (asString(row['paymentStatus']).toLowerCase() == 'voided') {
+        return false;
+      }
       final status = asString(row['status']).toLowerCase();
       return asString(row['date']) == date && _blocksSchedule(status);
     }).toList();
@@ -81,6 +110,9 @@ class AppointmentRepository {
     );
     return rows.where((row) {
       if (!_isScheduledAppointmentRow(row)) return false;
+      if (asString(row['paymentStatus']).toLowerCase() == 'voided') {
+        return false;
+      }
       final status = asString(row['status']).toLowerCase();
       return asString(row['date']) == date && _blocksSchedule(status);
     }).toList();
@@ -104,13 +136,9 @@ class AppointmentRepository {
   }
 
   Future<Map<String, dynamic>> voidAppointment(String id) {
-    return updateAppointment(id, {'status': 'voided'});
-  }
-
-  Future<Map<String, dynamic>> completeAppointment(String id) {
     return updateAppointment(id, {
-      'status': 'completed',
-      'actualCompletedAt': DateTime.now().toUtc().toIso8601String(),
+      'status': 'cancelled',
+      'paymentStatus': 'voided',
     });
   }
 
@@ -179,6 +207,10 @@ class AppointmentRepository {
       bookedEndTime: appointmentUpdates['bookedEndTime']?.toString(),
       bookedStartAt: appointmentUpdates['bookedStartAt']?.toString(),
       bookedEndAt: appointmentUpdates['bookedEndAt']?.toString(),
+      endTime: appointmentUpdates['endTime']?.toString(),
+      endAt: appointmentUpdates['endAt']?.toString(),
+      allowLateExtensionOverlap:
+          asBool(appointmentUpdates['allowLateExtensionOverlap']),
       counterStaffId: transactionValues['counterStaffId']?.toString(),
       counterStaffName: transactionValues['counterStaffName']?.toString(),
       servicePrice: asDouble(transactionValues['servicePrice']),
@@ -196,12 +228,6 @@ class AppointmentRepository {
       'appointmentId': result.appointmentId,
       'transactionId': result.transactionId,
     };
-  }
-
-  Future<void> completeAppointmentGroup(Iterable<String> appointmentIds) async {
-    for (final id in appointmentIds) {
-      await completeAppointment(id);
-    }
   }
 
   Future<Map<String, dynamic>> startAppointment(
@@ -269,6 +295,10 @@ class AppointmentRepository {
             'booked_start_at': entry.value['bookedStartAt'],
           if (entry.value['bookedEndAt'] != null)
             'booked_end_at': entry.value['bookedEndAt'],
+          if (entry.value['endTime'] != null) 'end_time': entry.value['endTime'],
+          if (entry.value['endAt'] != null) 'end_at': entry.value['endAt'],
+          if (entry.value['allowLateExtensionOverlap'] == true)
+            'allow_late_extension_overlap': true,
         },
     };
 

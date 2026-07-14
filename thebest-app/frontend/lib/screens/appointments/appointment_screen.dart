@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/services/supabase_table_service.dart';
@@ -141,6 +142,8 @@ class _ScheduleAppointment {
   final double paidAmount;
   final List<Map<String, dynamic>> serviceItems;
   final Map<String, dynamic> therapistCommissionData;
+  final int lateGraceMinutes;
+  final int delayWarningMinutes;
 
   const _ScheduleAppointment({
     required this.id,
@@ -177,6 +180,8 @@ class _ScheduleAppointment {
     required this.paidAmount,
     required this.serviceItems,
     required this.therapistCommissionData,
+    required this.lateGraceMinutes,
+    required this.delayWarningMinutes,
   });
 
   factory _ScheduleAppointment.fromMap(
@@ -186,6 +191,8 @@ class _ScheduleAppointment {
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
     Map<String, dynamic>? transaction,
+    required int lateGraceMinutes,
+    required int delayWarningMinutes,
   }) {
     final customerId = data['customerId']?.toString() ?? '';
     final customer = customers[customerId];
@@ -260,7 +267,11 @@ class _ScheduleAppointment {
       price: _readDouble(data['totalPrice'] ?? data['price']),
       receiptNumber: transaction?['receiptNumber']?.toString() ?? '',
       paymentMethod: transaction?['paymentMethod']?.toString() ?? '',
-      paymentStatus: transaction?['paymentStatus']?.toString() ?? '',
+      // Authoritative payment state now lives on the appointment row itself
+      // (043), kept in sync from transactions by trigger. Reading it here
+      // instead of inferring "paid" from whether a transaction row happened to
+      // join fixes paid online bookings that used to show as Payment Pending.
+      paymentStatus: data['paymentStatus']?.toString() ?? 'unpaid',
       paidAmount: _readDouble(transaction?['totalAmount']),
       serviceItems: _readServiceItems(
         data['serviceItems'],
@@ -277,6 +288,8 @@ class _ScheduleAppointment {
         'name': therapist?['name'],
         'serviceCommissions': therapist?['serviceCommissions'],
       },
+      lateGraceMinutes: lateGraceMinutes,
+      delayWarningMinutes: delayWarningMinutes,
     );
   }
 
@@ -368,11 +381,28 @@ class _ScheduleAppointment {
 
   int get hour => startMinutes ~/ 60;
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
+  int get bookedStartMinutes => _timeToMinutes(bookedStartTime);
+  int get bookedEndMinutes {
+    final start = bookedStartMinutes;
+    var end = _timeToMinutes(bookedEndTime);
+    if (end <= start) end += 24 * 60;
+    return end;
+  }
+  int get scheduledServiceMinutes {
+    final booked = bookedEndMinutes - bookedStartMinutes;
+    return booked > 0 ? booked.clamp(0, 1440) : durationMinutes;
+  }
   int get cleanupEndMinutes => endMinutes + bufferAfterMinutes.clamp(0, 240);
   int get blockDurationMinutes =>
       (cleanupEndMinutes - startMinutes).clamp(0, 1440);
-  String get startLabel => _clockLabel(startTime);
-  String get endLabel => _clockLabel(endTime);
+  String get displayStartTime =>
+      !isWalkIn && hasActualTiming ? bookedStartTime : startTime;
+  String get displayEndTime =>
+      !isWalkIn && hasActualTiming ? bookedEndTime : endTime;
+  int get displayDurationMinutes =>
+      !isWalkIn && hasActualTiming ? scheduledServiceMinutes : durationMinutes;
+  String get startLabel => _clockLabel(displayStartTime);
+  String get endLabel => _clockLabel(displayEndTime);
   String get timeRange => '$startLabel - $endLabel';
   String get cleanupUntilLabel => bufferAfterMinutes <= 0
       ? 'No cleanup buffer'
@@ -384,6 +414,18 @@ class _ScheduleAppointment {
   String get bookedTimeRange =>
       '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
   bool get hasActualTiming => actualStartedAt != null;
+  DateTime? get actualServiceEndAt => actualStartedAt
+      ?.toLocal()
+      .add(Duration(minutes: scheduledServiceMinutes));
+  String get actualServiceTimeRange {
+    final started = actualStartedAt?.toLocal();
+    final ended = actualServiceEndAt;
+    if (started == null || ended == null) return '';
+    return '${DateFormat('h:mm a').format(started)} - '
+        '${DateFormat('h:mm a').format(ended)} '
+        '(${_durationLabel(scheduledServiceMinutes)})';
+  }
+  String? get actualServiceCompletionLabel => null;
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get servicePriceLabel => '$serviceName - $priceLabel';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
@@ -395,8 +437,21 @@ class _ScheduleAppointment {
         customerId == 'walk_in_guest';
   }
 
+  /// Real-world moment this service is scheduled to start.
+  DateTime get _serviceStartDateTime {
+    final resolved = startAt?.toLocal();
+    if (resolved != null) return resolved;
+    return DateTime(
+      date.year,
+      date.month,
+      date.day,
+    ).add(Duration(minutes: startMinutes));
+  }
+
   /// Real-world moment this service is scheduled to finish.
   DateTime get _serviceEndDateTime {
+    final actualEnd = actualServiceEndAt;
+    if (actualEnd != null) return actualEnd;
     final resolved = endAt?.toLocal();
     if (resolved != null) return resolved;
     return DateTime(
@@ -407,40 +462,97 @@ class _ScheduleAppointment {
   }
 
   bool get serviceWindowEnded => DateTime.now().isAfter(_serviceEndDateTime);
+  bool get isServiceDateToday => _stripTime(date) == _stripTime(DateTime.now());
+  // Staff may check a customer in up to 30 minutes before the scheduled start
+  // (early arrival). Mirrors the server guard in migration 050.
+  bool get isServiceStartDue => !DateTime.now().isBefore(
+    _serviceStartDateTime.subtract(const Duration(minutes: 30)),
+  );
+  bool get missedServiceWindow =>
+      !isWalkIn &&
+      !hasActualTiming &&
+      serviceWindowEnded &&
+      (status == 'confirmed' || status == 'pending');
+  bool get isNoShow => status == 'no_show';
 
   bool get isCompleted {
-    if (isCancelled) return false;
+    if (isCancelled || isNoShow) return false;
     if (status == 'completed') return true;
-    // Paid walk-ins auto-complete once their booked window has passed —
-    // no manual completion step is needed.
-    return isWalkIn && hasPayment && serviceWindowEnded;
+    // Paid services auto-complete once their booked window has passed after
+    // check-in/start. Walk-ins keep their original automatic completion rule.
+    return (status == 'in_progress' || isWalkIn) &&
+        hasPayment &&
+        serviceWindowEnded;
   }
 
   bool get isInProgress {
-    if (isCancelled || isCompleted) return false;
+    if (isCancelled || isNoShow || isCompleted) return false;
     // A paid walk-in is the service happening now, until its window ends.
     if (isWalkIn) return hasPayment;
     return status == 'in_progress';
   }
 
-  bool get isPending => !isCompleted && !isInProgress && !isCancelled;
-  // Walk-ins move through their states automatically, so they expose no
-  // manual "start"/"complete" action.
-  bool get canAdvance => (isPending || isInProgress) && !isWalkIn;
-  bool get hasPayment =>
-      receiptNumber.isNotEmpty ||
-      paidAmount > 0 ||
-      paymentStatus.toLowerCase() == 'paid';
+  bool get isPending =>
+      !isCompleted && !isInProgress && !isCancelled && !isNoShow;
+  // Staff only need to confirm payment or check in; completion is automatic.
+  bool get canAdvance =>
+      isPending && !isWalkIn && isServiceDateToday && isServiceStartDue;
+  // payment_status on the appointment (043) is the single source of truth.
+  bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
+  bool get isRefunded => paymentStatus.toLowerCase() == 'refunded';
   bool get isAwaiting => isPending && hasPayment && !isWalkIn;
-  String get durationLabel => _durationLabel(durationMinutes);
+  String get durationLabel => _durationLabel(displayDurationMinutes);
   bool get isGuestAccount =>
       customerId.trim().isEmpty || customerId == 'walk_in_guest';
+
+  bool get shouldTrackArrivalDelay =>
+      !isWalkIn &&
+      !isCancelled &&
+      !isNoShow &&
+      !isCompleted &&
+      !isInProgress &&
+      actualStartedAt == null &&
+      (status == 'confirmed' || status == 'pending');
+
+  int get arrivalDelayMinutes {
+    if (!shouldTrackArrivalDelay) return 0;
+    final delay = DateTime.now().difference(_serviceStartDateTime).inMinutes;
+    return delay < 0 ? 0 : delay;
+  }
+
+  bool get hasDelayWarning =>
+      delayWarningMinutes > 0 && arrivalDelayMinutes >= delayWarningMinutes;
+  bool get isLateArrival =>
+      lateGraceMinutes > 0 && arrivalDelayMinutes > lateGraceMinutes;
+
+  String get arrivalDelayLabel {
+    final minutes = arrivalDelayMinutes;
+    if (minutes <= 0) return '';
+    if (isLateArrival) return 'Late $minutes min';
+    if (hasDelayWarning) return 'Delayed $minutes min';
+    return '';
+  }
 
   String get statusLabel {
     if (isCompleted) return 'Completed';
     if (isInProgress) return 'In Progress';
     if (isCancelled) return 'Cancelled';
+    if (isNoShow) return 'No Show';
+    if (arrivalDelayLabel.isNotEmpty) return arrivalDelayLabel;
     return isAwaiting ? 'Awaiting' : 'Payment Pending';
+  }
+
+  String get paymentStatusLabel {
+    switch (paymentStatus.toLowerCase()) {
+      case 'paid':
+        return 'Paid';
+      case 'refunded':
+        return 'Refunded';
+      case 'voided':
+        return 'Voided';
+      default:
+        return 'Unpaid';
+    }
   }
 
   String get initials {
@@ -461,14 +573,33 @@ class _ScheduleAppointment {
         roomName.toLowerCase().contains(q);
   }
 
-  Map<String, dynamic> serviceStartUpdates(DateTime startedAt) {
+  int lateMinutesAt(DateTime startedAt) {
+    final delay = startedAt.difference(_serviceStartDateTime).inMinutes;
+    return delay < 0 ? 0 : delay;
+  }
+
+  DateTime extendedEndForStart(DateTime startedAt) {
+    return startedAt.add(Duration(minutes: scheduledServiceMinutes));
+  }
+
+  Map<String, dynamic> serviceStartUpdates(
+    DateTime startedAt, {
+    DateTime? adjustedEndAt,
+    bool allowLateExtensionOverlap = false,
+  }) {
+    final localAdjustedEnd = adjustedEndAt?.toLocal();
     return {
       'bookedDate': bookedDateKey,
       'bookedStartTime': bookedStartTime,
       'bookedEndTime': bookedEndTime,
       if (startAt != null) 'bookedStartAt': startAt!.toUtc().toIso8601String(),
       if (endAt != null) 'bookedEndAt': endAt!.toUtc().toIso8601String(),
+      if (localAdjustedEnd != null)
+        'endTime': DateFormat('HH:mm:ss').format(localAdjustedEnd),
+      if (adjustedEndAt != null)
+        'endAt': adjustedEndAt.toUtc().toIso8601String(),
       'actualStartedAt': startedAt.toUtc().toIso8601String(),
+      'allowLateExtensionOverlap': allowLateExtensionOverlap,
     };
   }
 }
@@ -495,16 +626,39 @@ class _AppointmentGroup {
   String get initials => primary.initials;
   bool get isGuestAccount => primary.isGuestAccount;
   bool get isCancelled => appointments.every((a) => a.isCancelled);
+  bool get isNoShow => appointments.every((a) => a.isNoShow);
   bool get isCompleted => appointments.every((a) => a.isCompleted);
   bool get isInProgress => appointments.any((a) => a.isInProgress);
-  bool get isPending => !isCompleted && !isInProgress && !isCancelled;
-  // Walk-ins advance on their own, so no manual start/complete button.
-  bool get canAdvance => (isPending || isInProgress) && !primary.isWalkIn;
+  bool get isPending =>
+      !isCompleted && !isInProgress && !isCancelled && !isNoShow;
+  // Staff only need to confirm payment or check in; completion is automatic.
+  bool get canAdvance =>
+      isPending &&
+      !primary.isWalkIn &&
+      primary.isServiceDateToday &&
+      primary.isServiceStartDue;
   bool get hasPayment => primary.hasPayment;
+  bool get isRefunded => primary.isRefunded;
   bool get isAwaiting => appointments.any((a) => a.isAwaiting);
+  int get arrivalDelayMinutes => appointments.fold<int>(
+    0,
+    (max, appointment) => appointment.arrivalDelayMinutes > max
+        ? appointment.arrivalDelayMinutes
+        : max,
+  );
+  bool get hasDelayWarning => appointments.any((a) => a.hasDelayWarning);
+  bool get isLateArrival => appointments.any((a) => a.isLateArrival);
+  String get arrivalDelayLabel {
+    final minutes = arrivalDelayMinutes;
+    if (minutes <= 0) return '';
+    if (isLateArrival) return 'Late $minutes min';
+    if (hasDelayWarning) return 'Delayed $minutes min';
+    return '';
+  }
   String get receiptNumber => primary.receiptNumber;
   String get paymentMethod => primary.paymentMethod;
   String get paymentStatus => primary.paymentStatus;
+  String get paymentStatusLabel => primary.paymentStatusLabel;
   double get paidAmount => primary.paidAmount;
   String get statusLabel => isCompleted
       ? 'Completed'
@@ -512,6 +666,10 @@ class _AppointmentGroup {
       ? 'In Progress'
       : isCancelled
       ? 'Cancelled'
+      : isNoShow
+      ? 'No Show'
+      : arrivalDelayLabel.isNotEmpty
+      ? arrivalDelayLabel
       : isAwaiting
       ? 'Awaiting'
       : 'Payment Pending';
@@ -596,6 +754,80 @@ class _AppointmentGroup {
     if (q.isEmpty) return true;
     return appointments.any((a) => a.matches(q));
   }
+}
+
+class _LateStartDecision {
+  const _LateStartDecision({
+    this.adjustedEndAt,
+    this.allowLateExtensionOverlap = false,
+  });
+
+  final DateTime? adjustedEndAt;
+  final bool allowLateExtensionOverlap;
+}
+
+Future<_LateStartDecision> _lateStartDecision({
+  required BuildContext context,
+  required _ScheduleAppointment appointment,
+  required BusinessRuleSettings settings,
+  required DateTime startedAt,
+}) async {
+  if (!settings.autoExtendLateArrivals) {
+    return const _LateStartDecision();
+  }
+
+  final lateMinutes = appointment.lateMinutesAt(startedAt);
+  if (lateMinutes <= 0 || lateMinutes > settings.lateGraceMinutes) {
+    return const _LateStartDecision();
+  }
+
+  final adjustedEnd = appointment.extendedEndForStart(startedAt);
+  if (!adjustedEnd.isAfter(appointment._serviceEndDateTime)) {
+    return const _LateStartDecision();
+  }
+
+  final availability = await CspService.validateSlot(
+    date: appointment.dateKey,
+    startTime: appointment.startTime,
+    endTime: DateFormat('HH:mm:ss').format(adjustedEnd.toLocal()),
+    therapistId: appointment.therapistId,
+    roomId: appointment.roomId,
+    excludeId: appointment.id,
+  );
+
+  if (availability.therapistAvailable && !availability.roomFull) {
+    return _LateStartDecision(adjustedEndAt: adjustedEnd);
+  }
+
+  if (!context.mounted) return const _LateStartDecision();
+  final extendAnyway = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Extend service time?'),
+      content: Text(
+        '${appointment.customerName} arrived $lateMinutes minutes late. '
+        'Keeping the full ${appointment.durationMinutes}-minute service will overlap another booking or room capacity.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Start without extending'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          child: const Text('Extend anyway'),
+        ),
+      ],
+    ),
+  );
+
+  if (extendAnyway == true) {
+    return _LateStartDecision(
+      adjustedEndAt: adjustedEnd,
+      allowLateExtensionOverlap: true,
+    );
+  }
+  return const _LateStartDecision();
 }
 
 class _AppointmentTherapist {
@@ -703,6 +935,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   bool _showTabletTimeline = false;
   int _openHour = 9;
   int _closeHour = 21;
+  BusinessRuleSettings _businessRuleSettings = BusinessRuleSettings.defaults();
   bool _loading = true;
   String? _error;
 
@@ -742,6 +975,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     try {
       final rows = await _businessSettingsTable.list(limit: 1);
       final row = rows.isEmpty ? null : rows.first;
+      final rules = row == null
+          ? BusinessRuleSettings.defaults()
+          : BusinessRuleSettings.fromMap(row);
       final openMinutes = _parseBusinessMinutes(row?['openTime'], 9 * 60);
       var closeMinutes = _parseBusinessMinutes(row?['closeTime'], 21 * 60);
       if (closeMinutes <= openMinutes) closeMinutes += 24 * 60;
@@ -751,12 +987,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       setState(() {
         _openHour = open;
         _closeHour = close;
+        _businessRuleSettings = rules;
       });
     } catch (_) {
       if (!mounted) return;
       setState(() {
         _openHour = 9;
         _closeHour = 21;
+        _businessRuleSettings = BusinessRuleSettings.defaults();
       });
     }
   }
@@ -835,6 +1073,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
     try {
       await _loadBusinessHours();
+      await _appointmentRepository.completeDueAppointments();
+      await _appointmentRepository.markPastAppointmentsNoShow();
       final startKey = _dateKey(_windowStart);
       final endKey = _dateKey(_windowStart.add(const Duration(days: 6)));
       final appointmentRows = await _appointmentRepository
@@ -925,6 +1165,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       transactionsByAppointment[data['id']?.toString()] ??
                       transactionsByGroup[data['appointmentGroupId']
                           ?.toString()],
+                  lateGraceMinutes: _businessRuleSettings.lateGraceMinutes,
+                  delayWarningMinutes:
+                      _businessRuleSettings.delayWarningMinutes,
                 ),
               )
               .where((appointment) => !appointment.isCancelled)
@@ -1170,36 +1413,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     }
   }
 
-  Future<void> _completeService(_ScheduleAppointment appointment) async {
-    await _appointmentRepository.completeAppointment(appointment.id);
-    if (!mounted) return;
-    await _loadAppointments();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Service marked as completed'),
-        backgroundColor: Color(0xFF1B6B72),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
-  Future<void> _completeGroupService(_AppointmentGroup group) async {
-    await _appointmentRepository.completeAppointmentGroup(
-      group.appointments.map((appointment) => appointment.id),
-    );
-    if (!mounted) return;
-    await _loadAppointments();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Group service marked as completed'),
-        backgroundColor: Color(0xFF1B6B72),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
-  }
-
   Future<void> _startService(_ScheduleAppointment appointment) async {
     await _appointmentRepository.startAppointment(
       appointment.id,
@@ -1258,9 +1471,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   onComplete: group.canAdvance
                       ? () async {
                           Navigator.pop(context);
-                          if (group.isInProgress) {
-                            await _completeGroupService(group);
-                          } else if (group.hasPayment) {
+                          if (group.hasPayment) {
                             await _startGroupService(group);
                           } else {
                             await _openGroupCheckout(group);
@@ -1285,9 +1496,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   onComplete: group.primary.canAdvance
                       ? () async {
                           Navigator.pop(context);
-                          if (group.primary.isInProgress) {
-                            await _completeService(group.primary);
-                          } else if (group.primary.hasPayment) {
+                          if (group.primary.hasPayment) {
                             await _startService(group.primary);
                           } else {
                             await _openCheckout(group.primary);
@@ -1466,9 +1675,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                         activeAppointmentId: appointment.id,
                       ),
                       onComplete: _selectedGroup!.canAdvance
-                          ? () => _selectedGroup!.isInProgress
-                                ? _completeGroupService(_selectedGroup!)
-                                : _selectedGroup!.hasPayment
+                          ? () => _selectedGroup!.hasPayment
                                 ? _startGroupService(_selectedGroup!)
                                 : _openGroupCheckout(_selectedGroup!)
                           : null,
@@ -1481,9 +1688,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       onClose: () => setState(() => _selectedGroup = null),
                       onEdit: () => _openEdit(_selectedGroup!.primary),
                       onComplete: _selectedGroup!.primary.canAdvance
-                          ? () => _selectedGroup!.primary.isInProgress
-                                ? _completeService(_selectedGroup!.primary)
-                                : _selectedGroup!.primary.hasPayment
+                          ? () => _selectedGroup!.primary.hasPayment
                                 ? _startService(_selectedGroup!.primary)
                                 : _openCheckout(_selectedGroup!.primary)
                           : null,
@@ -3354,15 +3559,21 @@ class _TabletAppointmentListRow extends StatelessWidget {
                   ),
                 ),
               ),
-              // Payment status
+              // Status + payment
               SizedBox(
                 width: _apptColStatus,
-                child: Align(
-                  alignment: Alignment.centerLeft,
-                  child: _ListStatusChip(
-                    label: appointment.statusLabel,
-                    colors: colors,
-                  ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _ListStatusChip(
+                      label: appointment.statusLabel,
+                      colors: colors,
+                    ),
+                    const SizedBox(height: 5),
+                    _PaymentPill(paymentStatus: appointment.paymentStatus),
+                  ],
                 ),
               ),
               // Amount
@@ -3469,6 +3680,63 @@ class _ListStatusChip extends StatelessWidget {
           fontWeight: FontWeight.w800,
           color: colors.accent,
         ),
+      ),
+    );
+  }
+}
+
+/// Compact payment-status pill for dense list rows.
+class _PaymentPill extends StatelessWidget {
+  final String paymentStatus;
+
+  const _PaymentPill({required this.paymentStatus});
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = paymentStatus.toLowerCase();
+    late final Color accent;
+    late final String label;
+    switch (normalized) {
+      case 'paid':
+        accent = const Color(0xFF059669);
+        label = 'Paid';
+        break;
+      case 'refunded':
+        accent = const Color(0xFF6B7280);
+        label = 'Refunded';
+        break;
+      case 'voided':
+        accent = const Color(0xFF6B7280);
+        label = 'Voided';
+        break;
+      default:
+        accent = const Color(0xFFD97706);
+        label = 'Unpaid';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 6,
+            height: 6,
+            decoration: BoxDecoration(color: accent, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+              color: accent,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -4412,7 +4680,10 @@ class _MobileCollapsedBlock extends StatelessWidget {
     final colors = _statusColorsFor(
       first.isPending,
       first.isCompleted,
-      first.isInProgress,
+      isInProgress: first.isInProgress,
+      hasPayment: first.hasPayment,
+      isLateArrival: first.isLateArrival,
+      hasDelayWarning: first.hasDelayWarning,
     );
     final start = appointments
         .map((a) => a.startMinutes)
@@ -5180,6 +5451,8 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
               children: [
                 _StatusBadge(label: group.statusLabel, colors: colors),
                 const SizedBox(width: 8),
+                _PaymentBadge(paymentStatus: group.paymentStatus),
+                const SizedBox(width: 8),
                 _StatusBadge(label: '${group.paxCount} pax', colors: colors),
                 const Spacer(),
                 IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
@@ -5255,12 +5528,19 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
             ),
             _SummaryItem(
               icon: Icons.schedule_outlined,
-              label: 'Time',
-              title: group.blockDurationLabel,
-              subtitle: group.primary.hasActualTiming
-                  ? 'Booked: ${group.primary.bookedTimeRange}  |  Actual start: ${DateFormat('h:mm a').format(group.primary.actualStartedAt!.toLocal())}'
-                  : group.cleanupUntilLabel,
+              label: 'Booked time',
+              title: group.primary.bookedTimeRange,
+              subtitle: group.primary.bufferAfterMinutes > 0
+                  ? group.primary.cleanupUntilLabel
+                  : null,
             ),
+            if (group.primary.hasActualTiming)
+              _SummaryItem(
+                icon: Icons.play_circle_outline,
+                label: 'Actual service time',
+                title: group.primary.actualServiceTimeRange,
+                subtitle: group.primary.actualServiceCompletionLabel,
+              ),
             _SummaryItem(
               icon: Icons.payments_outlined,
               label: 'Price',
@@ -5299,14 +5579,10 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
             const SizedBox(height: 12),
             if (onComplete != null)
               _PanelActionButton(
-                icon: group.isInProgress
-                    ? Icons.task_alt_outlined
-                    : group.hasPayment
+                icon: group.hasPayment
                     ? Icons.login_rounded
                     : Icons.point_of_sale_outlined,
-                label: group.isInProgress
-                    ? 'Complete Group Service'
-                    : group.hasPayment
+                label: group.hasPayment
                     ? 'Check-In'
                     : 'Confirm Payment',
                 color: const Color(0xFF15803D),
@@ -5429,8 +5705,10 @@ _AppointmentStatusStyle _statusColors(_ScheduleAppointment appointment) {
   return _statusColorsFor(
     appointment.isPending,
     appointment.isCompleted,
-    appointment.isInProgress,
-    appointment.hasPayment,
+    isInProgress: appointment.isInProgress,
+    hasPayment: appointment.hasPayment,
+    isLateArrival: appointment.isLateArrival,
+    hasDelayWarning: appointment.hasDelayWarning,
   );
 }
 
@@ -5438,17 +5716,21 @@ _AppointmentStatusStyle _statusColorsForGroup(_AppointmentGroup group) {
   return _statusColorsFor(
     group.isPending,
     group.isCompleted,
-    group.isInProgress,
-    group.hasPayment,
+    isInProgress: group.isInProgress,
+    hasPayment: group.hasPayment,
+    isLateArrival: group.isLateArrival,
+    hasDelayWarning: group.hasDelayWarning,
   );
 }
 
 _AppointmentStatusStyle _statusColorsFor(
   bool isPending,
-  bool isCompleted, [
+  bool isCompleted, {
   bool isInProgress = false,
   bool hasPayment = false,
-]) {
+  bool isLateArrival = false,
+  bool hasDelayWarning = false,
+}) {
   if (isCompleted) {
     return const _AppointmentStatusStyle(
       accent: Color(0xFF059669),
@@ -5461,6 +5743,20 @@ _AppointmentStatusStyle _statusColorsFor(
       accent: Color(0xFFF97316),
       bg: Color(0xFFFFF7ED),
       border: Color(0xFFFED7AA),
+    );
+  }
+  if (isLateArrival) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFB91C1C),
+      bg: Color(0xFFFEF2F2),
+      border: Color(0xFFFCA5A5),
+    );
+  }
+  if (hasDelayWarning) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFD97706),
+      bg: Color(0xFFFFFBEB),
+      border: Color(0xFFFCD34D),
     );
   }
   // Paid but not yet started = Awaiting (online bookings) -> blue.
@@ -5541,6 +5837,8 @@ class _AppointmentSummaryPanel extends StatelessWidget {
             Row(
               children: [
                 _StatusBadge(label: appointment.statusLabel, colors: colors),
+                const SizedBox(width: 8),
+                _PaymentBadge(paymentStatus: appointment.paymentStatus),
                 const Spacer(),
                 IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
               ],
@@ -5611,12 +5909,19 @@ class _AppointmentSummaryPanel extends StatelessWidget {
             ),
             _SummaryItem(
               icon: Icons.schedule_outlined,
-              label: 'Time',
-              title: appointment.blockDurationLabel,
-              subtitle: appointment.hasActualTiming
-                  ? 'Booked: ${appointment.bookedTimeRange}  |  Actual start: ${DateFormat('h:mm a').format(appointment.actualStartedAt!.toLocal())}'
-                  : appointment.cleanupUntilLabel,
+              label: 'Booked time',
+              title: appointment.bookedTimeRange,
+              subtitle: appointment.bufferAfterMinutes > 0
+                  ? appointment.cleanupUntilLabel
+                  : null,
             ),
+            if (appointment.hasActualTiming)
+              _SummaryItem(
+                icon: Icons.play_circle_outline,
+                label: 'Actual service time',
+                title: appointment.actualServiceTimeRange,
+                subtitle: appointment.actualServiceCompletionLabel,
+              ),
             _SummaryItem(
               icon: Icons.payments_outlined,
               label: 'Price',
@@ -5669,14 +5974,10 @@ class _AppointmentSummaryPanel extends StatelessWidget {
             const SizedBox(height: 18),
             if (onComplete != null)
               _PanelActionButton(
-                icon: appointment.isInProgress
-                    ? Icons.task_alt_outlined
-                    : appointment.hasPayment
+                icon: appointment.hasPayment
                     ? Icons.login_rounded
                     : Icons.point_of_sale_outlined,
-                label: appointment.isInProgress
-                    ? 'Complete Service'
-                    : appointment.hasPayment
+                label: appointment.hasPayment
                     ? 'Check-In'
                     : 'Confirm Payment',
                 color: const Color(0xFF15803D),
@@ -5723,6 +6024,68 @@ class _StatusBadge extends StatelessWidget {
           fontSize: 13,
           fontWeight: FontWeight.w900,
         ),
+      ),
+    );
+  }
+}
+
+/// Payment status shown as its own badge, independent of the appointment
+/// lifecycle status (a Completed booking can be Paid; a Confirmed one Unpaid).
+class _PaymentBadge extends StatelessWidget {
+  final String paymentStatus;
+
+  const _PaymentBadge({required this.paymentStatus});
+
+  @override
+  Widget build(BuildContext context) {
+    final normalized = paymentStatus.toLowerCase();
+    late final Color accent;
+    late final String label;
+    switch (normalized) {
+      case 'paid':
+        accent = const Color(0xFF059669); // green
+        label = 'Paid';
+        break;
+      case 'refunded':
+        accent = const Color(0xFF6B7280); // grey
+        label = 'Refunded';
+        break;
+      case 'voided':
+        accent = const Color(0xFF6B7280); // grey
+        label = 'Voided';
+        break;
+      default:
+        accent = const Color(0xFFD97706); // amber
+        label = 'Unpaid';
+    }
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: accent.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            normalized == 'paid'
+                ? Icons.check_circle_outline
+                : normalized == 'refunded' || normalized == 'voided'
+                ? Icons.remove_circle_outline
+                : Icons.schedule,
+            size: 14,
+            color: accent,
+          ),
+          const SizedBox(width: 5),
+          Text(
+            label,
+            style: TextStyle(
+              color: accent,
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -5894,6 +6257,7 @@ class _AppointmentCheckoutSheet extends StatefulWidget {
 
 class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   final _appointmentRepository = AppointmentRepository();
+  final _businessSettingsRepository = BusinessSettingsRepository();
   final _commissionRepository = CommissionRepository();
   late final TextEditingController _name;
   late final TextEditingController _phone;
@@ -5901,10 +6265,14 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   String? _paymentMethod;
   bool _saveCustomerProfile = false;
   bool _saving = false;
+  BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
-  double get _servicePrice => widget.appointment.price;
-  double get _sstAmount => _servicePrice * 0.06;
-  double get _totalAmount => _servicePrice + _sstAmount;
+  PriceBreakdown get _priceBreakdown =>
+      _businessSettings.priceBreakdown(widget.appointment.price);
+
+  double get _servicePrice => _priceBreakdown.servicePrice;
+  double get _sstAmount => _priceBreakdown.sstAmount;
+  double get _totalAmount => _priceBreakdown.totalAmount;
 
   bool get _canConfirm {
     if (_paymentMethod == null || _saving) return false;
@@ -5932,6 +6300,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
           ? ''
           : widget.appointment.customerPhone,
     )..addListener(_refresh);
+    _loadBusinessSettings();
   }
 
   @override
@@ -5956,6 +6325,17 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     if (mounted) setState(() {});
   }
 
+  Future<void> _loadBusinessSettings() async {
+    try {
+      final settings = await _businessSettingsRepository.getActiveSettings();
+      if (mounted) setState(() => _businessSettings = settings);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _businessSettings = BusinessRuleSettings.defaults());
+      }
+    }
+  }
+
   String _resolvedCustomerName() {
     final value = _name.text.trim();
     if (value.isNotEmpty) return value;
@@ -5977,6 +6357,14 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
           widget.appointment.isGuestAccount &&
           _saveCustomerProfile &&
           _hasMemberDetails;
+      final serviceStartedAt = DateTime.now();
+      if (!mounted) return;
+      final lateStart = await _lateStartDecision(
+        context: context,
+        appointment: widget.appointment,
+        settings: _businessSettings,
+        startedAt: serviceStartedAt,
+      );
 
       await _appointmentRepository.checkoutAppointment(
         appointmentId: widget.appointment.id,
@@ -5991,7 +6379,11 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
             : null,
         appointmentUpdates: {
           'customerId': customerId,
-          ...widget.appointment.serviceStartUpdates(DateTime.now()),
+          ...widget.appointment.serviceStartUpdates(
+            serviceStartedAt,
+            adjustedEndAt: lateStart.adjustedEndAt,
+            allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
+          ),
         },
         transactionValues: {
           'customerId': customerId,
@@ -6146,6 +6538,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                     servicePrice: _servicePrice,
                     sstAmount: _sstAmount,
                     totalAmount: _totalAmount,
+                    sstLabel: _businessSettings.sstLabel,
                   ),
                   const SizedBox(height: 18),
                   const Text(
@@ -6263,6 +6656,7 @@ class _AppointmentGroupCheckoutSheet extends StatefulWidget {
 class _AppointmentGroupCheckoutSheetState
     extends State<_AppointmentGroupCheckoutSheet> {
   final _appointmentRepository = AppointmentRepository();
+  final _businessSettingsRepository = BusinessSettingsRepository();
   final _commissionRepository = CommissionRepository();
   late final TextEditingController _name;
   late final TextEditingController _phone;
@@ -6270,10 +6664,14 @@ class _AppointmentGroupCheckoutSheetState
   String? _paymentMethod;
   bool _saveCustomerProfile = false;
   bool _saving = false;
+  BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
-  double get _servicePrice => widget.group.price;
-  double get _sstAmount => _servicePrice * 0.06;
-  double get _totalAmount => _servicePrice + _sstAmount;
+  PriceBreakdown get _priceBreakdown =>
+      _businessSettings.priceBreakdown(widget.group.price);
+
+  double get _servicePrice => _priceBreakdown.servicePrice;
+  double get _sstAmount => _priceBreakdown.sstAmount;
+  double get _totalAmount => _priceBreakdown.totalAmount;
 
   bool get _canConfirm => _paymentMethod != null && !_saving;
 
@@ -6298,6 +6696,7 @@ class _AppointmentGroupCheckoutSheetState
           ? ''
           : widget.group.customerPhone,
     )..addListener(_refresh);
+    _loadBusinessSettings();
   }
 
   @override
@@ -6322,6 +6721,17 @@ class _AppointmentGroupCheckoutSheetState
     if (mounted) setState(() {});
   }
 
+  Future<void> _loadBusinessSettings() async {
+    try {
+      final settings = await _businessSettingsRepository.getActiveSettings();
+      if (mounted) setState(() => _businessSettings = settings);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _businessSettings = BusinessRuleSettings.defaults());
+      }
+    }
+  }
+
   String _resolvedCustomerName() {
     final value = _name.text.trim();
     if (value.isNotEmpty) return value;
@@ -6342,6 +6752,18 @@ class _AppointmentGroupCheckoutSheetState
           _saveCustomerProfile &&
           _hasMemberDetails;
       final serviceStartedAt = DateTime.now();
+      if (!mounted) return;
+      final lateStartByAppointmentId = <String, _LateStartDecision>{};
+      for (final appointment in widget.group.appointments) {
+        if (!mounted) return;
+        lateStartByAppointmentId[appointment.id] = await _lateStartDecision(
+          context: context,
+          appointment: appointment,
+          settings: _businessSettings,
+          startedAt: serviceStartedAt,
+        );
+        if (!mounted) return;
+      }
 
       await _appointmentRepository.checkoutAppointmentGroup(
         appointmentGroupId: widget.group.appointmentGroupId,
@@ -6358,7 +6780,15 @@ class _AppointmentGroupCheckoutSheetState
         appointmentUpdates: {'customerId': customerId},
         appointmentUpdatesById: {
           for (final appointment in widget.group.appointments)
-            appointment.id: appointment.serviceStartUpdates(serviceStartedAt),
+            appointment.id: appointment.serviceStartUpdates(
+              serviceStartedAt,
+              adjustedEndAt:
+                  lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
+              allowLateExtensionOverlap:
+                  lateStartByAppointmentId[appointment.id]
+                      ?.allowLateExtensionOverlap ??
+                  false,
+            ),
         },
         transactionValues: {
           'customerId': customerId,
@@ -6517,6 +6947,7 @@ class _AppointmentGroupCheckoutSheetState
                     servicePrice: _servicePrice,
                     sstAmount: _sstAmount,
                     totalAmount: _totalAmount,
+                    sstLabel: _businessSettings.sstLabel,
                   ),
                   const SizedBox(height: 18),
                   const Text(
@@ -6830,11 +7261,13 @@ class _CheckoutPriceCard extends StatelessWidget {
   final double servicePrice;
   final double sstAmount;
   final double totalAmount;
+  final String sstLabel;
 
   const _CheckoutPriceCard({
     required this.servicePrice,
     required this.sstAmount,
     required this.totalAmount,
+    required this.sstLabel,
   });
 
   @override
@@ -6851,7 +7284,7 @@ class _CheckoutPriceCard extends StatelessWidget {
         children: [
           _CheckoutPriceRow('Service', 'RM ${servicePrice.toStringAsFixed(2)}'),
           const SizedBox(height: 8),
-          _CheckoutPriceRow('SST (6%)', 'RM ${sstAmount.toStringAsFixed(2)}'),
+          _CheckoutPriceRow(sstLabel, 'RM ${sstAmount.toStringAsFixed(2)}'),
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),
             child: Divider(color: Color(0xFFEEEEEE), height: 1),

@@ -54,6 +54,10 @@ class DashboardRepository {
     );
   }
 
+  Future<List<Map<String, dynamic>>> listTransactions() {
+    return _transactions.list(orderBy: 'created_at', ascending: false);
+  }
+
   Future<List<Map<String, dynamic>>> transactionsForDate(DateTime date) async {
     final key = dateKey(date);
     final rows = await _transactions.list(
@@ -90,6 +94,19 @@ class DashboardRepository {
   ) async {
     final rows = await SupabaseTableService(table).getManyByIds(ids);
     return {for (final row in rows) asString(row['id']): row};
+  }
+
+  Future<List<Map<String, dynamic>>> loadWhereIn(
+    String table,
+    String column,
+    Iterable<Object> values, {
+    String? orderBy,
+  }) {
+    return SupabaseTableService(table).findIn(
+      column,
+      values.toSet().toList(),
+      orderBy: orderBy,
+    );
   }
 
   Future<int> getTodayBookingCount() async {

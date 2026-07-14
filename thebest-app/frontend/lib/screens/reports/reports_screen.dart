@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
@@ -21,6 +22,11 @@ const _violet = Color(0xFF7C3AED);
 const _counterPoolId = '__counter_pool__';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
+
+bool _inDateRange(DateTime value, DateTime start, DateTime endExclusive) {
+  final day = _stripDate(value);
+  return !day.isBefore(start) && day.isBefore(endExclusive);
+}
 
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
@@ -42,8 +48,12 @@ int _asInt(Object? value, [int fallback = 0]) {
 }
 
 DateTime? _asDateTime(Object? value) {
-  if (value is DateTime) return value;
-  if (value is String) return DateTime.tryParse(value);
+  // timestamptz values parse as UTC; convert to device-local (Malaysia) so the
+  // two-axis day bucketing (paidAt / serviceCompletedAt vs the selected range)
+  // and displayed times use the same local calendar day. Naive timestamps are
+  // already local, so toLocal() is a no-op for them.
+  if (value is DateTime) return value.toLocal();
+  if (value is String) return DateTime.tryParse(value)?.toLocal();
   return null;
 }
 
@@ -144,6 +154,29 @@ String _resolveStaffId({
   return '';
 }
 
+DateTime? _serviceCompletedAtFor({
+  required Map<String, dynamic> appointment,
+  required List<Map<String, dynamic>> groupAppointments,
+  required DateTime? fallback,
+}) {
+  if (appointment.isNotEmpty) {
+    return _asDateTime(appointment['actualCompletedAt']);
+  }
+  if (groupAppointments.isEmpty) return fallback;
+
+  DateTime? latest;
+  for (final item in groupAppointments) {
+    final status = _asString(item['status']).toLowerCase();
+    if (status == 'cancelled' || status == 'canceled' || status == 'no_show') {
+      continue;
+    }
+    final completedAt = _asDateTime(item['actualCompletedAt']);
+    if (completedAt == null) return null;
+    if (latest == null || completedAt.isAfter(latest)) latest = completedAt;
+  }
+  return latest;
+}
+
 enum _ReportRange { today, sevenDays, thirtyDays, month }
 
 extension _ReportRangeDetails on _ReportRange {
@@ -188,18 +221,21 @@ class _ReportSnapshot {
 
 Future<_ReportSnapshot> _loadReportSnapshot({
   required DashboardRepository dashboardRepository,
+  required AppointmentRepository appointmentRepository,
   required ServiceRepository serviceRepository,
   required TherapistRepository therapistRepository,
   required DateTime start,
   required DateTime endExclusive,
 }) async {
-  final transactions = await dashboardRepository.transactionsForDateRange(
-    start,
-    endExclusive,
-  );
+  await appointmentRepository.completeDueAppointments();
+  final transactions = await dashboardRepository.listTransactions();
   final paidTransactions = transactions.where(_isPaid).toList();
   final appointmentIds = paidTransactions
       .map((row) => _asString(row['appointmentId']))
+      .where((id) => id.isNotEmpty)
+      .toSet();
+  final appointmentGroupIds = paidTransactions
+      .map((row) => _asString(row['appointmentGroupId']))
       .where((id) => id.isNotEmpty)
       .toSet();
 
@@ -207,6 +243,17 @@ Future<_ReportSnapshot> _loadReportSnapshot({
     'appointments',
     appointmentIds,
   );
+  final groupAppointments = await dashboardRepository.loadWhereIn(
+    'appointments',
+    'appointment_group_id',
+    appointmentGroupIds.cast<Object>(),
+  );
+  final appointmentsByGroup = <String, List<Map<String, dynamic>>>{};
+  for (final appointment in groupAppointments) {
+    final groupId = _asString(appointment['appointmentGroupId']);
+    if (groupId.isEmpty) continue;
+    appointmentsByGroup.putIfAbsent(groupId, () => []).add(appointment);
+  }
   final services = await serviceRepository.listServices();
   final staff = await therapistRepository.listTherapists();
   final servicesById = {
@@ -221,12 +268,19 @@ Future<_ReportSnapshot> _loadReportSnapshot({
         (transaction) => _ReportOrder.fromTransaction(
           transaction,
           appointments: appointments,
+          appointmentsByGroup: appointmentsByGroup,
           services: servicesById,
           staff: staffById,
         ),
       )
+      .where(
+        (order) =>
+            _inDateRange(order.paidAt, start, endExclusive) ||
+            (order.serviceCompletedAt != null &&
+                _inDateRange(order.serviceCompletedAt!, start, endExclusive)),
+      )
       .toList()
-    ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    ..sort((a, b) => b.displayAt.compareTo(a.displayAt));
 
   return _ReportSnapshot(
     data: _ReportData.fromOrders(
@@ -253,6 +307,7 @@ class ReportsScreen extends StatefulWidget {
 class _ReportsScreenState extends State<ReportsScreen> {
   final _dashboardRepository = DashboardRepository();
   final _serviceRepository = ServiceRepository();
+  final _appointmentRepository = AppointmentRepository();
   final _therapistRepository = TherapistRepository();
 
   _ReportRange _range = _ReportRange.month;
@@ -286,6 +341,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
     try {
       final snapshot = await _loadReportSnapshot(
         dashboardRepository: _dashboardRepository,
+        appointmentRepository: _appointmentRepository,
         serviceRepository: _serviceRepository,
         therapistRepository: _therapistRepository,
         start: _rangeStart,
@@ -451,6 +507,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
 class _ReportOrder {
   final String id;
   final String appointmentId;
+  final String appointmentGroupId;
   final String customerId;
   final String customerName;
   final String therapistId;
@@ -464,11 +521,14 @@ class _ReportOrder {
   final double totalAmount;
   final double therapistCommissionAmount;
   final double counterCommissionAmount;
+  final DateTime paidAt;
+  final DateTime? serviceCompletedAt;
   final DateTime createdAt;
 
   const _ReportOrder({
     required this.id,
     required this.appointmentId,
+    required this.appointmentGroupId,
     required this.customerId,
     required this.customerName,
     required this.therapistId,
@@ -482,17 +542,24 @@ class _ReportOrder {
     required this.totalAmount,
     required this.therapistCommissionAmount,
     required this.counterCommissionAmount,
+    required this.paidAt,
+    required this.serviceCompletedAt,
     required this.createdAt,
   });
 
   factory _ReportOrder.fromTransaction(
     Map<String, dynamic> transaction, {
     required Map<String, Map<String, dynamic>> appointments,
+    required Map<String, List<Map<String, dynamic>>> appointmentsByGroup,
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> staff,
   }) {
     final appointmentId = _asString(transaction['appointmentId']);
+    final appointmentGroupId = _asString(transaction['appointmentGroupId']);
     final appointment = appointments[appointmentId] ?? <String, dynamic>{};
+    final groupAppointments = appointmentsByGroup[appointmentGroupId] ?? const [];
+    final hasLinkedAppointment =
+        appointment.isNotEmpty || groupAppointments.isNotEmpty;
     final customerId = _asString(transaction['customerId']).isNotEmpty
         ? _asString(transaction['customerId'])
         : _asString(appointment['customerId']);
@@ -572,9 +639,20 @@ class _ReportOrder {
       serviceNet + sstAmount,
     );
 
+    final paidAt =
+        _asDateTime(transaction['paidAt']) ??
+        _asDateTime(transaction['createdAt']) ??
+        DateTime.now();
+    final serviceCompletedAt = _serviceCompletedAtFor(
+      appointment: appointment,
+      groupAppointments: groupAppointments,
+      fallback: hasLinkedAppointment ? null : paidAt,
+    );
+
     return _ReportOrder(
       id: _asString(transaction['id']),
       appointmentId: appointmentId,
+      appointmentGroupId: appointmentGroupId,
       customerId: customerId,
       customerName: _asString(transaction['customerName'], 'Guest'),
       therapistId: therapistId,
@@ -598,11 +676,16 @@ class _ReportOrder {
       counterCommissionAmount: _asDouble(
         transaction['counterCommissionAmount'],
       ),
-      createdAt: _asDateTime(transaction['createdAt']) ?? DateTime.now(),
+      paidAt: paidAt,
+      serviceCompletedAt: serviceCompletedAt,
+      createdAt: paidAt,
     );
   }
 
-  bool get isAppointment => appointmentId.isNotEmpty;
+  bool get isAppointment =>
+      appointmentId.isNotEmpty || appointmentGroupId.isNotEmpty;
+  bool get isServiceCompleted => serviceCompletedAt != null;
+  DateTime get displayAt => serviceCompletedAt ?? paidAt;
 }
 
 class _ReportServiceItem {
@@ -784,31 +867,41 @@ class _ReportData {
     var counterPoolSales = 0.0;
 
     for (final order in orders) {
-      totalSales += order.totalAmount;
+      final paidInRange = _inDateRange(order.paidAt, start, endExclusive);
+      final serviceInRange =
+          order.serviceCompletedAt != null &&
+          _inDateRange(order.serviceCompletedAt!, start, endExclusive);
+
+      if (paidInRange) {
+        totalSales += order.totalAmount;
+        sst += order.sstAmount;
+        final customerKey = order.customerId.isNotEmpty
+            ? order.customerId
+            : '${order.id}:${order.customerName}';
+        customers.add(customerKey);
+
+        final dayIndex = _stripDate(order.paidAt).difference(start).inDays;
+        if (dayIndex >= 0 && dayIndex < dailyTotals.length) {
+          dailyTotals[dayIndex] += order.totalAmount;
+        }
+
+        final payment = order.paymentMethod.trim().isEmpty
+            ? 'other'
+            : order.paymentMethod.trim().toLowerCase();
+        paymentTotals[payment] =
+            (paymentTotals[payment] ?? 0) + order.totalAmount;
+        paymentCounts[payment] = (paymentCounts[payment] ?? 0) + 1;
+      }
+
+      if (!serviceInRange) continue;
+
       serviceNet += order.serviceNet;
-      sst += order.sstAmount;
       itemCount += order.serviceItems.length;
       if (order.isAppointment) {
         appointmentOrders += 1;
       } else {
         walkInOrders += 1;
       }
-
-      final customerKey = order.customerId.isNotEmpty
-          ? order.customerId
-          : '${order.id}:${order.customerName}';
-      customers.add(customerKey);
-
-      final dayIndex = _stripDate(order.createdAt).difference(start).inDays;
-      if (dayIndex >= 0 && dayIndex < dailyTotals.length) {
-        dailyTotals[dayIndex] += order.totalAmount;
-      }
-
-      final payment = order.paymentMethod.trim().isEmpty
-          ? 'other'
-          : order.paymentMethod.trim().toLowerCase();
-      paymentTotals[payment] = (paymentTotals[payment] ?? 0) + order.totalAmount;
-      paymentCounts[payment] = (paymentCounts[payment] ?? 0) + 1;
 
       final resolvedTherapistId = _resolvedOrderStaffId(
         staff,
@@ -1036,7 +1129,9 @@ class _ReportData {
         totalSales: totalSales,
         serviceNet: serviceNet,
         sst: sst,
-        orderCount: orders.length,
+        orderCount: orders
+            .where((order) => _inDateRange(order.paidAt, start, endExclusive))
+            .length,
         itemCount: itemCount,
         customerCount: customers.length,
         appointmentOrders: appointmentOrders,
@@ -1244,6 +1339,9 @@ String _paymentLabel(String value) {
       return 'Credit Card';
     case 'debit_card':
       return 'Debit Card';
+    case 'billplz':
+    case 'online':
+      return 'Online';
     default:
       return value.isEmpty ? 'Other' : value;
   }
@@ -1401,16 +1499,16 @@ class _MetricGrid extends StatelessWidget {
         .length;
     final cards = [
       _MetricCard(
-        title: 'Total Sales',
+        title: 'Daily Collection',
         value: loading ? '-' : _money(summary.totalSales),
-        detail: '${summary.orderCount} orders',
+        detail: '${summary.orderCount} payments',
         icon: Icons.payments_outlined,
         color: _teal,
       ),
       _MetricCard(
-        title: 'Service Net',
+        title: 'Completed Service Net',
         value: loading ? '-' : _money(summary.serviceNet),
-        detail: 'SST ${_money(summary.sst)}',
+        detail: 'SST collected ${_money(summary.sst)}',
         icon: Icons.spa_outlined,
         color: _green,
       ),
@@ -1422,7 +1520,7 @@ class _MetricGrid extends StatelessWidget {
         color: _blue,
       ),
       _MetricCard(
-        title: 'Services Sold',
+        title: 'Services Completed',
         value: loading ? '-' : '${summary.itemCount}',
         detail: '${summary.appointmentOrders} bookings, ${summary.walkInOrders} walk-ins',
         icon: Icons.inventory_2_outlined,
@@ -2191,6 +2289,7 @@ class _StaffCommissionReportScreenState
     extends State<_StaffCommissionReportScreen> {
   final _dashboardRepository = DashboardRepository();
   final _serviceRepository = ServiceRepository();
+  final _appointmentRepository = AppointmentRepository();
   final _therapistRepository = TherapistRepository();
 
   late DateTime _startDate;
@@ -2219,6 +2318,7 @@ class _StaffCommissionReportScreenState
     try {
       final snapshot = await _loadReportSnapshot(
         dashboardRepository: _dashboardRepository,
+        appointmentRepository: _appointmentRepository,
         serviceRepository: _serviceRepository,
         therapistRepository: _therapistRepository,
         start: _startDate,
@@ -3003,7 +3103,7 @@ class _StaffOrderHistoryTile extends StatelessWidget {
                       _MiniInfoPill(
                         icon: Icons.schedule_outlined,
                         label: DateFormat('d MMM yyyy - h:mm a')
-                            .format(order.createdAt),
+                            .format(order.displayAt),
                       ),
                       _MiniInfoPill(
                         icon: Icons.wallet_outlined,
@@ -3087,7 +3187,7 @@ class _CompactStaffOrderTileContent extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final order = record.order;
-    final date = DateFormat('d MMM, h:mm a').format(order.createdAt);
+    final date = DateFormat('d MMM, h:mm a').format(order.displayAt);
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -3310,7 +3410,7 @@ class _StaffOrderDetailScreen extends StatelessWidget {
                           const SizedBox(height: 4),
                           Text(
                             DateFormat('d MMM yyyy - h:mm a')
-                                .format(order.createdAt),
+                                .format(order.displayAt),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
@@ -3517,7 +3617,7 @@ class _StaffOrderDetailDialog extends StatelessWidget {
                           const SizedBox(height: 4),
                           Text(
                             DateFormat('EEEE, d MMM yyyy - h:mm a')
-                                .format(order.createdAt),
+                                .format(order.displayAt),
                             style: const TextStyle(
                               color: _muted,
                               fontSize: 12,
@@ -3807,6 +3907,7 @@ List<_StaffOrderRecord> _recordsForStaff({
 }) {
   final records = <_StaffOrderRecord>[];
   for (final order in orders) {
+    if (!order.isServiceCompleted) continue;
     var commission = 0.0;
     final roles = <String>[];
     final assignedItems = order.serviceItems.where((item) {
@@ -3868,7 +3969,7 @@ List<_StaffOrderRecord> _recordsForStaff({
       ),
     );
   }
-  records.sort((a, b) => b.order.createdAt.compareTo(a.order.createdAt));
+  records.sort((a, b) => b.order.displayAt.compareTo(a.order.displayAt));
   return records;
 }
 

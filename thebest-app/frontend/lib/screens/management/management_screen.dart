@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../core/outlets/outlet_context.dart';
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -177,6 +179,20 @@ class ManagementScreen extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (userRole == 'admin')
+                    _ManagementOption(
+                      icon: Icons.tune_outlined,
+                      color: const Color(0xFF2563EB),
+                      title: 'Business Settings',
+                      subtitle:
+                          'Outlet SST, rounding, late arrival, and no-show rules',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const _BusinessSettingsScreen(),
+                        ),
+                      ),
+                    ),
                   if (userRole == 'admin')
                     _ManagementOption(
                       icon: Icons.language_outlined,
@@ -1589,6 +1605,417 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _BusinessSettingsScreen extends StatefulWidget {
+  const _BusinessSettingsScreen();
+
+  @override
+  State<_BusinessSettingsScreen> createState() => _BusinessSettingsScreenState();
+}
+
+class _BusinessSettingsScreenState extends State<_BusinessSettingsScreen> {
+  final _repository = BusinessSettingsRepository();
+  final _formKey = GlobalKey<FormState>();
+  final _sstRate = TextEditingController();
+  final _lateGrace = TextEditingController();
+  final _noShowThreshold = TextEditingController();
+  final _delayWarning = TextEditingController();
+  String _outletId = OutletContext.activeOutletId.value;
+  String _settingsId = '';
+  String _sstMode = 'exclusive';
+  String _roundingMode = 'nearest_cent';
+  bool _sstEnabled = true;
+  bool _autoExtend = false;
+  bool _loading = true;
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void dispose() {
+    _sstRate.dispose();
+    _lateGrace.dispose();
+    _noShowThreshold.dispose();
+    _delayWarning.dispose();
+    super.dispose();
+  }
+
+  Future<void> _load() async {
+    if (mounted) setState(() => _loading = true);
+    try {
+      OutletContext.select(_outletId);
+      final row = await _repository.getActiveSettingsRow();
+      final settings = row == null
+          ? BusinessRuleSettings.defaults()
+          : BusinessRuleSettings.fromMap(row);
+      if (!mounted) return;
+      setState(() {
+        _settingsId = _asString(row?['id']);
+        _sstEnabled = settings.sstEnabled;
+        _sstMode = settings.sstPricingMode;
+        _roundingMode = settings.sstRoundingMode;
+        _autoExtend = settings.autoExtendLateArrivals;
+        _sstRate.text = settings.sstRatePercent.toStringAsFixed(
+          settings.sstRatePercent % 1 == 0 ? 0 : 2,
+        );
+        _lateGrace.text = settings.lateGraceMinutes.toString();
+        _noShowThreshold.text = settings.noShowThresholdMinutes.toString();
+        _delayWarning.text = settings.delayWarningMinutes.toString();
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _loading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to load business settings: $e'),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  Future<void> _save() async {
+    if (_saving || !_formKey.currentState!.validate()) return;
+    setState(() => _saving = true);
+    try {
+      await _repository.saveActiveSettings(
+        {
+          'sstEnabled': _sstEnabled,
+          'sstPricingMode': _sstMode,
+          'sstRatePercent': double.tryParse(_sstRate.text.trim()) ?? 0,
+          'sstRoundingMode': _roundingMode,
+          'lateGraceMinutes': int.tryParse(_lateGrace.text.trim()) ?? 0,
+          'noShowThresholdMinutes':
+              int.tryParse(_noShowThreshold.text.trim()) ?? 0,
+          'autoExtendLateArrivals': _autoExtend,
+          'delayWarningMinutes': int.tryParse(_delayWarning.text.trim()) ?? 0,
+        },
+        id: _settingsId,
+      );
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Business settings updated'),
+          backgroundColor: _teal,
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      await _load();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to save business settings: $e'),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isWide = MediaQuery.of(context).size.width >= 760;
+    return Scaffold(
+      backgroundColor: _page,
+      body: SafeArea(
+        child: Column(
+          children: [
+            const _ManagementHeader(
+              title: 'Business Settings',
+              subtitle: 'Outlet financial and attendance rules',
+            ),
+            Expanded(
+              child: _loading
+                  ? const Center(child: CircularProgressIndicator(color: _teal))
+                  : SingleChildScrollView(
+                      padding: const EdgeInsets.all(16),
+                      child: Center(
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 920),
+                          child: Form(
+                            key: _formKey,
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _Panel(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _settingsTitle('Outlet'),
+                                      const SizedBox(height: 12),
+                                      DropdownButtonFormField<String>(
+                                        initialValue: _outletId,
+                                        isExpanded: true,
+                                        items: OutletContext.outlets
+                                            .map(
+                                              (outlet) =>
+                                                  DropdownMenuItem<String>(
+                                                    value: outlet.id,
+                                                    child: Text(outlet.name),
+                                                  ),
+                                            )
+                                            .toList(),
+                                        onChanged: _saving
+                                            ? null
+                                            : (value) async {
+                                                if (value == null) return;
+                                                setState(
+                                                  () => _outletId = value,
+                                                );
+                                                await _load();
+                                              },
+                                        decoration: _fieldDecoration('Outlet'),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                _Panel(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _settingsTitle('SST'),
+                                      const SizedBox(height: 8),
+                                      SwitchListTile(
+                                        value: _sstEnabled,
+                                        onChanged: _saving
+                                            ? null
+                                            : (value) => setState(
+                                                () => _sstEnabled = value,
+                                              ),
+                                        contentPadding: EdgeInsets.zero,
+                                        activeThumbColor: Colors.white,
+                                        activeTrackColor:
+                                            const Color(0xFF10B981),
+                                        title: const Text('SST enabled'),
+                                      ),
+                                      const SizedBox(height: 8),
+                                      Wrap(
+                                        spacing: 12,
+                                        runSpacing: 12,
+                                        children: [
+                                          SizedBox(
+                                            width: isWide ? 280 : double.infinity,
+                                            child: DropdownButtonFormField<
+                                                String>(
+                                              initialValue: _sstMode,
+                                              isExpanded: true,
+                                              items: const [
+                                                DropdownMenuItem(
+                                                  value: 'inclusive',
+                                                  child: Text('Inclusive'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: 'exclusive',
+                                                  child: Text('Exclusive'),
+                                                ),
+                                              ],
+                                              onChanged: _saving
+                                                  ? null
+                                                  : (value) => setState(
+                                                      () => _sstMode =
+                                                          value ?? 'exclusive',
+                                                    ),
+                                              decoration: _fieldDecoration(
+                                                'Pricing mode',
+                                              ),
+                                            ),
+                                          ),
+                                          SizedBox(
+                                            width: isWide ? 180 : double.infinity,
+                                            child: _FormField(
+                                              label: 'SST percentage',
+                                              controller: _sstRate,
+                                              keyboardType:
+                                                  const TextInputType
+                                                      .numberWithOptions(
+                                                decimal: true,
+                                              ),
+                                            ),
+                                          ),
+                                          SizedBox(
+                                            width: isWide ? 260 : double.infinity,
+                                            child:
+                                                DropdownButtonFormField<String>(
+                                              initialValue: _roundingMode,
+                                              isExpanded: true,
+                                              items: const [
+                                                DropdownMenuItem(
+                                                  value: 'nearest_cent',
+                                                  child: Text('Nearest cent'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: 'nearest_5_sen',
+                                                  child: Text('Nearest 5 sen'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: 'floor_cent',
+                                                  child: Text('Round down'),
+                                                ),
+                                                DropdownMenuItem(
+                                                  value: 'ceil_cent',
+                                                  child: Text('Round up'),
+                                                ),
+                                              ],
+                                              onChanged: _saving
+                                                  ? null
+                                                  : (value) => setState(
+                                                      () => _roundingMode =
+                                                          value ??
+                                                              'nearest_cent',
+                                                    ),
+                                              decoration: _fieldDecoration(
+                                                'Rounding',
+                                              ),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 14),
+                                _Panel(
+                                  child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                      _settingsTitle('Late Arrival'),
+                                      const SizedBox(height: 12),
+                                      Wrap(
+                                        spacing: 12,
+                                        runSpacing: 12,
+                                        children: [
+                                          SizedBox(
+                                            width: isWide ? 210 : double.infinity,
+                                            child: _FormField(
+                                              label: 'Grace minutes',
+                                              controller: _lateGrace,
+                                              keyboardType:
+                                                  TextInputType.number,
+                                            ),
+                                          ),
+                                          SizedBox(
+                                            width: isWide ? 230 : double.infinity,
+                                            child: _FormField(
+                                              label: 'No-show threshold',
+                                              controller: _noShowThreshold,
+                                              keyboardType:
+                                                  TextInputType.number,
+                                            ),
+                                          ),
+                                          SizedBox(
+                                            width: isWide ? 210 : double.infinity,
+                                            child: _FormField(
+                                              label: 'Delay warning',
+                                              controller: _delayWarning,
+                                              keyboardType:
+                                                  TextInputType.number,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                      const SizedBox(height: 8),
+                                      SwitchListTile(
+                                        value: _autoExtend,
+                                        onChanged: _saving
+                                            ? null
+                                            : (value) => setState(
+                                                () => _autoExtend = value,
+                                              ),
+                                        contentPadding: EdgeInsets.zero,
+                                        activeThumbColor: Colors.white,
+                                        activeTrackColor:
+                                            const Color(0xFF10B981),
+                                        title: const Text(
+                                          'Auto-extend late arrivals',
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const SizedBox(height: 18),
+                                Align(
+                                  alignment: Alignment.centerRight,
+                                  child: FilledButton.icon(
+                                    onPressed: _saving ? null : _save,
+                                    icon: _saving
+                                        ? const SizedBox(
+                                            width: 16,
+                                            height: 16,
+                                            child: CircularProgressIndicator(
+                                              strokeWidth: 2,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : const Icon(
+                                            Icons.save_outlined,
+                                            size: 18,
+                                          ),
+                                    label: const Text('Save Settings'),
+                                    style: FilledButton.styleFrom(
+                                      backgroundColor: _teal,
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 18,
+                                        vertical: 14,
+                                      ),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(8),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _settingsTitle(String text) {
+    return Text(
+      text,
+      style: const TextStyle(
+        color: _ink,
+        fontSize: 16,
+        fontWeight: FontWeight.w900,
+      ),
+    );
+  }
+
+  InputDecoration _fieldDecoration(String label) {
+    return InputDecoration(
+      labelText: label,
+      filled: true,
+      fillColor: const Color(0xFFF7F8FA),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(8),
+        borderSide: const BorderSide(color: _teal, width: 1.4),
       ),
     );
   }

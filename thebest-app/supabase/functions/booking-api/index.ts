@@ -140,6 +140,18 @@ function pathOf(request: Request): string {
 function uuid(value: unknown): string | null { const text = String(value ?? "").trim(); return UUID.test(text) ? text : null; }
 function preference(value: unknown): string { const text = String(value ?? "none").toLowerCase(); return PREFERENCES.has(text) ? text : "none"; }
 
+// Mirrors public.normalize_my_phone() in 040_past_time_slots_and_phone_normalization.sql.
+// Billplz's sandbox/live API expects a clean "60XXXXXXXXX" mobile number; the booking
+// form's free-typed phone (spaces, dashes, "+", leading 0 vs 60) was being sent through
+// unchanged, which is a likely cause of Billplz rejecting bill creation (502s).
+function normalizeMyPhone(value: string): string {
+  const digits = value.replace(/\D/g, "");
+  if (!digits) return digits;
+  if (digits.startsWith("60")) return digits;
+  if (digits.startsWith("0")) return `6${digits}`;
+  return `60${digits}`;
+}
+
 async function fingerprint(request: Request): Promise<string> {
   const address = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
   const salt = Deno.env.get("BOOKING_RATE_LIMIT_SALT") || supabaseUrl;
@@ -244,7 +256,7 @@ async function route(request: Request): Promise<Response> {
       const billParams: Record<string, string> = {
         collection_id: BILLPLZ_COLLECTION_ID,
         email: String(hold.customer_email ?? ""),
-        mobile: String(hold.customer_phone ?? ""),
+        mobile: normalizeMyPhone(String(hold.customer_phone ?? "")),
         name: String(hold.customer_name ?? ""),
         amount: String(amountCents),
         callback_url: callbackUrl,
@@ -306,7 +318,9 @@ async function route(request: Request): Promise<Response> {
       }
     } catch (error) {
       console.error("Billplz callback processing failed", error);
-      // Still ack with 200 for a benign race (e.g. already confirmed); log for investigation.
+      // Ask Billplz to retry instead of silently leaving a paid booking without
+      // its transaction/payment status if confirmation or payment recording fails.
+      return fail(request, "Callback processing failed", 500);
     }
     return json(request, { ok: true });
   }

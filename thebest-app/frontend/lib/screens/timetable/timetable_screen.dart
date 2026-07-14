@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../data/repositories/appointment_repository.dart';
+import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/repository_utils.dart';
 import '../../data/repositories/room_repository.dart';
@@ -67,7 +68,10 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
     try {
       final date = DateFormat('yyyy-MM-dd').format(_selectedDate);
+      await _appointmentRepository.completeDueAppointments();
+      await _appointmentRepository.markPastAppointmentsNoShow();
       final settings = await _loadBusinessSettings();
+      final businessRules = settings.$3;
       final appointmentRows = await _appointmentRepository
           .getAppointmentsByDate(date);
       final transactionRows = await _transactionRepository
@@ -131,11 +135,15 @@ class _TimetableScreenState extends State<TimetableScreen> {
                       transactionsByAppointment[asString(row['id'])] ??
                       transactionsByGroup[asString(row['appointmentGroupId'])],
                   selectedDate: _selectedDate,
+                  lateGraceMinutes: businessRules.lateGraceMinutes,
+                  delayWarningMinutes: businessRules.delayWarningMinutes,
                 ),
               )
               .where((entry) => !entry.isCancelled)
               .toList()
-            ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+            ..sort(
+              (a, b) => a.serviceStartMinutes.compareTo(b.serviceStartMinutes),
+            );
 
       if (!mounted) return;
       setState(() {
@@ -152,16 +160,19 @@ class _TimetableScreenState extends State<TimetableScreen> {
     }
   }
 
-  Future<(int, int)> _loadBusinessSettings() async {
+  Future<(int, int, BusinessRuleSettings)> _loadBusinessSettings() async {
     try {
       final rows = await _businessSettingsTable.list(limit: 1);
       final row = rows.isEmpty ? null : rows.first;
       final open = _timeToMinutes(asString(row?['openTime'], '09:00'));
       var close = _timeToMinutes(asString(row?['closeTime'], '21:00'));
       if (close <= open) close += 24 * 60;
-      return (open, close);
+      final rules = row == null
+          ? BusinessRuleSettings.defaults()
+          : BusinessRuleSettings.fromMap(row);
+      return (open, close, rules);
     } catch (_) {
-      return (9 * 60, 21 * 60);
+      return (9 * 60, 21 * 60, BusinessRuleSettings.defaults());
     }
   }
 
@@ -588,6 +599,8 @@ class _TimetableEntry {
   final String paymentStatus;
   final double paidAmount;
   final DateTime selectedDate;
+  final int lateGraceMinutes;
+  final int delayWarningMinutes;
 
   const _TimetableEntry({
     required this.id,
@@ -616,6 +629,8 @@ class _TimetableEntry {
     required this.paymentStatus,
     required this.paidAmount,
     required this.selectedDate,
+    required this.lateGraceMinutes,
+    required this.delayWarningMinutes,
   });
 
   factory _TimetableEntry.fromMap(
@@ -626,6 +641,8 @@ class _TimetableEntry {
     required Map<String, Map<String, dynamic>> rooms,
     required Map<String, dynamic>? transaction,
     required DateTime selectedDate,
+    required int lateGraceMinutes,
+    required int delayWarningMinutes,
   }) {
     final customer = customers[asString(row['customerId'])];
     final service = services[asString(row['serviceId'])];
@@ -672,43 +689,82 @@ class _TimetableEntry {
       price: asDouble(row['totalPrice']),
       receiptNumber: asString(transaction?['receiptNumber']),
       paymentMethod: asString(transaction?['paymentMethod']),
-      paymentStatus: asString(transaction?['paymentStatus']),
+      paymentStatus: asString(row['paymentStatus'], 'unpaid'),
       paidAmount: asDouble(transaction?['totalAmount']),
       selectedDate: selectedDate,
+      lateGraceMinutes: lateGraceMinutes,
+      delayWarningMinutes: delayWarningMinutes,
     );
   }
 
-  int get startMinutes =>
+  int get _rowStartMinutes =>
       _minutesFromSelectedDate(startAt, selectedDate) ??
       _timeToMinutes(startTime);
-  int get endMinutes {
+  int get _rowEndMinutes {
     final fromTimestamp = _minutesFromSelectedDate(endAt, selectedDate);
     if (fromTimestamp != null) return fromTimestamp;
-    final start = _timeToMinutes(startTime);
+    final start = _rowStartMinutes;
     var end = _timeToMinutes(endTime);
     if (end <= start) end += 24 * 60;
     return end;
   }
 
+  int get bookedStartMinutes => _timeToMinutes(bookedStartTime);
+  int get bookedEndMinutes {
+    final start = bookedStartMinutes;
+    var end = _timeToMinutes(bookedEndTime);
+    if (end <= start) end += 24 * 60;
+    return end;
+  }
+  bool get hasActualTiming => actualStartedAt != null;
+  int get startMinutes =>
+      !isWalkIn && hasActualTiming ? bookedStartMinutes : _rowStartMinutes;
+  int get endMinutes =>
+      !isWalkIn && hasActualTiming ? bookedEndMinutes : _rowEndMinutes;
   int get durationMinutes => (endMinutes - startMinutes).clamp(0, 1440);
-  int get cleanupEndMinutes => endMinutes + bufferAfterMinutes.clamp(0, 240);
+  int get scheduledServiceMinutes {
+    final booked = bookedEndMinutes - bookedStartMinutes;
+    return booked > 0 ? booked.clamp(0, 1440) : durationMinutes;
+  }
+  DateTime? get actualServiceEndAt => actualStartedAt
+      ?.toLocal()
+      .add(Duration(minutes: scheduledServiceMinutes));
+  int get serviceStartMinutes {
+    final actualStart = actualStartedAt?.toLocal();
+    if (actualStart == null) return startMinutes;
+    return _minutesFromSelectedDate(actualStart, selectedDate) ?? startMinutes;
+  }
+  int get serviceEndMinutes {
+    final actualEnd = actualServiceEndAt;
+    if (actualEnd == null) return endMinutes;
+    return _minutesFromSelectedDate(actualEnd, selectedDate) ?? endMinutes;
+  }
+  int get cleanupEndMinutes =>
+      serviceEndMinutes + bufferAfterMinutes.clamp(0, 240);
   int get blockDurationMinutes =>
-      (cleanupEndMinutes - startMinutes).clamp(0, 1440);
+      (cleanupEndMinutes - serviceStartMinutes).clamp(0, 1440);
   bool get isWalkIn =>
       type == 'walkin' || type == 'walk_in' || type == 'walk-in';
   bool get isCancelled => status == 'cancelled' || status == 'canceled';
-  bool get isVoided => status == 'voided';
+  bool get isVoided => paymentStatus.toLowerCase() == 'voided';
+  bool get isNoShow => status == 'no_show';
   bool get isCompleted => operationalStatus == 'Completed';
   bool get isInProgress => operationalStatus == 'In Progress';
   bool get isUpcoming => operationalStatus == 'Awaiting Arrival';
-  bool get hasPayment =>
-      receiptNumber.isNotEmpty ||
-      paidAmount > 0 ||
-      paymentStatus.toLowerCase() == 'paid';
+  bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
+
+  bool isHappeningNow(DateTime now) {
+    if (!isInProgress) return false;
+    if (_stripDate(selectedDate) != _stripDate(now)) return false;
+    final minutes = now.hour * 60 + now.minute;
+    return minutes >= serviceStartMinutes && minutes < serviceEndMinutes;
+  }
 
   /// Real-world moment this service is scheduled to finish (prefers the
   /// timestamptz `endAt`, falls back to the day + end-of-service minutes).
   DateTime get _serviceEndDateTime {
+    final actualEnd = actualServiceEndAt;
+    if (actualEnd != null) return actualEnd;
     final resolved = endAt?.toLocal();
     if (resolved != null) return resolved;
     return DateTime(
@@ -719,6 +775,46 @@ class _TimetableEntry {
   }
 
   bool get serviceWindowEnded => DateTime.now().isAfter(_serviceEndDateTime);
+  bool get isServiceStartDue => !DateTime.now().isBefore(_serviceStartDateTime);
+
+  DateTime get _serviceStartDateTime {
+    final resolved = startAt?.toLocal();
+    if (resolved != null) return resolved;
+    return DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
+    ).add(Duration(minutes: startMinutes));
+  }
+
+  bool get shouldTrackArrivalDelay =>
+      !isWalkIn &&
+      !isCancelled &&
+      !isVoided &&
+      !isNoShow &&
+      status != 'completed' &&
+      status != 'in_progress' &&
+      actualStartedAt == null &&
+      (status == 'confirmed' || status == 'pending');
+
+  int get arrivalDelayMinutes {
+    if (!shouldTrackArrivalDelay) return 0;
+    final delay = DateTime.now().difference(_serviceStartDateTime).inMinutes;
+    return delay < 0 ? 0 : delay;
+  }
+
+  bool get hasDelayWarning =>
+      delayWarningMinutes > 0 && arrivalDelayMinutes >= delayWarningMinutes;
+  bool get isLateArrival =>
+      lateGraceMinutes > 0 && arrivalDelayMinutes > lateGraceMinutes;
+
+  String get arrivalDelayLabel {
+    final minutes = arrivalDelayMinutes;
+    if (minutes <= 0) return '';
+    if (isLateArrival) return 'Late $minutes min';
+    if (hasDelayWarning) return 'Delayed $minutes min';
+    return '';
+  }
 
   // A paid walk-in needs no manual start/complete: it counts as in progress
   // for the duration of its booked window, then completes on its own once
@@ -735,18 +831,50 @@ class _TimetableEntry {
       !isCancelled &&
       !isVoided &&
       serviceWindowEnded;
+  bool get isBookingCompletedByTime =>
+      !isWalkIn &&
+      hasPayment &&
+      status == 'in_progress' &&
+      !isCancelled &&
+      !isVoided &&
+      serviceWindowEnded;
   String get typeLabel => isWalkIn ? 'Walk-in' : 'Booking';
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get paidLabel => 'RM ${paidAmount.toStringAsFixed(2)}';
-  String get timeRange => '${_clockLabel(startTime)} - ${_clockLabel(endTime)}';
+  String get displayStartTime =>
+      !isWalkIn && hasActualTiming ? bookedStartTime : startTime;
+  String get displayEndTime =>
+      !isWalkIn && hasActualTiming ? bookedEndTime : endTime;
+  String get operationalStartTime =>
+      hasActualTiming ? _minutesToTime(serviceStartMinutes) : displayStartTime;
+  String get operationalEndTime =>
+      hasActualTiming ? _minutesToTime(serviceEndMinutes) : displayEndTime;
+  String get timeRange =>
+      '${_clockLabel(displayStartTime)} - ${_clockLabel(displayEndTime)}';
   String get bookedTimeRange =>
       '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
+  String get actualServiceTimeRange {
+    final started = actualStartedAt?.toLocal();
+    final ended = actualServiceEndAt;
+    if (started == null || ended == null) return '';
+    return '${DateFormat('h:mm a').format(started)} - '
+        '${DateFormat('h:mm a').format(ended)} '
+        '(${_compactDurationLabel(scheduledServiceMinutes)})';
+  }
+  String get operationalTimeRange =>
+      hasActualTiming && actualServiceTimeRange.isNotEmpty
+          ? actualServiceTimeRange
+          : timeRange;
   String get actualStartLabel => actualStartedAt == null
       ? 'Not started'
       : DateFormat('h:mm a').format(actualStartedAt!.toLocal());
   String get actualCompletedLabel => actualCompletedAt == null
       ? 'Not completed'
       : DateFormat('h:mm a').format(actualCompletedAt!.toLocal());
+  String? get actualServiceCompletionLabel {
+    if (actualCompletedAt != null) return 'Completed $actualCompletedLabel';
+    return null;
+  }
   String get durationLabel => '$timeRange ($durationMinutes min)';
   String get cleanupUntilLabel => bufferAfterMinutes <= 0
       ? 'No cleanup buffer'
@@ -759,10 +887,16 @@ class _TimetableEntry {
   String get operationalStatus {
     if (isVoided) return 'Voided';
     if (isCancelled) return 'Cancelled';
-    if (status == 'completed' || isWalkInCompletedByTime) return 'Completed';
+    if (isNoShow) return 'No Show';
+    if (status == 'completed' ||
+        isWalkInCompletedByTime ||
+        isBookingCompletedByTime) {
+      return 'Completed';
+    }
     if (status == 'in_progress' || isPaidWalkInInProgress) {
       return 'In Progress';
     }
+    if (arrivalDelayLabel.isNotEmpty) return arrivalDelayLabel;
     return 'Awaiting Arrival';
   }
 
@@ -940,7 +1074,7 @@ _ResourceStatus _resourceStatus({
       .where(
         (e) =>
             !e.isVoided &&
-            nowMinutes >= e.startMinutes &&
+            nowMinutes >= e.serviceStartMinutes &&
             nowMinutes < e.cleanupEndMinutes,
       )
       .toList();
@@ -949,19 +1083,20 @@ _ResourceStatus _resourceStatus({
       return const _ResourceStatus('Available now', Color(0xFF10B981));
     }
     final entry = active.first;
-    if (nowMinutes >= entry.endMinutes) {
+    if (nowMinutes >= entry.serviceEndMinutes) {
       return _ResourceStatus(
         'Cleaning until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
         const Color(0xFFF59E0B),
       );
     }
     return _ResourceStatus(
-      'Busy until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+      'Busy until ${_clockLabel(_minutesToTime(entry.serviceEndMinutes))}',
       const Color(0xFFF97316),
     );
   }
   final used = active.length;
-  final cleaning = active.where((entry) => nowMinutes >= entry.endMinutes).length;
+  final cleaning =
+      active.where((entry) => nowMinutes >= entry.serviceEndMinutes).length;
   final freeSlots = (resource.capacity - used).clamp(0, resource.capacity);
   if (used == 0) {
     return const _ResourceStatus('Available now', Color(0xFF10B981));
@@ -979,7 +1114,7 @@ _ResourceStatus _resourceStatus({
     );
   }
   final nextFree = active
-      .map((entry) => entry.cleanupEndMinutes)
+      .map((entry) => entry.serviceEndMinutes)
       .reduce((a, b) => a < b ? a : b);
   return _ResourceStatus(
     'Full until ${_clockLabel(_minutesToTime(nextFree))}',
@@ -1007,10 +1142,12 @@ class _TimetableStats {
     required List<_TimetableResource> resources,
     required DateTime selectedDate,
   }) {
-    final active = entries.where((entry) => entry.isInProgress).toList();
     final now = DateTime.now();
     final nowMinutes = now.hour * 60 + now.minute;
     final selectedToday = _stripDate(selectedDate) == _stripDate(now);
+    final active = selectedToday
+        ? entries.where((entry) => entry.isHappeningNow(now)).toList()
+        : <_TimetableEntry>[];
     var busy = 0;
     var free = 0;
     for (final resource in resources) {
@@ -1021,7 +1158,7 @@ class _TimetableStats {
                   (e) =>
                       !e.isVoided &&
                       resource.matches(e) &&
-                      nowMinutes >= e.startMinutes &&
+                      nowMinutes >= e.serviceStartMinutes &&
                       nowMinutes < e.cleanupEndMinutes,
                 )
                 .length
@@ -1939,8 +2076,10 @@ class _TimetableOverview extends StatelessWidget {
     final nowMinutes = now.hour * 60 + now.minute;
     final selectedToday = _stripDate(selectedDate) == _stripDate(now);
 
-    final inProgress = entries.where((e) => e.isInProgress).toList()
-      ..sort((a, b) => a.endMinutes.compareTo(b.endMinutes));
+    final inProgress = (selectedToday
+        ? entries.where((e) => e.isHappeningNow(now)).toList()
+        : <_TimetableEntry>[])
+      ..sort((a, b) => a.serviceEndMinutes.compareTo(b.serviceEndMinutes));
     final upNext = entries.where((e) => e.isUpcoming).toList()
       ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
     final busyTherapistIds = inProgress
@@ -1950,7 +2089,7 @@ class _TimetableOverview extends StatelessWidget {
     final busyTherapistEntries = inProgress
         .where((e) => e.therapistId.isNotEmpty)
         .toList()
-      ..sort((a, b) => a.endMinutes.compareTo(b.endMinutes));
+      ..sort((a, b) => a.serviceEndMinutes.compareTo(b.serviceEndMinutes));
     final freeTherapists = therapists
         .where((t) => t.available && !busyTherapistIds.contains(t.id))
         .toList();
@@ -2157,7 +2296,9 @@ class _TimetableOverview extends StatelessWidget {
                           compact: true,
                           occupied: entries
                               .where(
-                                (e) => e.roomId == room.id && e.isInProgress,
+                                (e) =>
+                                    e.roomId == room.id &&
+                                    e.isHappeningNow(now),
                               )
                               .length,
                         ),
@@ -2593,7 +2734,7 @@ class _OverviewInProgressCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = _avatarColor(entry.staffName);
-    final remaining = entry.endMinutes - nowMinutes;
+    final remaining = entry.serviceEndMinutes - nowMinutes;
     final remainingLabel = selectedToday && remaining > 0
         ? 'Ends in ${_overviewDuration(remaining)}'
         : null;
@@ -2701,7 +2842,7 @@ class _OverviewInProgressCard extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      entry.timeRange,
+                      entry.operationalTimeRange,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       textAlign: TextAlign.right,
@@ -2745,7 +2886,7 @@ class _OverviewBusyTherapistRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accent = _avatarColor(entry.staffName);
-    final remaining = entry.endMinutes - nowMinutes;
+    final remaining = entry.serviceEndMinutes - nowMinutes;
     final freeInLabel = selectedToday && remaining > 0
         ? 'Free in ${_overviewDuration(remaining)}'
         : null;
@@ -2809,7 +2950,7 @@ class _OverviewBusyTherapistRow extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Free at ${_clockLabel(entry.endTime)}',
+                  'Free at ${_clockLabel(_minutesToTime(entry.serviceEndMinutes))}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -3088,7 +3229,7 @@ class _OverviewUpNextRow extends StatelessWidget {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
-                    _clockLabel(entry.startTime),
+                    _clockLabel(entry.displayStartTime),
                     style: const TextStyle(
                       fontSize: 12.5,
                       fontWeight: FontWeight.w800,
@@ -3606,7 +3747,7 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
   /// painting over each other. Back-to-back 30-minute bookings still share
   /// a lane.
   static int _visualEnd(_TimetableEntry entry) {
-    final min = entry.startMinutes + 28;
+    final min = entry.serviceStartMinutes + 28;
     return entry.cleanupEndMinutes > min ? entry.cleanupEndMinutes : min;
   }
 
@@ -3818,7 +3959,11 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
                           _ResourceCell(
                             resource: widget.resources[i],
                             occupied: rowEntries[i]
-                                .where((entry) => entry.isInProgress)
+                                .where(
+                                  (entry) =>
+                                      selectedToday &&
+                                      entry.isHappeningNow(now),
+                                )
                                 .length,
                             width: resourceWidth,
                             height: rowHeights[i],
@@ -3991,7 +4136,7 @@ class _ResourceRowTimeline extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final sorted = [...entries]
-      ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+      ..sort((a, b) => a.serviceStartMinutes.compareTo(b.serviceStartMinutes));
     final blockingEntries = sorted.where((entry) => !entry.isVoided).toList();
     final lanes = _assignLanesFlat(
       sorted,
@@ -4238,14 +4383,16 @@ class _ResourceAppointmentBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = _statusStyle(entry);
-    final left = (entry.startMinutes - canvasStartMinute) * minuteWidth;
+    final left = (entry.serviceStartMinutes - canvasStartMinute) * minuteWidth;
     final serviceWidth =
-        ((entry.endMinutes - entry.startMinutes) * minuteWidth)
+        ((entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteWidth)
             .clamp(62.0, double.infinity)
             .toDouble();
-    final bufferMinutes = entry.bufferAfterMinutes.clamp(0, 240);
-    final bufferWidth = bufferMinutes > 0
-        ? (bufferMinutes * minuteWidth).clamp(34.0, double.infinity)
+    final cleanupMinutes = entry.bufferAfterMinutes.clamp(0, 240);
+    final cleanupLeft =
+        (entry.serviceEndMinutes - canvasStartMinute) * minuteWidth;
+    final bufferWidth = cleanupMinutes > 0
+        ? (cleanupMinutes * minuteWidth).clamp(34.0, double.infinity)
         : 0.0;
     final large = serviceWidth >= 154;
     final medium = serviceWidth >= 108 && serviceWidth < 154;
@@ -4257,25 +4404,31 @@ class _ResourceAppointmentBlock extends StatelessWidget {
         ? _shortCustomerName(entry.customerName)
         : entry.customerName;
     final timeLabel = small
-        ? _compactDurationLabel(entry.durationMinutes)
+        ? _compactDurationLabel(
+            (entry.serviceEndMinutes - entry.serviceStartMinutes).clamp(0, 1440),
+          )
         : serviceWidth >= 130
-        ? _meridiemRangeLabel(entry.startTime, entry.endTime)
-        : '${_shortClockLabel(entry.startTime)} - ${_shortClockLabel(entry.endTime)}';
+        ? _meridiemRangeLabel(
+            entry.operationalStartTime,
+            entry.operationalEndTime,
+          )
+        : '${_shortClockLabel(entry.operationalStartTime)} - ${_shortClockLabel(entry.operationalEndTime)}';
     final serviceLabel = _timelineServiceLabel(entry, serviceWidth);
 
     return Stack(
       children: [
-        if (bufferMinutes > 0)
+        if (cleanupMinutes > 0)
           Positioned(
-            left: left + serviceWidth + 3,
+            left: cleanupLeft + 3,
             top: top,
             width: (bufferWidth - 3).clamp(0.0, double.infinity),
             height: cardHeight,
             child: _BufferBlock(
-              minutes: bufferMinutes,
+              minutes: cleanupMinutes,
               rangeLabel:
-                  '${_shortClockLabel(entry.endTime)} - ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
+                  '${_shortClockLabel(_minutesToTime(entry.serviceEndMinutes))} - ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}',
               showRange: bufferWidth >= 70,
+              label: 'Cleanup',
             ),
           ),
         Positioned(
@@ -4432,11 +4585,13 @@ class _BufferBlock extends StatelessWidget {
   final int minutes;
   final String rangeLabel;
   final bool showRange;
+  final String label;
 
   const _BufferBlock({
     required this.minutes,
     required this.rangeLabel,
     required this.showRange,
+    this.label = 'Cleanup',
   });
 
   @override
@@ -4460,7 +4615,7 @@ class _BufferBlock extends StatelessWidget {
           ),
           SizedBox(height: showRange ? 3 : 2),
           Text(
-            showRange ? 'Cleanup' : '${minutes}m',
+            showRange ? label : '${minutes}m',
             textAlign: TextAlign.center,
             maxLines: 1,
             style: const TextStyle(
@@ -4532,7 +4687,7 @@ class _FreeAvailabilitySegment extends StatelessWidget {
     final label = finalSlotAvailable
         ? 'Free'
         : segment.isFinalAfterBusy
-        ? 'Free after ${_clockLabel(_minutesToTime(segment.start))}'
+        ? 'Free after ${_clockLabel(_minutesToTime(segment.labelStart))}'
         : segment.start <= openMinute
         ? 'Free'
         : '';
@@ -4763,15 +4918,17 @@ class _LegendDot extends StatelessWidget {
 class _ScheduleSegment {
   final int start;
   final int end;
+  final int labelStart;
   final bool afterBusy;
   final bool isFinalAfterBusy;
 
   const _ScheduleSegment(
     this.start,
     this.end, {
+    int? labelStart,
     this.afterBusy = false,
     this.isFinalAfterBusy = false,
-  });
+  }) : labelStart = labelStart ?? start;
 }
 
 /// The appointment/buffer blocks enforce a minimum pixel width so their
@@ -4783,18 +4940,29 @@ class _ScheduleSegment {
 double _visualBlockEndMinutes(_TimetableEntry entry, double minuteWidth) {
   const serviceMinPx = 62.0;
   const bufferMinPx = 34.0;
-  final serviceWidthPx = (entry.endMinutes - entry.startMinutes) * minuteWidth;
-  final serviceEnd = serviceWidthPx < serviceMinPx
-      ? entry.startMinutes + serviceMinPx / minuteWidth
-      : entry.endMinutes.toDouble();
-  final bufferMinutes = entry.bufferAfterMinutes.clamp(0, 240);
-  if (bufferMinutes <= 0) return serviceEnd;
-  final bufferWidthPx = bufferMinutes * minuteWidth;
+  final serviceWidthPx =
+      (entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteWidth;
+  final serviceVisualEnd = serviceWidthPx < serviceMinPx
+      ? entry.serviceStartMinutes + serviceMinPx / minuteWidth
+      : entry.serviceEndMinutes.toDouble();
+  final actualServiceEnd = entry.serviceEndMinutes.toDouble();
+  final cleanupMinutes = entry.bufferAfterMinutes.clamp(0, 240);
+  if (cleanupMinutes <= 0) {
+    return actualServiceEnd > serviceVisualEnd
+        ? actualServiceEnd
+        : serviceVisualEnd;
+  }
+  final bufferWidthPx = cleanupMinutes * minuteWidth;
   final visualBufferMinutes = bufferWidthPx < bufferMinPx
       ? bufferMinPx / minuteWidth
-      : bufferMinutes.toDouble();
-  return serviceEnd + visualBufferMinutes;
+      : cleanupMinutes.toDouble();
+  final cleanupVisualEnd = actualServiceEnd + visualBufferMinutes;
+  return cleanupVisualEnd > serviceVisualEnd
+      ? cleanupVisualEnd
+      : serviceVisualEnd;
 }
+
+int _actualBlockEndMinutes(_TimetableEntry entry) => entry.cleanupEndMinutes;
 
 List<_ScheduleSegment> _freeSegments(
   List<_TimetableEntry> entries,
@@ -4805,10 +4973,11 @@ List<_ScheduleSegment> _freeSegments(
   final busy = entries
       .map(
         (entry) => _ScheduleSegment(
-          entry.startMinutes.clamp(openMinute, closeMinute).toInt(),
+          entry.serviceStartMinutes.clamp(openMinute, closeMinute).toInt(),
           _visualBlockEndMinutes(entry, minuteWidth)
               .ceil()
               .clamp(openMinute, closeMinute),
+          labelStart: _actualBlockEndMinutes(entry).clamp(openMinute, closeMinute),
         ),
       )
       .where((segment) => segment.end > segment.start)
@@ -4817,12 +4986,23 @@ List<_ScheduleSegment> _freeSegments(
 
   final free = <_ScheduleSegment>[];
   var cursor = openMinute;
+  var labelCursor = openMinute;
   var passedBusy = false;
   for (final segment in busy) {
     if (segment.start > cursor) {
-      free.add(_ScheduleSegment(cursor, segment.start, afterBusy: passedBusy));
+      free.add(
+        _ScheduleSegment(
+          cursor,
+          segment.start,
+          labelStart: labelCursor,
+          afterBusy: passedBusy,
+        ),
+      );
     }
-    if (segment.end > cursor) cursor = segment.end;
+    if (segment.end > cursor) {
+      cursor = segment.end;
+      if (segment.labelStart > labelCursor) labelCursor = segment.labelStart;
+    }
     passedBusy = true;
   }
   if (cursor < closeMinute) {
@@ -4830,6 +5010,7 @@ List<_ScheduleSegment> _freeSegments(
       _ScheduleSegment(
         cursor,
         closeMinute,
+        labelStart: labelCursor,
         afterBusy: passedBusy,
         isFinalAfterBusy: passedBusy,
       ),
@@ -4851,12 +5032,12 @@ List<List<_TimetableEntry>> _groupOverlapping(
 }) {
   final end = endOf ?? (entry) => entry.cleanupEndMinutes;
   final sorted = [...entries]
-    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+    ..sort((a, b) => a.serviceStartMinutes.compareTo(b.serviceStartMinutes));
   final groups = <List<_TimetableEntry>>[];
   var current = <_TimetableEntry>[];
   var groupEnd = 0;
   for (final entry in sorted) {
-    if (current.isEmpty || entry.startMinutes < groupEnd) {
+    if (current.isEmpty || entry.serviceStartMinutes < groupEnd) {
       current.add(entry);
       if (end(entry) > groupEnd) groupEnd = end(entry);
     } else {
@@ -4885,7 +5066,9 @@ List<_EntryLane> _assignLanesFlat(
   for (final group in _groupOverlapping(entries, endOf: endOf)) {
     final laneEnds = <int>[];
     for (final entry in group) {
-      var lane = laneEnds.indexWhere((laneEnd) => entry.startMinutes >= laneEnd);
+      var lane = laneEnds.indexWhere(
+        (laneEnd) => entry.serviceStartMinutes >= laneEnd,
+      );
       if (lane == -1) {
         lane = laneEnds.length;
         laneEnds.add(end(entry));
@@ -5142,7 +5325,7 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
   int get _canvasEndMinute => _ceilToHour(widget.closeMinute);
 
   static int _visualEnd(_TimetableEntry entry) {
-    final min = entry.startMinutes + minVisualMinutes;
+    final min = entry.serviceStartMinutes + minVisualMinutes;
     return entry.cleanupEndMinutes > min ? entry.cleanupEndMinutes : min;
   }
 
@@ -5332,7 +5515,8 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
           left: 10 + lane.lane * (laneWidth + laneGap),
           top:
               topPad +
-              (lane.entry.startMinutes - canvasStartMinute) * minuteHeight,
+              (lane.entry.serviceStartMinutes - canvasStartMinute) *
+                  minuteHeight,
           width: laneWidth,
           height: _cardHeight(lane.entry),
           child: _MobileTimelineEntryCard(
@@ -5352,7 +5536,8 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
   }
 
   double _cardHeight(_TimetableEntry entry) {
-    final raw = (entry.endMinutes - entry.startMinutes) * minuteHeight;
+    final raw =
+        (entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteHeight;
     return raw < 46.0 ? 46.0 : raw;
   }
 }
@@ -5631,7 +5816,10 @@ class _MobileTimelineEntryCard extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Text(
-          _meridiemRangeLabel(entry.startTime, entry.endTime),
+          _meridiemRangeLabel(
+            entry.operationalStartTime,
+            entry.operationalEndTime,
+          ),
           maxLines: 1,
           style: const TextStyle(
             fontSize: 11,
@@ -5698,7 +5886,7 @@ class _MobileTimelineEntryCard extends StatelessWidget {
               _MobileMetaLine(
                 icon: Icons.schedule_outlined,
                 label:
-                    '${_meridiemRangeLabel(entry.startTime, entry.endTime)}  -  $_resourceLabel',
+                    '${_meridiemRangeLabel(entry.operationalStartTime, entry.operationalEndTime)}  -  $_resourceLabel',
               ),
             ],
           ),
@@ -5790,7 +5978,8 @@ class _MobileTimelineCollapsedBand extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final inProgress = band.where((entry) => entry.isInProgress).length;
+    final now = DateTime.now();
+    final inProgress = band.where((entry) => entry.isHappeningNow(now)).length;
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -5892,7 +6081,7 @@ class _MobileCollapseHandle extends StatelessWidget {
 String _mobileBandKey(List<_TimetableEntry> band) => band.map((e) => e.id).join(',');
 
 int _groupStart(List<_TimetableEntry> group) =>
-    group.map((e) => e.startMinutes).reduce((a, b) => a < b ? a : b);
+    group.map((e) => e.serviceStartMinutes).reduce((a, b) => a < b ? a : b);
 
 int _groupEnd(List<_TimetableEntry> group) =>
     group.map((e) => e.cleanupEndMinutes).reduce((a, b) => a > b ? a : b);
@@ -6062,7 +6251,8 @@ class _MobileCollapsedBand extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final inProgress = band.where((e) => e.isInProgress).length;
+    final now = DateTime.now();
+    final inProgress = band.where((e) => e.isHappeningNow(now)).length;
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Material(
@@ -6199,7 +6389,7 @@ class _MobileEntryCard extends StatelessWidget {
                 ),
                 const SizedBox(height: 7),
                 Text(
-                  '${_shortClockLabel(entry.startTime)} - ${_clockLabel(entry.endTime)}',
+                  '${_shortClockLabel(entry.operationalStartTime)} - ${_clockLabel(entry.operationalEndTime)}',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -6549,10 +6739,8 @@ class _TimetableDetailCard extends StatelessWidget {
               _DetailRow(
                 icon: Icons.play_circle_outline,
                 label: 'Actual service time',
-                title: 'Started ${entry.actualStartLabel}',
-                subtitle: entry.actualCompletedAt == null
-                    ? 'Completion not recorded yet'
-                    : 'Completed ${entry.actualCompletedLabel}',
+                title: entry.actualServiceTimeRange,
+                subtitle: entry.actualServiceCompletionLabel,
               ),
             _DetailRow(
               icon: Icons.payments_outlined,
@@ -6892,6 +7080,13 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
       border: Color(0xFFD1D5DB),
     );
   }
+  if (entry.isNoShow) {
+    return const _StatusStyle(
+      color: Color(0xFFB91C1C),
+      background: Color(0xFFFEF2F2),
+      border: Color(0xFFFCA5A5),
+    );
+  }
   if (entry.isInProgress) {
     return const _StatusStyle(
       color: Color(0xFFF97316),
@@ -6904,6 +7099,20 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
       color: Color(0xFF059669),
       background: Color(0xFFF0FDF4),
       border: Color(0xFF86EFAC),
+    );
+  }
+  if (entry.isLateArrival) {
+    return const _StatusStyle(
+      color: Color(0xFFB91C1C),
+      background: Color(0xFFFEF2F2),
+      border: Color(0xFFFCA5A5),
+    );
+  }
+  if (entry.hasDelayWarning) {
+    return const _StatusStyle(
+      color: Color(0xFFD97706),
+      background: Color(0xFFFFFBEB),
+      border: Color(0xFFFCD34D),
     );
   }
   return const _StatusStyle(

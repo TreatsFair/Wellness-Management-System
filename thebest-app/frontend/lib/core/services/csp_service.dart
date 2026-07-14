@@ -170,6 +170,30 @@ class WalkInAvailability {
   final String? nextAvailableTime;
 }
 
+class WalkInRoomAvailability {
+  const WalkInRoomAvailability({
+    required this.availableNow,
+    required this.freeSlots,
+    required this.totalSlots,
+    this.freeAt,
+  });
+
+  factory WalkInRoomAvailability.fromMap(Map<String, dynamic> row) {
+    return WalkInRoomAvailability(
+      availableNow:
+          row['available_now'] == true || row['availableNow'] == true,
+      freeSlots: _asInt(row['free_slots'] ?? row['freeSlots']),
+      totalSlots: _asInt(row['total_slots'] ?? row['totalSlots']),
+      freeAt: _nullableCleanTime(row['free_at'] ?? row['freeAt']),
+    );
+  }
+
+  final bool availableNow;
+  final int freeSlots;
+  final int totalSlots;
+  final String? freeAt;
+}
+
 class CspService {
   CspService._();
 
@@ -354,6 +378,46 @@ class CspService {
       },
     );
     return WalkInAvailability.fromMap(_firstMap(rows));
+  }
+
+  /// Duration-aware, room-independent per-therapist availability -- unlike
+  /// [getWalkInAvailability] this can be called as soon as services (and
+  /// therefore a duration) are picked, before a room/zone is selected.
+  static Future<List<WalkInTherapistAvailability>>
+  getWalkinTherapistAvailability({
+    required String today,
+    required String nowTime,
+    required int duration,
+  }) async {
+    final rows = await _client.rpc(
+      'get_walkin_therapist_availability',
+      params: {
+        'p_today': today,
+        'p_now_time': nowTime,
+        'p_duration': duration,
+      },
+    );
+    return _asMapList(rows).map(WalkInTherapistAvailability.fromMap).toList();
+  }
+
+  /// Duration-aware per-room availability, mirroring
+  /// [getWalkinTherapistAvailability] for the room/zone side.
+  static Future<WalkInRoomAvailability> getWalkinRoomAvailability({
+    required String today,
+    required String nowTime,
+    required int duration,
+    required String roomId,
+  }) async {
+    final rows = await _client.rpc(
+      'get_walkin_room_availability',
+      params: {
+        'p_today': today,
+        'p_now_time': nowTime,
+        'p_duration': duration,
+        'p_room_id': roomId,
+      },
+    );
+    return WalkInRoomAvailability.fromMap(_firstMap(rows));
   }
 }
 

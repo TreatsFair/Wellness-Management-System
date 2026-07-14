@@ -4,8 +4,8 @@ import 'package:intl/intl.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
 import '../../core/utils/error_message.dart';
-import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/commission_repository.dart';
+import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -295,12 +295,12 @@ class WalkInPosScreen extends StatefulWidget {
 }
 
 class _WalkInPosScreenState extends State<WalkInPosScreen> {
-  final _appointmentRepository = AppointmentRepository();
   final _customerRepository = CustomerRepository();
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
   final _commissionRepository = CommissionRepository();
+  final _businessSettingsRepository = BusinessSettingsRepository();
 
   // Step tracking
   bool _showPayment = false;
@@ -327,6 +327,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   List<_StartTimeOption> _startOptions = [];
   bool _loadingData = true;
   String? _serviceLoadError;
+  BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
   final _searchController = TextEditingController();
   final _transactionNotesController = TextEditingController();
@@ -361,6 +362,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     setState(() => _loadingData = true);
     try {
       await Future.wait([
+        _loadBusinessSettings(),
         _loadServices(),
         _loadTherapistsLive(),
         _loadZonesLive(),
@@ -368,6 +370,17 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       ]);
     } finally {
       setState(() => _loadingData = false);
+    }
+  }
+
+  Future<void> _loadBusinessSettings() async {
+    try {
+      final settings = await _businessSettingsRepository.getActiveSettings();
+      if (mounted) setState(() => _businessSettings = settings);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _businessSettings = BusinessRuleSettings.defaults());
+      }
     }
   }
 
@@ -396,60 +409,43 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     }
   }
 
+  /// Total minutes of the currently selected service(s) -- the window a
+  /// candidate therapist/room must be free for, not just free "right now".
+  int get _selectedDurationMinutes =>
+      _selectedServices.fold(0, (total, service) => total + service.duration);
+
   Future<void> _loadTherapistsLive() async {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
     final therapistRows = await _therapistRepository.getActiveTherapists();
 
-    final therapists = <_WalkInTherapist>[];
+    // Duration-aware: checks the whole [now, now + duration] window against
+    // today's bookings, not just whether the therapist is busy this instant.
+    // A therapist free right now but booked again before the service would
+    // finish must show as busy, not "Available immediately".
+    final availability = await CspService.getWalkinTherapistAvailability(
+      today: today,
+      nowTime: DateFormat('HH:mm:ss').format(now),
+      duration: _selectedDurationMinutes,
+    );
+    final availabilityById = {
+      for (final a in availability) a.therapistId: a,
+    };
 
-    for (final row in therapistRows) {
-      // Check for current active appointment
-      final activeAppointments = await _appointmentRepository
-          .getActiveAppointmentsForTherapist(
-            row['id']?.toString() ?? '',
-            today,
-          );
+    final therapists = therapistRows.map((row) {
+      final id = row['id']?.toString() ?? '';
+      final a = availabilityById[id];
+      final isFree = a?.isFreeNow ?? false;
+      final freeInMinutes = a?.freeInMinutes ?? 0;
+      final busyUntil = a?.freeAt ?? '';
 
-      bool isFree = true;
-      String busyUntil = '';
-      int freeInMinutes = 0;
-
-      for (final d in activeAppointments) {
-        final startTime = d['startTime'] as String? ?? '00:00';
-        final endTime = d['endTime'] as String? ?? '00:00';
-        final bufferAfter = _parseInt(d['bufferAfterMinutes'], fallback: 0);
-        final startMinutes = _orderTimeToMinutes(startTime);
-        final blockedEndMinutes = _orderTimeToMinutes(endTime) + bufferAfter;
-        final nowMinutes = now.hour * 60 + now.minute;
-
-        if (startMinutes <= nowMinutes && blockedEndMinutes > nowMinutes) {
-          isFree = false;
-          busyUntil = _orderMinutesToTime(blockedEndMinutes);
-
-          // Calculate minutes until free
-          final endParts = busyUntil.split(':');
-          final endDateTime = DateTime(
-            now.year,
-            now.month,
-            now.day,
-            int.parse(endParts[0]),
-            int.parse(endParts[1]),
-          );
-          freeInMinutes = endDateTime.difference(now).inMinutes;
-          break;
-        }
-      }
-
-      therapists.add(
-        _WalkInTherapist.fromMap(
-          row,
-          isFree: isFree,
-          busyUntil: busyUntil,
-          freeInMinutes: freeInMinutes,
-        ),
+      return _WalkInTherapist.fromMap(
+        row,
+        isFree: isFree,
+        busyUntil: busyUntil,
+        freeInMinutes: freeInMinutes,
       );
-    }
+    }).toList();
 
     // Sort: free first, then by freeInMinutes ascending
     therapists.sort((a, b) {
@@ -471,42 +467,36 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _loadZonesLive() async {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
-    final nowMinutes = now.hour * 60 + now.minute;
+    final nowTime = DateFormat('HH:mm:ss').format(now);
+    final duration = _selectedDurationMinutes;
 
     final roomRows = await _roomRepository.getActiveRooms();
 
-    final zones = <_WalkInZone>[];
-
-    for (final d in roomRows) {
-      if (!_isActiveDoc(d)) continue;
-      final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
-
-      final activeAppointments = await _appointmentRepository
-          .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', today);
-
-      final occupiedNow = activeAppointments.where((appointment) {
-        final start = _orderTimeToMinutes(
-          appointment['startTime']?.toString() ?? '00:00',
+    // Duration-aware, same fix as _loadTherapistsLive: a room free right now
+    // but booked again before the service would finish must not show as
+    // available.
+    final zones = await Future.wait(
+      roomRows.where(_isActiveDoc).map((d) async {
+        final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
+        final roomId = d['id']?.toString() ?? '';
+        final availability = await CspService.getWalkinRoomAvailability(
+          today: today,
+          nowTime: nowTime,
+          duration: duration,
+          roomId: roomId,
         );
-        final end =
-            _orderTimeToMinutes(appointment['endTime']?.toString() ?? '00:00') +
-            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
-        return start <= nowMinutes && end > nowMinutes;
-      }).length;
-      final freeSlots = (totalSlots - occupiedNow).clamp(0, totalSlots);
 
-      zones.add(
-        _WalkInZone(
-          id: d['id']?.toString() ?? '',
+        return _WalkInZone(
+          id: roomId,
           name: d['name'] ?? '',
           type: _normalizeRoomType(d['type'] ?? d['roomType']),
           floor: d['floor'] ?? '',
           imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
           totalSlots: totalSlots,
-          freeSlots: freeSlots,
-        ),
-      );
-    }
+          freeSlots: availability.freeSlots,
+        );
+      }),
+    );
 
     setState(() => _zones = zones);
   }
@@ -636,6 +626,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       _startOptions = [];
       _paxAllocations[_activePaxIndex] = null;
     });
+    // Therapist/room availability depends on the total selected duration, not
+    // just "who's busy right now" -- recompute against the new window.
+    _loadTherapistsLive();
+    _loadZonesLive();
   }
 
   void _onTherapistSelected(_WalkInTherapist t) {
@@ -843,8 +837,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     (total, allocation) => total + allocation.servicePrice,
   );
 
-  double get _orderSstAmount => _orderServicePrice * 0.06;
-  double get _orderTotalAmount => _orderServicePrice + _orderSstAmount;
+  PriceBreakdown get _orderPriceBreakdown =>
+      _businessSettings.priceBreakdown(_orderServicePrice);
+
+  double get _orderNetServicePrice => _orderPriceBreakdown.servicePrice;
+  double get _orderSstAmount => _orderPriceBreakdown.sstAmount;
+  double get _orderTotalAmount => _orderPriceBreakdown.totalAmount;
 
   String get _orderServiceNameSummary {
     final allocations = _checkoutAllocations;
@@ -922,7 +920,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           date: date,
           startTime: allocation.startTimeValue,
           endTime: allocation.endTimeValue,
-          servicePrice: allocation.servicePrice,
+          servicePrice: _orderNetServicePrice,
           serviceName: allocation.serviceNameSummary,
           serviceItems: allocation.serviceItems,
           itemCount: allocation.services.length,
@@ -952,7 +950,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           customerPhone: _selectedCustomer!.phone,
           counterStaffId: counterStaff?['id']?.toString(),
           counterStaffName: counterStaff?['name']?.toString(),
-          servicePrice: _orderServicePrice,
+          servicePrice: _orderNetServicePrice,
           sstAmount: _orderSstAmount,
           totalAmount: _orderTotalAmount,
           paymentMethod: _paymentMethod!,
@@ -1523,8 +1521,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             child: _WalkInTherapistRow(
               therapist: t,
               isSelected: _selectedTherapist?.id == t.id,
-              isDisabled: false,
-              onTap: () => _onTherapistSelected(t),
+              isDisabled: !t.isFree && t.freeInMinutes <= 0,
+              onTap: !t.isFree && t.freeInMinutes <= 0
+                  ? null
+                  : () => _onTherapistSelected(t),
             ),
           ),
         ),
@@ -1763,7 +1763,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   style: TextStyle(fontSize: 13, color: Color(0xFF6B6B6B)),
                 ),
                 Text(
-                  'RM ${_orderServicePrice.toStringAsFixed(2)}',
+                  'RM ${_orderNetServicePrice.toStringAsFixed(2)}',
                   style: const TextStyle(
                     fontSize: 13,
                     color: Color(0xFF1A1A2E),
@@ -1775,9 +1775,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'SST (6%)',
-                  style: TextStyle(fontSize: 13, color: Color(0xFF6B6B6B)),
+                Text(
+                  _businessSettings.sstLabel,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF6B6B6B),
+                  ),
                 ),
                 Text(
                   'RM ${_orderSstAmount.toStringAsFixed(2)}',
@@ -2029,11 +2032,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   children: [
                     _PaymentRow(
                       'Service',
-                      'RM ${_orderServicePrice.toStringAsFixed(2)}',
+                      'RM ${_orderNetServicePrice.toStringAsFixed(2)}',
                     ),
                     const SizedBox(height: 8),
                     _PaymentRow(
-                      'SST (6%)',
+                      _businessSettings.sstLabel,
                       'RM ${_orderSstAmount.toStringAsFixed(2)}',
                     ),
                     const Padding(
