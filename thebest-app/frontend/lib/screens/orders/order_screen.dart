@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
 import '../../core/utils/error_message.dart';
@@ -102,6 +105,7 @@ bool _isActiveDoc(Map<String, dynamic> data) {
 class _WalkInTherapist {
   final String id, name;
   final bool isFree;
+  final String availabilityStatus;
   final String busyUntil;
   final int freeInMinutes;
   final Map<String, double> serviceCommissions;
@@ -110,6 +114,7 @@ class _WalkInTherapist {
     required this.id,
     required this.name,
     required this.isFree,
+    required this.availabilityStatus,
     required this.busyUntil,
     required this.freeInMinutes,
     required this.serviceCommissions,
@@ -118,6 +123,7 @@ class _WalkInTherapist {
   factory _WalkInTherapist.fromMap(
     Map<String, dynamic> d, {
     bool isFree = true,
+    String availabilityStatus = 'free_now',
     String busyUntil = '',
     int freeInMinutes = 0,
   }) {
@@ -125,6 +131,7 @@ class _WalkInTherapist {
       id: d['id']?.toString() ?? '',
       name: d['name'] ?? '',
       isFree: isFree,
+      availabilityStatus: availabilityStatus,
       busyUntil: busyUntil,
       freeInMinutes: freeInMinutes,
       serviceCommissions: _commissionMap(d['serviceCommissions']),
@@ -171,6 +178,7 @@ Map<String, double> _commissionMap(Object? value) {
 class _WalkInZone {
   final String id, name, type, floor, imageUrl;
   final int totalSlots, freeSlots;
+  final String freeAt;
 
   const _WalkInZone({
     required this.id,
@@ -180,6 +188,7 @@ class _WalkInZone {
     required this.imageUrl,
     required this.totalSlots,
     required this.freeSlots,
+    this.freeAt = '',
   });
 
   bool get isAvailableNow => freeSlots > 0;
@@ -222,12 +231,14 @@ class _WalkInAllocation {
   final List<_WalkInService> services;
   final _WalkInTherapist therapist;
   final _WalkInZone zone;
+  final RoomUnitAvailability? roomUnit;
   final _StartTimeOption startTime;
 
   const _WalkInAllocation({
     required this.services,
     required this.therapist,
     required this.zone,
+    required this.roomUnit,
     required this.startTime,
   });
 
@@ -256,6 +267,7 @@ class _WalkInAllocation {
           'name': service.name,
           'category': service.category,
           'duration': service.duration,
+          'bufferAfterMinutes': service.bufferAfterMinutes,
           'price': service.price,
           'therapistCommission': service.therapistCommission,
           'counterCommission': service.counterCommission,
@@ -263,6 +275,8 @@ class _WalkInAllocation {
           'assignedTherapistName': therapist.name,
           'assignedRoomId': zone.id,
           'assignedRoomName': zone.name,
+          'assignedRoomUnitId': roomUnit?.id,
+          'assignedRoomUnitName': roomUnit?.name,
           'startTime': startTimeValue,
           'endTime': endTimeValue,
         },
@@ -273,6 +287,7 @@ class _WalkInAllocation {
     return {
       'therapist_id': therapist.id,
       'room_id': zone.id,
+      'room_unit_id': roomUnit?.id,
       'service_id': primaryService.id,
       'start_time': startTimeValue,
       'end_time': endTimeValue,
@@ -310,6 +325,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   final List<_WalkInService> _selectedServices = [];
   _WalkInTherapist? _selectedTherapist;
   _WalkInZone? _selectedZone;
+  RoomUnitAvailability? _selectedRoomUnit;
   _StartTimeOption? _selectedStartTime;
   int _paxCount = 1;
   int _activePaxIndex = 0;
@@ -317,11 +333,15 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   String _serviceTab = 'Services';
   String? _paymentMethod;
   bool _isConfirming = false;
+  late final String _draftSessionId;
+  final Set<int> _heldPaxIndexes = <int>{};
 
   // Data
   List<_WalkInService> _services = [];
   List<_WalkInTherapist> _therapists = [];
   List<_WalkInZone> _zones = [];
+  List<RoomUnitAvailability> _roomUnits = [];
+  bool _loadingRoomUnits = false;
   List<_WalkInCustomer> _customers = [];
   List<_WalkInCustomer> _filteredCustomers = [];
   List<_StartTimeOption> _startOptions = [];
@@ -338,6 +358,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   @override
   void initState() {
     super.initState();
+    _draftSessionId =
+        'staff-${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(this)}';
     _receiptNumber = _generateReceiptNumber();
     _loadData();
     _searchController.addListener(_filterCustomers);
@@ -345,6 +367,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   @override
   void dispose() {
+    unawaited(
+      CspService.releaseStaffWalkInDraft(
+        draftSessionId: _draftSessionId,
+      ).catchError((_) {}),
+    );
     _searchController.dispose();
     _transactionNotesController.dispose();
     super.dispose();
@@ -414,6 +441,15 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   int get _selectedDurationMinutes =>
       _selectedServices.fold(0, (total, service) => total + service.duration);
 
+  int get _selectedRoomBlockMinutes =>
+      _selectedDurationMinutes +
+      _selectedServices.fold<int>(
+        0,
+        (buffer, service) => service.bufferAfterMinutes > buffer
+            ? service.bufferAfterMinutes
+            : buffer,
+      );
+
   Future<void> _loadTherapistsLive() async {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
@@ -428,20 +464,20 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       nowTime: DateFormat('HH:mm:ss').format(now),
       duration: _selectedDurationMinutes,
     );
-    final availabilityById = {
-      for (final a in availability) a.therapistId: a,
-    };
+    final availabilityById = {for (final a in availability) a.therapistId: a};
 
     final therapists = therapistRows.map((row) {
       final id = row['id']?.toString() ?? '';
       final a = availabilityById[id];
       final isFree = a?.isFreeNow ?? false;
+      final availabilityStatus = a?.status ?? 'unavailable';
       final freeInMinutes = a?.freeInMinutes ?? 0;
       final busyUntil = a?.freeAt ?? '';
 
       return _WalkInTherapist.fromMap(
         row,
         isFree: isFree,
+        availabilityStatus: availabilityStatus,
         busyUntil: busyUntil,
         freeInMinutes: freeInMinutes,
       );
@@ -468,7 +504,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
     final nowTime = DateFormat('HH:mm:ss').format(now);
-    final duration = _selectedDurationMinutes;
+    final duration = _selectedRoomBlockMinutes;
 
     final roomRows = await _roomRepository.getActiveRooms();
 
@@ -494,6 +530,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           imageUrl: (d['imageUrl'] ?? d['image'])?.toString().trim() ?? '',
           totalSlots: totalSlots,
           freeSlots: availability.freeSlots,
+          freeAt: availability.freeAt ?? '',
         );
       }),
     );
@@ -566,9 +603,25 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     final now = DateTime.now();
     final nowLabel = DateFormat('h:mm a').format(now);
     final options = <_StartTimeOption>[];
+    final selectedUnit = _selectedRoomUnit;
+    final roomAvailableNow = selectedUnit == null
+        ? _selectedZone!.isAvailableNow
+        : selectedUnit.availableForRequestedTime;
+
+    DateTime? parseToday(String? value) {
+      if (value == null || value.isEmpty) return null;
+      final parts = value.split(':');
+      if (parts.length < 2) return null;
+      final hour = int.tryParse(parts[0]);
+      final minute = int.tryParse(parts[1]);
+      if (hour == null || minute == null) return null;
+      var result = DateTime(now.year, now.month, now.day, hour, minute);
+      if (result.isBefore(now)) result = result.add(const Duration(days: 1));
+      return result;
+    }
 
     // Check if we can start now
-    if (_selectedTherapist!.isFree && _selectedZone!.isAvailableNow) {
+    if (_selectedTherapist!.isFree && roomAvailableNow) {
       options.add(
         _StartTimeOption(
           isNow: true,
@@ -580,24 +633,41 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
     // Next available — therapist free time
     if (!_selectedTherapist!.isFree && _selectedTherapist!.freeInMinutes > 0) {
-      final nextTime = now.add(
-        Duration(minutes: _selectedTherapist!.freeInMinutes),
-      );
+      var nextTime =
+          parseToday(_selectedTherapist!.busyUntil) ??
+          now.add(Duration(minutes: _selectedTherapist!.freeInMinutes));
+      final roomFree = roomAvailableNow
+          ? null
+          : parseToday(selectedUnit?.availableAt ?? _selectedZone!.freeAt);
+      if (roomFree != null && roomFree.isAfter(nextTime)) nextTime = roomFree;
       options.add(
         _StartTimeOption(
           isNow: false,
           timeLabel: DateFormat('h:mm a').format(nextTime),
-          subtitle: 'Queue slot',
+          subtitle: selectedUnit == null
+              ? 'Next room and therapist opening'
+              : '${selectedUnit.name} available',
         ),
       );
-    } else if (_selectedTherapist!.isFree && !_selectedZone!.isAvailableNow) {
+    } else if (_selectedTherapist!.isFree && !roomAvailableNow) {
       // Room unavailable — suggest 30 min later
-      final nextTime = now.add(const Duration(minutes: 30));
+      final nextTime = parseToday(
+        selectedUnit?.availableAt ?? _selectedZone!.freeAt,
+      );
+      if (nextTime == null) {
+        setState(() {
+          _startOptions = options;
+          _selectedStartTime = options.isNotEmpty ? options.first : null;
+        });
+        return;
+      }
       options.add(
         _StartTimeOption(
           isNow: false,
           timeLabel: DateFormat('h:mm a').format(nextTime),
-          subtitle: 'Queue slot',
+          subtitle: selectedUnit == null
+              ? 'Next room opening'
+              : '${selectedUnit.name} available',
         ),
       );
     }
@@ -610,7 +680,18 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   // ── Selection Handlers ─────────────────────────────────────────
 
-  void _onServiceSelected(_WalkInService s) {
+  Future<void> _releaseActivePaxHold() async {
+    if (!_heldPaxIndexes.contains(_activePaxIndex)) return;
+    await CspService.releaseStaffWalkInDraft(
+      draftSessionId: _draftSessionId,
+      paxIndex: _activePaxIndex,
+    );
+    _heldPaxIndexes.remove(_activePaxIndex);
+  }
+
+  Future<void> _onServiceSelected(_WalkInService s) async {
+    await _releaseActivePaxHold();
+    if (!mounted) return;
     setState(() {
       final existingIndex = _selectedServices.indexWhere(
         (service) => service.id == s.id,
@@ -622,6 +703,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       }
       _selectedTherapist = null;
       _selectedZone = null;
+      _selectedRoomUnit = null;
+      _roomUnits = [];
       _selectedStartTime = null;
       _startOptions = [];
       _paxAllocations[_activePaxIndex] = null;
@@ -632,7 +715,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     _loadZonesLive();
   }
 
-  void _onTherapistSelected(_WalkInTherapist t) {
+  Future<void> _onTherapistSelected(_WalkInTherapist t) async {
+    await _releaseActivePaxHold();
+    if (!mounted) return;
     setState(() {
       _selectedTherapist = t;
       _paxAllocations[_activePaxIndex] = null;
@@ -640,9 +725,54 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     if (_selectedZone != null) _computeStartOptions();
   }
 
-  void _onZoneSelected(_WalkInZone z) {
+  Future<void> _onZoneSelected(_WalkInZone z) async {
+    await _releaseActivePaxHold();
+    if (!mounted) return;
     setState(() {
       _selectedZone = z;
+      _selectedRoomUnit = null;
+      _roomUnits = [];
+      _paxAllocations[_activePaxIndex] = null;
+    });
+    await _loadRoomUnits(z);
+    if (mounted && _selectedTherapist != null) _computeStartOptions();
+  }
+
+  Future<void> _loadRoomUnits(_WalkInZone zone) async {
+    if (zone.type != 'body_room') return;
+    setState(() => _loadingRoomUnits = true);
+    try {
+      final now = DateTime.now();
+      final units = await CspService.getRoomUnitAvailability(
+        zoneId: zone.id,
+        date: DateFormat('yyyy-MM-dd').format(now),
+        startTime: DateFormat('HH:mm:ss').format(now),
+        duration: _selectedRoomBlockMinutes,
+      );
+      if (!mounted || _selectedZone?.id != zone.id) return;
+      final available = units.where((unit) => unit.availableForRequestedTime);
+      setState(() {
+        _roomUnits = units;
+        _selectedRoomUnit = available.isNotEmpty
+            ? available.first
+            : units.isNotEmpty
+            ? units.first
+            : null;
+      });
+    } catch (_) {
+      if (mounted && _selectedZone?.id == zone.id) {
+        setState(() => _roomUnits = []);
+      }
+    } finally {
+      if (mounted) setState(() => _loadingRoomUnits = false);
+    }
+  }
+
+  void _onRoomUnitSelected(RoomUnitAvailability unit) {
+    setState(() {
+      _selectedRoomUnit = unit;
+      _selectedStartTime = null;
+      _startOptions = [];
       _paxAllocations[_activePaxIndex] = null;
     });
     if (_selectedTherapist != null) _computeStartOptions();
@@ -660,6 +790,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       services: List<_WalkInService>.from(_selectedServices),
       therapist: _selectedTherapist!,
       zone: _selectedZone!,
+      roomUnit: _selectedRoomUnit,
       startTime: _selectedStartTime!,
     );
   }
@@ -678,6 +809,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     _selectedServices.clear();
     _selectedTherapist = null;
     _selectedZone = null;
+    _selectedRoomUnit = null;
+    _roomUnits = [];
     _selectedStartTime = null;
     _startOptions = [];
   }
@@ -692,6 +825,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       ..addAll(allocation.services);
     _selectedTherapist = allocation.therapist;
     _selectedZone = allocation.zone;
+    _selectedRoomUnit = allocation.roomUnit;
+    _roomUnits = allocation.roomUnit == null ? [] : [allocation.roomUnit!];
     _selectedStartTime = allocation.startTime;
     _startOptions = [allocation.startTime];
   }
@@ -730,6 +865,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           _timesOverlap(allocation, other)) {
         return 'Pax ${index + 1} overlaps Pax ${i + 1}. ${allocation.therapist.name} is already assigned at that time.';
       }
+      if (allocation.roomUnit != null &&
+          allocation.roomUnit!.id == other.roomUnit?.id &&
+          _timesOverlap(allocation, other)) {
+        return 'Pax ${index + 1} overlaps Pax ${i + 1}. ${allocation.roomUnit!.name} is already assigned at that time.';
+      }
     }
     return null;
   }
@@ -746,6 +886,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             _timesOverlap(allocation, other)) {
           return 'Pax ${i + 1} and Pax ${j + 1} use ${allocation.therapist.name} at overlapping times.';
         }
+        if (allocation.roomUnit != null &&
+            allocation.roomUnit!.id == other.roomUnit?.id &&
+            _timesOverlap(allocation, other)) {
+          return 'Pax ${i + 1} and Pax ${j + 1} use ${allocation.roomUnit!.name} at overlapping times.';
+        }
       }
     }
     return null;
@@ -755,6 +900,102 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     final current = _currentAllocation;
     if (current == null) return false;
     return _allocationConflictMessage(current, index: _activePaxIndex) == null;
+  }
+
+  Future<void> _pickCustomStartTime() async {
+    if (_selectedTherapist == null ||
+        _selectedZone == null ||
+        _selectedServices.isEmpty) {
+      return;
+    }
+    final now = DateTime.now();
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(now.add(const Duration(hours: 1))),
+    );
+    if (picked == null || !mounted) return;
+    final start = DateTime(
+      now.year,
+      now.month,
+      now.day,
+      picked.hour,
+      picked.minute,
+    );
+    final end = start.add(Duration(minutes: _selectedDurationMinutes));
+    if (!start.isAfter(now) ||
+        end.hour > 21 ||
+        (end.hour == 21 && end.minute > 0)) {
+      _showPaxConflict('Choose a future time that finishes by 9:00 PM.');
+      return;
+    }
+    final option = _StartTimeOption(
+      isNow: false,
+      timeLabel: DateFormat('h:mm a').format(start),
+      subtitle: 'Scheduled later',
+    );
+    setState(() {
+      _startOptions = [..._startOptions, option];
+      _selectedStartTime = option;
+      _paxAllocations[_activePaxIndex] = null;
+    });
+    final allocation = _currentAllocation;
+    if (allocation == null) return;
+    final reserved = await _reserveAllocation(
+      allocation,
+      index: _activePaxIndex,
+    );
+    if (!reserved && mounted) {
+      setState(() => _selectedStartTime = null);
+    }
+  }
+
+  int? _reservedPaxForTherapist(String therapistId) {
+    for (var i = 0; i < _paxAllocations.length; i++) {
+      if (i == _activePaxIndex) continue;
+      final allocation = _paxAllocations[i];
+      if (allocation?.therapist.id == therapistId) return i + 1;
+    }
+    return null;
+  }
+
+  Future<bool> _reserveAllocation(
+    _WalkInAllocation allocation, {
+    required int index,
+  }) async {
+    final customer = _selectedCustomer;
+    if (customer == null) return true;
+    try {
+      final result = await CspService.reserveStaffWalkInAllocation(
+        draftSessionId: _draftSessionId,
+        paxIndex: index,
+        outletId: OutletContext.activeOutletId.value,
+        customerId: customer.id,
+        customerName: customer.name,
+        customerPhone: customer.phone,
+        therapistId: allocation.therapist.id,
+        roomId: allocation.zone.id,
+        roomUnitId: allocation.roomUnit?.id,
+        serviceItems: allocation.serviceItems,
+        date: _todayString(),
+        startTime: allocation.startTimeValue,
+        endTime: allocation.endTimeValue,
+        totalAmount: allocation.servicePrice,
+      );
+      if (!result.success) {
+        if (mounted) _showPaxConflict(result.message);
+        return false;
+      }
+      _heldPaxIndexes.add(index);
+      return true;
+    } catch (error) {
+      if (mounted) {
+        _showPaxConflict(
+          'Unable to reserve ${allocation.therapist.name}: '
+          '${friendlyErrorMessage(error)}',
+        );
+      }
+      return false;
+    }
   }
 
   void _showPaxConflict(String message) {
@@ -767,7 +1008,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     );
   }
 
-  void _selectPax(int index) {
+  Future<void> _selectPax(int index) async {
     final current = _currentAllocation;
     if (current != null) {
       final conflict = _allocationConflictMessage(
@@ -778,7 +1019,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         _showPaxConflict(conflict);
         return;
       }
+      if (!await _reserveAllocation(current, index: _activePaxIndex)) return;
     }
+    if (!mounted) return;
     setState(() {
       if (current != null) _paxAllocations[_activePaxIndex] = current;
       _activePaxIndex = index;
@@ -786,7 +1029,13 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     });
   }
 
-  void _clearPax(int index) {
+  Future<void> _clearPax(int index) async {
+    await CspService.releaseStaffWalkInDraft(
+      draftSessionId: _draftSessionId,
+      paxIndex: index,
+    );
+    _heldPaxIndexes.remove(index);
+    if (!mounted) return;
     setState(() {
       _paxAllocations[index] = null;
       _activePaxIndex = index;
@@ -794,8 +1043,18 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     });
   }
 
-  void _setPaxCount(int count) {
+  Future<void> _setPaxCount(int count) async {
     if (count < 1) return;
+    if (count < _paxAllocations.length) {
+      for (var index = count; index < _paxAllocations.length; index++) {
+        await CspService.releaseStaffWalkInDraft(
+          draftSessionId: _draftSessionId,
+          paxIndex: index,
+        );
+        _heldPaxIndexes.remove(index);
+      }
+    }
+    if (!mounted) return;
     setState(() {
       final current = _currentAllocation;
       if (current != null && _canStoreCurrentAllocation()) {
@@ -872,38 +1131,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         return;
       }
       final date = DateFormat('yyyy-MM-dd').format(DateTime.now());
-
-      // Confirm the chosen staff/room are still free before taking payment. This
-      // mirrors the DB enforcement trigger (existing appointments + pending online
-      // booking holds), so the cashier gets a clear message up front instead of a
-      // raw error part-way through checkout.
-      for (final allocation in allocations) {
-        final availability = await CspService.validateSlot(
-          date: date,
-          startTime: allocation.startTimeValue,
-          endTime: allocation.endTimeValue,
-          therapistId: allocation.therapist.id,
-          roomId: allocation.zone.id,
-        );
-        if (!availability.therapistAvailable) {
-          if (mounted) {
-            _showPaxConflict(
-              '${allocation.therapist.name} is no longer free at '
-              '${allocation.startTime.timeLabel}. Pick another therapist or time.',
-            );
-          }
-          return;
-        }
-        if (availability.roomFull) {
-          if (mounted) {
-            _showPaxConflict(
-              '${allocation.zone.name} is full at '
-              '${allocation.startTime.timeLabel}. Pick another room or time.',
-            );
-          }
-          return;
-        }
-      }
+      final startImmediately = allocations.every(
+        (allocation) => allocation.startTime.isNow,
+      );
 
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
@@ -934,29 +1164,33 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           paymentMethod: _paymentMethod!,
           receiptNumber: _receiptNumber,
           transactionNotes: notes,
+          startImmediately: startImmediately,
+          draftSessionId: _draftSessionId,
         );
       } else {
         paymentResult =
             await PaymentService.createWalkInAppointmentGroupWithPayment(
-          customerId: _selectedCustomer!.id,
-          groupName: _selectedCustomer!.name,
-          paxCount: allocations.length,
-          date: date,
-          allocations: allocations
-              .map((allocation) => allocation.toCspAllocation(notes: notes))
-              .toList(),
-          notes: notes,
-          customerName: _selectedCustomer!.name,
-          customerPhone: _selectedCustomer!.phone,
-          counterStaffId: counterStaff?['id']?.toString(),
-          counterStaffName: counterStaff?['name']?.toString(),
-          servicePrice: _orderNetServicePrice,
-          sstAmount: _orderSstAmount,
-          totalAmount: _orderTotalAmount,
-          paymentMethod: _paymentMethod!,
-          receiptNumber: _receiptNumber,
-          transactionNotes: notes,
-        );
+              customerId: _selectedCustomer!.id,
+              groupName: _selectedCustomer!.name,
+              paxCount: allocations.length,
+              date: date,
+              allocations: allocations
+                  .map((allocation) => allocation.toCspAllocation(notes: notes))
+                  .toList(),
+              notes: notes,
+              customerName: _selectedCustomer!.name,
+              customerPhone: _selectedCustomer!.phone,
+              counterStaffId: counterStaff?['id']?.toString(),
+              counterStaffName: counterStaff?['name']?.toString(),
+              servicePrice: _orderNetServicePrice,
+              sstAmount: _orderSstAmount,
+              totalAmount: _orderTotalAmount,
+              paymentMethod: _paymentMethod!,
+              receiptNumber: _receiptNumber,
+              transactionNotes: notes,
+              startImmediately: startImmediately,
+              draftSessionId: _draftSessionId,
+            );
       }
 
       if (!paymentResult.success) {
@@ -974,8 +1208,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Payment confirmed — service started'),
+          SnackBar(
+            content: Text(
+              startImmediately
+                  ? 'Payment confirmed - service started'
+                  : 'Payment confirmed - booking reserved',
+            ),
             backgroundColor: Color(0xFF1B6B72),
             behavior: SnackBarBehavior.floating,
           ),
@@ -1302,24 +1540,28 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                   ),
                 ),
                 const SizedBox(width: 12),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Walk-in (No Account)',
-                      style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF1A1A2E),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Walk-in (No Account)',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF1A1A2E),
+                        ),
                       ),
-                    ),
-                    const Text(
-                      'Anonymous guest — no customer profile needed',
-                      style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
-                    ),
-                  ],
+                      const Text(
+                        'Anonymous guest — no customer profile needed',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF9E9E9E),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-                const Spacer(),
               ],
             ),
           ),
@@ -1515,19 +1757,22 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
         const _WalkInSubLabel('Available Therapists Now'),
         const SizedBox(height: 10),
-        ..._therapists.map(
-          (t) => Padding(
+        ..._therapists.map((t) {
+          final reservedByPax = _reservedPaxForTherapist(t.id);
+          final unavailable = !t.isFree && t.freeInMinutes <= 0;
+          return Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: _WalkInTherapistRow(
               therapist: t,
               isSelected: _selectedTherapist?.id == t.id,
-              isDisabled: !t.isFree && t.freeInMinutes <= 0,
-              onTap: !t.isFree && t.freeInMinutes <= 0
+              isDisabled: unavailable || reservedByPax != null,
+              reservedByPax: reservedByPax,
+              onTap: unavailable || reservedByPax != null
                   ? null
                   : () => _onTherapistSelected(t),
             ),
-          ),
-        ),
+          );
+        }),
         const SizedBox(height: 18),
         const _WalkInSubLabel('Room / Zone Availability'),
         const SizedBox(height: 10),
@@ -1541,6 +1786,25 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             ),
           ),
         ),
+        if (_selectedZone != null && _loadingRoomUnits) ...[
+          const SizedBox(height: 10),
+          const LinearProgressIndicator(minHeight: 2),
+        ],
+        if (_roomUnits.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          const _WalkInSubLabel('Specific Massage Room'),
+          const SizedBox(height: 10),
+          ..._roomUnits.map(
+            (unit) => Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: _WalkInRoomUnitCard(
+                unit: unit,
+                isSelected: _selectedRoomUnit?.id == unit.id,
+                onTap: () => _onRoomUnitSelected(unit),
+              ),
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1552,10 +1816,25 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         final cards = _startOptions.map((option) {
           final isSelected = _selectedStartTime?.timeLabel == option.timeLabel;
           return GestureDetector(
-            onTap: () => setState(() {
-              _selectedStartTime = option;
-              _paxAllocations[_activePaxIndex] = null;
-            }),
+            onTap: () async {
+              setState(() {
+                _selectedStartTime = option;
+                _paxAllocations[_activePaxIndex] = null;
+              });
+              final allocation = _currentAllocation;
+              if (allocation != null) {
+                final reserved = await _reserveAllocation(
+                  allocation,
+                  index: _activePaxIndex,
+                );
+                if (!reserved && mounted) {
+                  setState(() {
+                    _selectedStartTime = null;
+                    _startOptions = [];
+                  });
+                }
+              }
+            },
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
               padding: const EdgeInsets.all(18),
@@ -1644,23 +1923,34 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           );
         }).toList();
 
-        if (stackCards) {
-          return Column(
-            children: [
-              for (var i = 0; i < cards.length; i++) ...[
-                cards[i],
-                if (i != cards.length - 1) const SizedBox(height: 10),
-              ],
-            ],
-          );
-        }
+        final optionLayout = stackCards
+            ? Column(
+                children: [
+                  for (var i = 0; i < cards.length; i++) ...[
+                    cards[i],
+                    if (i != cards.length - 1) const SizedBox(height: 10),
+                  ],
+                ],
+              )
+            : Row(
+                children: [
+                  for (var i = 0; i < cards.length; i++) ...[
+                    Expanded(child: cards[i]),
+                    if (i != cards.length - 1) const SizedBox(width: 12),
+                  ],
+                ],
+              );
 
-        return Row(
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            for (var i = 0; i < cards.length; i++) ...[
-              Expanded(child: cards[i]),
-              if (i != cards.length - 1) const SizedBox(width: 12),
-            ],
+            optionLayout,
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _pickCustomStartTime,
+              icon: const Icon(Icons.schedule_outlined),
+              label: const Text('Choose Another Time'),
+            ),
           ],
         );
       },
@@ -1714,6 +2004,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 : null,
           ),
           _WalkInSummaryRow(label: 'Zone', value: _selectedZone?.name ?? '—'),
+          if (_selectedRoomUnit != null)
+            _WalkInSummaryRow(label: 'Room', value: _selectedRoomUnit!.name),
           _WalkInSummaryRow(label: 'Start Time', value: startLabel),
 
           if (_paxCount > 1 || _checkoutAllocations.isNotEmpty) ...[
@@ -2180,9 +2472,17 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                           ),
                         )
                       : const Icon(Icons.check, size: 18),
-                  label: const Text(
-                    'Confirm Payment & Complete',
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                  label: Text(
+                    _checkoutAllocations.isNotEmpty &&
+                            _checkoutAllocations.every(
+                              (allocation) => allocation.startTime.isNow,
+                            )
+                        ? 'Pay & Start Service'
+                        : 'Pay & Reserve',
+                    style: const TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF1B6B72),
@@ -3386,16 +3686,20 @@ class _WalkInTherapistRow extends StatelessWidget {
   final _WalkInTherapist therapist;
   final bool isSelected;
   final bool isDisabled;
+  final int? reservedByPax;
   final VoidCallback? onTap;
 
   const _WalkInTherapistRow({
     required this.therapist,
     required this.isSelected,
     required this.isDisabled,
+    this.reservedByPax,
     required this.onTap,
   });
 
   String get _statusLabel {
+    if (reservedByPax != null) return 'Reserved by Pax $reservedByPax';
+    if (therapist.availabilityStatus == 'on_leave') return 'On leave';
     if (therapist.isFree) return 'Available immediately';
     if (therapist.freeInMinutes > 0) {
       return 'Free in ${therapist.freeInMinutes} min';
@@ -3404,6 +3708,7 @@ class _WalkInTherapistRow extends StatelessWidget {
   }
 
   Color get _statusColor {
+    if (reservedByPax != null) return const Color(0xFF1B6B72);
     if (therapist.isFree) return const Color(0xFF4CAF50);
     if (therapist.freeInMinutes > 0) return const Color(0xFFF59E0B);
     return const Color(0xFF9E9E9E);
@@ -3582,6 +3887,100 @@ class _WalkInZoneCard extends StatelessWidget {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _WalkInRoomUnitCard extends StatelessWidget {
+  final RoomUnitAvailability unit;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _WalkInRoomUnitCard({
+    required this.unit,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = switch (unit.status) {
+      'occupied' => const Color(0xFFDC2626),
+      'cleaning' => const Color(0xFFF59E0B),
+      _ when !unit.availableForRequestedTime => const Color(0xFFF59E0B),
+      _ => const Color(0xFF059669),
+    };
+    var availableLabel = 'Available now';
+    if (unit.status != 'available' || !unit.availableForRequestedTime) {
+      final raw = unit.availableAt;
+      if (raw != null && raw.isNotEmpty) {
+        try {
+          final state = unit.status == 'cleaning'
+              ? 'Cleaning'
+              : unit.status == 'occupied'
+              ? 'Occupied'
+              : 'Next opening';
+          availableLabel =
+              '$state ${unit.status == 'available' ? 'at' : 'until'} ${DateFormat('h:mm a').format(DateFormat('HH:mm').parse(raw))}';
+        } catch (_) {
+          availableLabel = 'Next opening at $raw';
+        }
+      } else {
+        availableLabel = unit.status == 'cleaning'
+            ? 'Cleaning'
+            : unit.status == 'occupied'
+            ? 'Occupied'
+            : 'Unavailable for this service window';
+      }
+    }
+    return Material(
+      color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: isSelected ? const Color(0xFF1B6B72) : const Color(0xFFE5E7EB),
+          width: isSelected ? 2 : 1,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
+          child: Row(
+            children: [
+              Icon(Icons.meeting_room_outlined, color: color, size: 22),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      unit.name,
+                      style: const TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      availableLabel,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                        color: color,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (isSelected)
+                const Icon(Icons.check_circle, color: Color(0xFF1B6B72)),
+            ],
+          ),
         ),
       ),
     );

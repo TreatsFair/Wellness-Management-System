@@ -43,18 +43,23 @@ class CspValidationResult {
 
   factory CspValidationResult.fromMap(Map<String, dynamic> row) {
     return CspValidationResult(
-      therapistAvailable: row['therapist_available'] == true ||
+      therapistAvailable:
+          row['therapist_available'] == true ||
           row['therapistAvailable'] == true,
       roomFull: row['room_full'] == true || row['roomFull'] == true,
       roomTotalSlots: _asInt(row['room_total_slots'] ?? row['roomTotalSlots']),
-      roomBookedSlots:
-          _asInt(row['room_booked_slots'] ?? row['roomBookedSlots']),
-      roomAvailableSlots:
-          _asInt(row['room_available_slots'] ?? row['roomAvailableSlots']),
+      roomBookedSlots: _asInt(
+        row['room_booked_slots'] ?? row['roomBookedSlots'],
+      ),
+      roomAvailableSlots: _asInt(
+        row['room_available_slots'] ?? row['roomAvailableSlots'],
+      ),
       therapistBusyUntil: _nullableCleanTime(
         row['therapist_busy_until'] ?? row['therapistBusyUntil'],
       ),
-      roomFullUntil: _nullableCleanTime(row['room_full_until'] ?? row['roomFullUntil']),
+      roomFullUntil: _nullableCleanTime(
+        row['room_full_until'] ?? row['roomFullUntil'],
+      ),
     );
   }
 
@@ -81,9 +86,10 @@ class CspCreateResult {
     final ids = row['appointment_ids'] ?? row['appointmentIds'];
     return CspCreateResult(
       success: row['success'] == true,
-      appointmentId: row['appointment_id']?.toString() ??
-          row['appointmentId']?.toString(),
-      appointmentGroupId: row['appointment_group_id']?.toString() ??
+      appointmentId:
+          row['appointment_id']?.toString() ?? row['appointmentId']?.toString(),
+      appointmentGroupId:
+          row['appointment_group_id']?.toString() ??
           row['appointmentGroupId']?.toString(),
       appointmentIds: ids is Iterable
           ? ids.map((id) => id.toString()).toList()
@@ -104,6 +110,38 @@ class CspCreateResult {
   String get message => errorMessage ?? errorCode ?? 'CSP validation failed';
 }
 
+class StaffWalkInHoldResult {
+  const StaffWalkInHoldResult({
+    required this.success,
+    this.holdId,
+    this.errorCode,
+    this.errorMessage,
+    this.expiresAt,
+  });
+
+  factory StaffWalkInHoldResult.fromMap(Map<String, dynamic> row) {
+    return StaffWalkInHoldResult(
+      success: row['success'] == true,
+      holdId: row['hold_id']?.toString() ?? row['holdId']?.toString(),
+      errorCode: row['error_code']?.toString() ?? row['errorCode']?.toString(),
+      errorMessage:
+          row['error_message']?.toString() ?? row['errorMessage']?.toString(),
+      expiresAt: DateTime.tryParse(
+        row['expires_at']?.toString() ?? row['expiresAt']?.toString() ?? '',
+      ),
+    );
+  }
+
+  final bool success;
+  final String? holdId;
+  final String? errorCode;
+  final String? errorMessage;
+  final DateTime? expiresAt;
+
+  String get message =>
+      errorMessage ?? errorCode ?? 'Unable to reserve this therapist';
+}
+
 class WalkInTherapistAvailability {
   const WalkInTherapistAvailability({
     required this.therapistId,
@@ -116,7 +154,9 @@ class WalkInTherapistAvailability {
   factory WalkInTherapistAvailability.fromMap(Map<String, dynamic> row) {
     return WalkInTherapistAvailability(
       therapistId:
-          row['therapist_id']?.toString() ?? row['therapistId']?.toString() ?? '',
+          row['therapist_id']?.toString() ??
+          row['therapistId']?.toString() ??
+          '',
       name: row['name']?.toString() ?? '',
       status: row['status']?.toString() ?? 'busy',
       freeAt: _nullableCleanTime(row['free_at'] ?? row['freeAt']),
@@ -147,11 +187,13 @@ class WalkInAvailability {
     return WalkInAvailability(
       therapists: therapistRows is Iterable
           ? therapistRows
-              .whereType<Map>()
-              .map((item) => WalkInTherapistAvailability.fromMap(
+                .whereType<Map>()
+                .map(
+                  (item) => WalkInTherapistAvailability.fromMap(
                     Map<String, dynamic>.from(item),
-                  ))
-              .toList()
+                  ),
+                )
+                .toList()
           : const [],
       zoneAvailableNow:
           row['zone_available_now'] == true || row['zoneAvailableNow'] == true,
@@ -180,8 +222,7 @@ class WalkInRoomAvailability {
 
   factory WalkInRoomAvailability.fromMap(Map<String, dynamic> row) {
     return WalkInRoomAvailability(
-      availableNow:
-          row['available_now'] == true || row['availableNow'] == true,
+      availableNow: row['available_now'] == true || row['availableNow'] == true,
       freeSlots: _asInt(row['free_slots'] ?? row['freeSlots']),
       totalSlots: _asInt(row['total_slots'] ?? row['totalSlots']),
       freeAt: _nullableCleanTime(row['free_at'] ?? row['freeAt']),
@@ -192,6 +233,42 @@ class WalkInRoomAvailability {
   final int freeSlots;
   final int totalSlots;
   final String? freeAt;
+}
+
+class RoomUnitAvailability {
+  const RoomUnitAvailability({
+    required this.id,
+    required this.name,
+    required this.status,
+    required this.availableForRequestedTime,
+    this.availableAt,
+  });
+
+  factory RoomUnitAvailability.fromMap(Map<String, dynamic> row) {
+    return RoomUnitAvailability(
+      id:
+          row['room_unit_id']?.toString() ??
+          row['roomUnitId']?.toString() ??
+          '',
+      name:
+          row['room_unit_name']?.toString() ??
+          row['roomUnitName']?.toString() ??
+          'Room',
+      status: row['status']?.toString() ?? 'available',
+      availableForRequestedTime:
+          row['available_for_requested_time'] == true ||
+          row['availableForRequestedTime'] == true,
+      availableAt: _nullableCleanTime(
+        row['available_at'] ?? row['availableAt'],
+      ),
+    );
+  }
+
+  final String id;
+  final String name;
+  final String status;
+  final bool availableForRequestedTime;
+  final String? availableAt;
 }
 
 class CspService {
@@ -391,11 +468,7 @@ class CspService {
   }) async {
     final rows = await _client.rpc(
       'get_walkin_therapist_availability',
-      params: {
-        'p_today': today,
-        'p_now_time': nowTime,
-        'p_duration': duration,
-      },
+      params: {'p_today': today, 'p_now_time': nowTime, 'p_duration': duration},
     );
     return _asMapList(rows).map(WalkInTherapistAvailability.fromMap).toList();
   }
@@ -418,6 +491,72 @@ class CspService {
       },
     );
     return WalkInRoomAvailability.fromMap(_firstMap(rows));
+  }
+
+  static Future<StaffWalkInHoldResult> reserveStaffWalkInAllocation({
+    required String draftSessionId,
+    required int paxIndex,
+    required String outletId,
+    required String customerId,
+    required String customerName,
+    required String customerPhone,
+    required String therapistId,
+    required String roomId,
+    String? roomUnitId,
+    required List<Map<String, dynamic>> serviceItems,
+    required String date,
+    required String startTime,
+    required String endTime,
+    required double totalAmount,
+  }) async {
+    final rows = await _client.rpc(
+      'reserve_staff_walkin_allocation',
+      params: {
+        'p_draft_session_id': draftSessionId,
+        'p_pax_index': paxIndex,
+        'p_outlet_id': outletId,
+        'p_customer_id': _nullIfBlank(customerId),
+        'p_customer_name': customerName,
+        'p_customer_phone': customerPhone,
+        'p_therapist_id': therapistId,
+        'p_room_id': roomId,
+        'p_room_unit_id': _nullIfBlank(roomUnitId),
+        'p_service_items': serviceItems,
+        'p_date': date,
+        'p_start_time': startTime,
+        'p_end_time': endTime,
+        'p_total_amount': totalAmount,
+      },
+    );
+    return StaffWalkInHoldResult.fromMap(_firstMap(rows));
+  }
+
+  static Future<List<RoomUnitAvailability>> getRoomUnitAvailability({
+    required String zoneId,
+    required String date,
+    required String startTime,
+    required int duration,
+  }) async {
+    final rows = await _client.rpc(
+      'get_room_unit_availability',
+      params: {
+        'p_zone_id': zoneId,
+        'p_date': date,
+        'p_start_time': startTime,
+        'p_duration': duration,
+      },
+    );
+    return _asMapList(rows).map(RoomUnitAvailability.fromMap).toList();
+  }
+
+  static Future<void> releaseStaffWalkInDraft({
+    required String draftSessionId,
+    int? paxIndex,
+  }) async {
+    await _client.rpc(
+      'release_staff_walkin_draft',
+      params: {'p_draft_session_id': draftSessionId, 'p_pax_index': paxIndex},
+    );
   }
 }
 

@@ -103,6 +103,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
             : TabBarView(
                 children: [
                   _SettingsPane(
+                    key: ValueKey(_outletId),
                     outletName: outlet.name,
                     initial: Map<String, dynamic>.from(
                       _data!['settings'] as Map,
@@ -167,6 +168,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
 
 class _SettingsPane extends StatefulWidget {
   const _SettingsPane({
+    super.key,
     required this.outletName,
     required this.initial,
     required this.onSave,
@@ -179,8 +181,13 @@ class _SettingsPane extends StatefulWidget {
 }
 
 class _SettingsPaneState extends State<_SettingsPane> {
-  late bool enabled, therapistSelection;
-  late final TextEditingController open, close, notice;
+  final form = GlobalKey<FormState>();
+  late bool enabled, therapistSelection, sameDayBooking;
+  late final TextEditingController open,
+      close,
+      notice,
+      interval,
+      bookingWindow;
   bool saving = false;
   @override
   void initState() {
@@ -188,6 +195,7 @@ class _SettingsPaneState extends State<_SettingsPane> {
     enabled = widget.initial['online_booking_enabled'] == true;
     therapistSelection =
         widget.initial['customer_therapist_selection_allowed'] != false;
+    sameDayBooking = widget.initial['same_day_booking_allowed'] == true;
     open = TextEditingController(
       text:
           widget.initial['public_open_time']?.toString().substring(0, 5) ??
@@ -201,6 +209,12 @@ class _SettingsPaneState extends State<_SettingsPane> {
     notice = TextEditingController(
       text: '${widget.initial['minimum_advance_minutes'] ?? 60}',
     );
+    interval = TextEditingController(
+      text: '${widget.initial['slot_interval_minutes'] ?? 30}',
+    );
+    bookingWindow = TextEditingController(
+      text: '${widget.initial['maximum_booking_days'] ?? 7}',
+    );
   }
 
   @override
@@ -208,13 +222,102 @@ class _SettingsPaneState extends State<_SettingsPane> {
     open.dispose();
     close.dispose();
     notice.dispose();
+    interval.dispose();
+    bookingWindow.dispose();
     super.dispose();
   }
 
+  String? _timeValidator(String? value) {
+    final match = RegExp(
+      r'^(\d{1,2}):(\d{2})$',
+    ).firstMatch(value?.trim() ?? '');
+    if (match == null) return 'Use HH:MM';
+    final hour = int.tryParse(match.group(1) ?? '');
+    final minute = int.tryParse(match.group(2) ?? '');
+    if (hour == null || minute == null || hour > 23 || minute > 59) {
+      return 'Enter a valid time';
+    }
+    return null;
+  }
+
+  String? _numberValidator(
+    String? value, {
+    required int minimum,
+    required int maximum,
+  }) {
+    final parsed = int.tryParse(value?.trim() ?? '');
+    if (parsed == null) return 'Enter a whole number';
+    if (parsed < minimum || parsed > maximum) {
+      return '$minimum to $maximum';
+    }
+    return null;
+  }
+
+  Widget _numberField({
+    required TextEditingController controller,
+    required String label,
+    required String unit,
+    required IconData icon,
+    required int minimum,
+    required int maximum,
+  }) => TextFormField(
+    controller: controller,
+    keyboardType: TextInputType.number,
+    autovalidateMode: AutovalidateMode.onUserInteraction,
+    decoration: InputDecoration(
+      labelText: label,
+      suffixText: unit,
+      prefixIcon: Icon(icon),
+      border: const OutlineInputBorder(),
+    ),
+    validator: (value) => _numberValidator(
+      value,
+      minimum: minimum,
+      maximum: maximum,
+    ),
+  );
+
+  Future<void> _save() async {
+    if (saving || form.currentState?.validate() != true) return;
+    if (_timeToMinutes(close.text) <= _timeToMinutes(open.text)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Public closing must be after opening')),
+      );
+      return;
+    }
+
+    setState(() => saving = true);
+    try {
+      await widget.onSave({
+        'online_booking_enabled': enabled,
+        'public_open_time': open.text.trim(),
+        'public_close_time': close.text.trim(),
+        'minimum_advance_minutes': int.parse(notice.text.trim()),
+        'slot_interval_minutes': int.parse(interval.text.trim()),
+        'maximum_booking_days': int.parse(bookingWindow.text.trim()),
+        'same_day_booking_allowed': sameDayBooking,
+        'customer_therapist_selection_allowed': therapistSelection,
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Online booking rules saved')),
+      );
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to save outlet rules: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => saving = false);
+    }
+  }
+
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(20),
-    children: [
+  Widget build(BuildContext context) => Form(
+    key: form,
+    child: ListView(
+      padding: const EdgeInsets.all(20),
+      children: [
       _card(
         Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -239,13 +342,44 @@ class _SettingsPaneState extends State<_SettingsPane> {
       const SizedBox(height: 16),
       _card(
         Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Expanded(child: _field(open, 'Public opening', '11:00')),
-                const SizedBox(width: 12),
-                Expanded(child: _field(close, 'Public closing', '22:00')),
-              ],
+            const Text(
+              'Public hours',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final opening = _field(
+                  open,
+                  'Public opening',
+                  '11:00',
+                  validator: _timeValidator,
+                );
+                final closing = _field(
+                  close,
+                  'Public closing',
+                  '22:00',
+                  validator: _timeValidator,
+                );
+                if (constraints.maxWidth < 460) {
+                  return Column(
+                    children: [
+                      opening,
+                      const SizedBox(height: 12),
+                      closing,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: opening),
+                    const SizedBox(width: 12),
+                    Expanded(child: closing),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 12),
             _field(
@@ -253,18 +387,65 @@ class _SettingsPaneState extends State<_SettingsPane> {
               'Minimum advance notice (minutes)',
               '60',
               number: true,
+              validator: (value) => _numberValidator(
+                value,
+                minimum: 0,
+                maximum: 10080,
+              ),
             ),
-            const ListTile(
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.schedule),
-              title: Text('Start interval'),
-              trailing: Text('Every 30 minutes'),
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 16),
+              child: Divider(height: 1),
             ),
-            const ListTile(
+            const Text(
+              'Scheduling',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 12),
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final startInterval = _numberField(
+                  controller: interval,
+                  label: 'Start interval',
+                  unit: 'minutes',
+                  icon: Icons.schedule_outlined,
+                  minimum: 5,
+                  maximum: 120,
+                );
+                final horizon = _numberField(
+                  controller: bookingWindow,
+                  label: 'Booking window',
+                  unit: 'days',
+                  icon: Icons.date_range_outlined,
+                  minimum: 1,
+                  maximum: 90,
+                );
+                if (constraints.maxWidth < 460) {
+                  return Column(
+                    children: [
+                      startInterval,
+                      const SizedBox(height: 12),
+                      horizon,
+                    ],
+                  );
+                }
+                return Row(
+                  children: [
+                    Expanded(child: startInterval),
+                    const SizedBox(width: 12),
+                    Expanded(child: horizon),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 8),
+            SwitchListTile(
               contentPadding: EdgeInsets.zero,
-              leading: Icon(Icons.date_range),
-              title: Text('Booking window'),
-              trailing: Text('Tomorrow → next 7 dates'),
+              secondary: const Icon(Icons.today_outlined),
+              title: const Text('Allow same-day bookings'),
+              subtitle: const Text('Minimum advance notice still applies'),
+              value: sameDayBooking,
+              onChanged: (value) => setState(() => sameDayBooking = value),
             ),
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
@@ -278,23 +459,12 @@ class _SettingsPaneState extends State<_SettingsPane> {
       ),
       const SizedBox(height: 20),
       FilledButton.icon(
-        onPressed: saving
-            ? null
-            : () async {
-                setState(() => saving = true);
-                await widget.onSave({
-                  'online_booking_enabled': enabled,
-                  'public_open_time': open.text.trim(),
-                  'public_close_time': close.text.trim(),
-                  'minimum_advance_minutes': int.tryParse(notice.text) ?? 60,
-                  'customer_therapist_selection_allowed': therapistSelection,
-                });
-                if (mounted) setState(() => saving = false);
-              },
+        onPressed: saving ? null : _save,
         icon: const Icon(Icons.save_outlined),
         label: Text(saving ? 'Saving…' : 'Save outlet rules'),
       ),
-    ],
+      ],
+    ),
   );
 }
 
@@ -861,6 +1031,7 @@ Widget _field(
   bool number = false,
   bool required = false,
   int lines = 1,
+  String? Function(String?)? validator,
 }) => TextFormField(
   controller: controller,
   maxLines: lines,
@@ -870,5 +1041,14 @@ Widget _field(
     hintText: hint,
     border: const OutlineInputBorder(),
   ),
-  validator: (v) => required && v!.trim().isEmpty ? 'Required' : null,
+  validator:
+      validator ??
+      (v) => required && (v?.trim().isEmpty ?? true) ? 'Required' : null,
 );
+
+int _timeToMinutes(String value) {
+  final parts = value.trim().split(':');
+  if (parts.length != 2) return 0;
+  return (int.tryParse(parts[0]) ?? 0) * 60 +
+      (int.tryParse(parts[1]) ?? 0);
+}

@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/services/csp_service.dart';
+import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
@@ -12,6 +14,7 @@ import '../../data/repositories/transaction_repository.dart';
 import '../../data/services/supabase_table_service.dart';
 
 const Color _timetableAccent = Color(0xFF0F766E);
+const double _timetableSidePanelBreakpoint = 900;
 
 class TimetableScreen extends StatefulWidget {
   final String userRole;
@@ -28,6 +31,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   final _transactionRepository = TransactionRepository();
   final _roomRepository = RoomRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
+  final _roomUnitsTable = SupabaseTableService('room_units');
   final _search = TextEditingController();
 
   DateTime _selectedDate = _stripDate(DateTime.now());
@@ -38,6 +42,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   List<_TimetableEntry> _entries = [];
   List<_TimetableTherapist> _therapists = [];
   List<_TimetableRoom> _rooms = [];
+  List<_TimetableRoomUnit> _roomUnits = [];
   final Set<String> _expandedBandKeys = {};
   // Resource ids the user has narrowed the timetable to (empty = show all).
   final Set<String> _selectedResourceIds = {};
@@ -78,6 +83,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
           .getTransactionsByDate(_selectedDate);
       final therapistRows = await _dashboardRepository.listTherapists();
       final roomRows = await _roomRepository.getActiveRooms();
+      final roomUnitRows = await _roomUnitsTable.list(orderBy: 'unit_number');
 
       final customerIds = appointmentRows
           .map((row) => asString(row['customerId']))
@@ -150,8 +156,21 @@ class _TimetableScreenState extends State<TimetableScreen> {
         _entries = entries;
         _therapists = _buildTherapistRows(therapistRows, entries);
         _rooms = _buildRoomRows(roomRows, entries);
+        _roomUnits = roomUnitRows
+            .map(_TimetableRoomUnit.fromMap)
+            .where((unit) => unit.active)
+            .toList();
         _openMinute = settings.$1;
         _closeMinute = settings.$2;
+        final selectedId = _selectedEntry?.id;
+        if (selectedId != null) {
+          _selectedEntry = null;
+          for (final entry in entries) {
+            if (entry.id != selectedId) continue;
+            _selectedEntry = entry;
+            break;
+          }
+        }
       });
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -227,9 +246,26 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   List<_TimetableResource> get _roomResources {
-    final resources = _rooms
-        .map(
-          (r) => _TimetableResource(
+    final roomById = {for (final room in _rooms) room.id: room};
+    final unitZoneIds = _roomUnits.map((unit) => unit.zoneId).toSet();
+    final resources = <_TimetableResource>[
+      for (final unit in _roomUnits)
+        if (roomById[unit.zoneId] case final zone?)
+          _TimetableResource(
+            id: unit.id,
+            name: unit.name,
+            subtitle: zone.name,
+            capacity: 1,
+            available: unit.active,
+            avatarText: '',
+            avatarIcon: Icons.meeting_room_outlined,
+            resourceType: 'room',
+            accentColor: _roomAccentColor(zone.roomType),
+            matches: (e) => e.roomUnitId == unit.id,
+          ),
+      for (final r in _rooms)
+        if (!unitZoneIds.contains(r.id))
+          _TimetableResource(
             id: r.id,
             name: r.name,
             subtitle: _titleCase(r.roomType),
@@ -241,8 +277,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
             accentColor: _roomAccentColor(r.roomType),
             matches: (e) => e.roomId == r.id,
           ),
-        )
-        .toList();
+    ];
     if (_entries.any((e) => e.roomId.isEmpty)) {
       resources.add(
         _TimetableResource(
@@ -301,9 +336,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     List<_TimetableResource> resources,
   ) {
     if (_selectedResourceIds.isEmpty) return resources;
-    return resources
-        .where((r) => _selectedResourceIds.contains(r.id))
-        .toList();
+    return resources.where((r) => _selectedResourceIds.contains(r.id)).toList();
   }
 
   void _onViewChanged(String value) {
@@ -367,8 +400,161 @@ class _TimetableScreenState extends State<TimetableScreen> {
     );
   }
 
+  Future<bool> _startEntry(_TimetableEntry entry) async {
+    try {
+      await _appointmentRepository.startAppointment(
+        entry.id,
+        startedAt: DateTime.now(),
+      );
+      if (!mounted) return false;
+      await _loadTimetable();
+      if (!mounted) return false;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('Service started')));
+      return true;
+    } catch (error) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Unable to start service: ${friendlyErrorMessage(error)}',
+          ),
+          backgroundColor: const Color(0xFFB42318),
+        ),
+      );
+      return false;
+    }
+  }
+
+  Future<bool> _switchEntryTherapist(_TimetableEntry entry) async {
+    final candidates = _therapists
+        .where(
+          (therapist) =>
+              therapist.id != entry.therapistId &&
+              therapist.role.toLowerCase().contains('therapist'),
+        )
+        .toList();
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No replacement therapists available')),
+      );
+      return false;
+    }
+
+    final now = DateTime.now();
+    final requiredStart = now.isAfter(entry._serviceStartDateTime)
+        ? now
+        : entry._serviceStartDateTime;
+    final requiredEnd = entry._serviceEndDateTime;
+    final requiredWindow =
+        '${DateFormat('h:mm a').format(requiredStart)} - '
+        '${DateFormat('h:mm a').format(requiredEnd)}';
+    final options = await Future.wait(
+      candidates.map((therapist) async {
+        if (!therapist.available) {
+          return _TimetableTherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Not available for assignment',
+          );
+        }
+        if (!requiredEnd.isAfter(requiredStart)) {
+          return _TimetableTherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Service window has ended',
+          );
+        }
+        try {
+          final availability = await CspService.validateSlot(
+            date: DateFormat('yyyy-MM-dd').format(requiredStart),
+            startTime: DateFormat('HH:mm:ss').format(requiredStart),
+            endTime: DateFormat('HH:mm:ss').format(requiredEnd),
+            therapistId: therapist.id,
+            roomId: entry.roomId,
+            excludeId: entry.id,
+          );
+          final busyUntil = availability.therapistBusyUntil;
+          return _TimetableTherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: availability.therapistAvailable,
+            statusLabel: availability.therapistAvailable
+                ? 'Available $requiredWindow'
+                : busyUntil == null
+                ? 'Conflicts during this service window'
+                : 'Busy until ${_clockLabel(busyUntil)}',
+          );
+        } catch (_) {
+          return _TimetableTherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Availability could not be confirmed',
+          );
+        }
+      }),
+    );
+    options.sort((left, right) {
+      if (left.isAvailable != right.isAvailable) {
+        return left.isAvailable ? -1 : 1;
+      }
+      return left.therapist.name.compareTo(right.therapist.name);
+    });
+    if (!mounted) return false;
+
+    final startedAt = entry.actualStartedAt?.toLocal();
+    final receivesFullCommission =
+        startedAt == null ||
+        !DateTime.now().isAfter(startedAt.add(const Duration(minutes: 15)));
+    final selection = await showDialog<_TimetableTherapistSwitchSelection>(
+      context: context,
+      builder: (context) => _TimetableTherapistSwitchDialog(
+        currentTherapistName: entry.staffName,
+        requiredWindow: requiredWindow,
+        options: options,
+        receivesFullCommission: receivesFullCommission,
+      ),
+    );
+    if (selection == null || !mounted) return false;
+
+    try {
+      final result = await _appointmentRepository.switchTherapist(
+        appointmentId: entry.id,
+        newTherapistId: selection.therapistId,
+        splitMethod: selection.splitMethod,
+        reason: selection.reason,
+      );
+      if (!mounted) return false;
+      await _loadTimetable();
+      if (!mounted) return false;
+      final method =
+          result['commission_method']?.toString() ?? selection.splitMethod;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            method == 'early_replacement'
+                ? 'Therapist switched - replacement receives 100% commission'
+                : method == 'half'
+                ? 'Therapist switched - commission split 50 / 50'
+                : 'Therapist switched - commission split by service time',
+          ),
+        ),
+      );
+      return true;
+    } catch (error) {
+      if (!mounted) return false;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(friendlyErrorMessage(error)),
+          backgroundColor: const Color(0xFFB42318),
+        ),
+      );
+      return false;
+    }
+  }
+
   void _showEntry(_TimetableEntry entry) {
-    if (MediaQuery.of(context).size.width >= 1200) {
+    if (MediaQuery.of(context).size.width >= _timetableSidePanelBreakpoint) {
       setState(() => _selectedEntry = entry);
       return;
     }
@@ -377,7 +563,19 @@ class _TimetableScreenState extends State<TimetableScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => _TimetableDetailSheet(entry: entry),
+      builder: (sheetContext) => _TimetableDetailSheet(
+        entry: entry,
+        onStart: () async {
+          final changed = await _startEntry(entry);
+          if (changed && sheetContext.mounted) Navigator.pop(sheetContext);
+          return changed;
+        },
+        onSwitchTherapist: () async {
+          final changed = await _switchEntryTherapist(entry);
+          if (changed && sheetContext.mounted) Navigator.pop(sheetContext);
+          return changed;
+        },
+      ),
     );
   }
 
@@ -386,6 +584,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     final screenWidth = MediaQuery.of(context).size.width;
     final isTabletLayout = screenWidth >= 900;
     final isWideLayout = screenWidth >= 1200;
+    final showSidePanel = screenWidth >= _timetableSidePanelBreakpoint;
     final entries = _filteredEntries;
     final resources = _applyResourceSelection(_visibleResources);
     final modeResources = _mode == 'rooms' ? _roomResources : _staffResources;
@@ -435,8 +634,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
                       selectedIds: _selectedResourceIds,
                       filterExpanded: _resourceFilterExpanded,
                       onToggleFilter: () => setState(
-                        () => _resourceFilterExpanded =
-                            !_resourceFilterExpanded,
+                        () =>
+                            _resourceFilterExpanded = !_resourceFilterExpanded,
                       ),
                       onToggleResource: _toggleResourceSelection,
                       onClearResources: () =>
@@ -460,13 +659,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
                             entries: _entries,
                             therapists: _therapists,
                             rooms: _rooms,
+                            roomUnits: _roomUnits,
                             selectedDate: _selectedDate,
                             onTapEntry: _showEntry,
                             onOpenTimetable: _openTimetable,
                           )
                         : _buildBody(isTabletLayout, entries, resources),
                   ),
-                  if (isWideLayout)
+                  if (showSidePanel)
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 180),
                       curve: Curves.easeOutCubic,
@@ -485,6 +685,9 @@ class _TimetableScreenState extends State<TimetableScreen> {
                                   entry: _selectedEntry!,
                                   onClose: () =>
                                       setState(() => _selectedEntry = null),
+                                  onStart: () => _startEntry(_selectedEntry!),
+                                  onSwitchTherapist: () =>
+                                      _switchEntryTherapist(_selectedEntry!),
                                 ),
                         ),
                       ),
@@ -576,12 +779,14 @@ class _TimetableEntry {
   final String id;
   final String therapistId;
   final String roomId;
+  final String roomUnitId;
   final String customerName;
   final String customerPhone;
   final String serviceName;
   final int serviceCount;
   final String staffName;
   final String roomName;
+  final String roomUnitName;
   final String type;
   final String status;
   final String startTime;
@@ -606,12 +811,14 @@ class _TimetableEntry {
     required this.id,
     required this.therapistId,
     required this.roomId,
+    required this.roomUnitId,
     required this.customerName,
     required this.customerPhone,
     required this.serviceName,
     required this.serviceCount,
     required this.staffName,
     required this.roomName,
+    required this.roomUnitName,
     required this.type,
     required this.status,
     required this.startTime,
@@ -655,6 +862,7 @@ class _TimetableEntry {
       id: asString(row['id']),
       therapistId: asString(row['therapistId']),
       roomId: asString(row['roomId']),
+      roomUnitId: asString(row['roomUnitId']),
       customerName: _displayCustomerName(
         asString(row['customerName']).isNotEmpty
             ? asString(row['customerName'])
@@ -671,6 +879,7 @@ class _TimetableEntry {
       roomName: asString(row['roomName']).isNotEmpty
           ? asString(row['roomName'])
           : asString(room?['name'], 'Room'),
+      roomUnitName: asString(row['roomUnitName']),
       type: asString(row['type']).toLowerCase(),
       status: asString(row['status']).toLowerCase(),
       startTime: _cleanTime(asString(row['startTime'], '09:00')),
@@ -697,6 +906,9 @@ class _TimetableEntry {
     );
   }
 
+  String get roomDisplayName =>
+      roomUnitName.isEmpty ? roomName : '$roomName · $roomUnitName';
+
   int get _rowStartMinutes =>
       _minutesFromSelectedDate(startAt, selectedDate) ??
       _timeToMinutes(startTime);
@@ -716,6 +928,7 @@ class _TimetableEntry {
     if (end <= start) end += 24 * 60;
     return end;
   }
+
   bool get hasActualTiming => actualStartedAt != null;
   int get startMinutes =>
       !isWalkIn && hasActualTiming ? bookedStartMinutes : _rowStartMinutes;
@@ -726,19 +939,32 @@ class _TimetableEntry {
     final booked = bookedEndMinutes - bookedStartMinutes;
     return booked > 0 ? booked.clamp(0, 1440) : durationMinutes;
   }
-  DateTime? get actualServiceEndAt => actualStartedAt
-      ?.toLocal()
-      .add(Duration(minutes: scheduledServiceMinutes));
+
+  DateTime? get actualServiceEndAt {
+    final actualStart = actualStartedAt?.toLocal();
+    if (actualStart == null) return null;
+    final completedAt = actualCompletedAt?.toLocal();
+    if (completedAt != null && completedAt.isAfter(actualStart)) {
+      return completedAt;
+    }
+    final expectedEnd = endAt?.toLocal();
+    if (expectedEnd != null && expectedEnd.isAfter(actualStart)) {
+      return expectedEnd;
+    }
+    return actualStart.add(Duration(minutes: scheduledServiceMinutes));
+  }
   int get serviceStartMinutes {
     final actualStart = actualStartedAt?.toLocal();
     if (actualStart == null) return startMinutes;
     return _minutesFromSelectedDate(actualStart, selectedDate) ?? startMinutes;
   }
+
   int get serviceEndMinutes {
     final actualEnd = actualServiceEndAt;
     if (actualEnd == null) return endMinutes;
     return _minutesFromSelectedDate(actualEnd, selectedDate) ?? endMinutes;
   }
+
   int get cleanupEndMinutes =>
       serviceEndMinutes + bufferAfterMinutes.clamp(0, 240);
   int get blockDurationMinutes =>
@@ -750,8 +976,24 @@ class _TimetableEntry {
   bool get isNoShow => status == 'no_show';
   bool get isCompleted => operationalStatus == 'Completed';
   bool get isInProgress => operationalStatus == 'In Progress';
-  bool get isUpcoming => operationalStatus == 'Awaiting Arrival';
+  bool get isUpcoming =>
+      operationalStatus == 'Awaiting Arrival' ||
+      operationalStatus == 'Ready to Start';
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
+  bool get isServiceDateToday =>
+      _stripDate(selectedDate) == _stripDate(DateTime.now());
+  bool get canStartService =>
+      isServiceDateToday &&
+      hasPayment &&
+      actualStartedAt == null &&
+      (status == 'pending' || status == 'confirmed');
+  bool get canSwitchTherapist =>
+      therapistId.isNotEmpty &&
+      !isCancelled &&
+      !isVoided &&
+      !isNoShow &&
+      !isCompleted &&
+      !serviceWindowEnded;
 
   bool isHappeningNow(DateTime now) {
     if (!isInProgress) return false;
@@ -816,17 +1058,18 @@ class _TimetableEntry {
     return '';
   }
 
-  // A paid walk-in needs no manual start/complete: it counts as in progress
-  // for the duration of its booked window, then completes on its own once
-  // that window has passed.
+  // Payment can reserve a later walk-in. Only the explicit service-start
+  // transition makes it operationally in progress.
   bool get isPaidWalkInInProgress =>
       isWalkIn &&
+      status == 'in_progress' &&
       hasPayment &&
       !isCancelled &&
       !isVoided &&
       !serviceWindowEnded;
   bool get isWalkInCompletedByTime =>
       isWalkIn &&
+      status == 'in_progress' &&
       hasPayment &&
       !isCancelled &&
       !isVoided &&
@@ -858,13 +1101,13 @@ class _TimetableEntry {
     final ended = actualServiceEndAt;
     if (started == null || ended == null) return '';
     return '${DateFormat('h:mm a').format(started)} - '
-        '${DateFormat('h:mm a').format(ended)} '
-        '(${_compactDurationLabel(scheduledServiceMinutes)})';
+        '${DateFormat('h:mm a').format(ended)}';
   }
+
   String get operationalTimeRange =>
       hasActualTiming && actualServiceTimeRange.isNotEmpty
-          ? actualServiceTimeRange
-          : timeRange;
+      ? actualServiceTimeRange
+      : timeRange;
   String get actualStartLabel => actualStartedAt == null
       ? 'Not started'
       : DateFormat('h:mm a').format(actualStartedAt!.toLocal());
@@ -875,6 +1118,7 @@ class _TimetableEntry {
     if (actualCompletedAt != null) return 'Completed $actualCompletedLabel';
     return null;
   }
+
   String get durationLabel => '$timeRange ($durationMinutes min)';
   String get cleanupUntilLabel => bufferAfterMinutes <= 0
       ? 'No cleanup buffer'
@@ -897,6 +1141,7 @@ class _TimetableEntry {
       return 'In Progress';
     }
     if (arrivalDelayLabel.isNotEmpty) return arrivalDelayLabel;
+    if (hasPayment && isServiceStartDue) return 'Ready to Start';
     return 'Awaiting Arrival';
   }
 
@@ -944,14 +1189,15 @@ List<_TimetableTherapist> _buildTherapistRows(
   List<Map<String, dynamic>> rows,
   List<_TimetableEntry> entries,
 ) {
-  final therapists = rows
-      .where((row) {
-        final role = asString(row['role'], 'Therapist').toLowerCase();
-        return role.contains('therapist');
-      })
-      .map(_TimetableTherapist.fromMap)
-      .toList()
-    ..sort((a, b) => a.name.compareTo(b.name));
+  final therapists =
+      rows
+          .where((row) {
+            final role = asString(row['role'], 'Therapist').toLowerCase();
+            return role.contains('therapist');
+          })
+          .map(_TimetableTherapist.fromMap)
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
 
   final knownIds = therapists.map((therapist) => therapist.id).toSet();
   final missing = <_TimetableTherapist>[];
@@ -978,6 +1224,7 @@ class _TimetableRoom {
   final String roomType;
   final int totalSlots;
   final bool active;
+  final String allocationMode;
 
   const _TimetableRoom({
     required this.id,
@@ -985,6 +1232,7 @@ class _TimetableRoom {
     required this.roomType,
     required this.totalSlots,
     required this.active,
+    required this.allocationMode,
   });
 
   factory _TimetableRoom.fromMap(Map<String, dynamic> row) {
@@ -993,6 +1241,33 @@ class _TimetableRoom {
       name: asString(row['name'], 'Room'),
       roomType: asString(row['roomType'], 'body_room'),
       totalSlots: asInt(row['totalSlots'], 1).clamp(1, 99),
+      active: asBool(row['isActive'], true),
+      allocationMode: asString(row['allocationMode'], 'capacity'),
+    );
+  }
+}
+
+class _TimetableRoomUnit {
+  final String id;
+  final String zoneId;
+  final String name;
+  final int unitNumber;
+  final bool active;
+
+  const _TimetableRoomUnit({
+    required this.id,
+    required this.zoneId,
+    required this.name,
+    required this.unitNumber,
+    required this.active,
+  });
+
+  factory _TimetableRoomUnit.fromMap(Map<String, dynamic> row) {
+    return _TimetableRoomUnit(
+      id: asString(row['id']),
+      zoneId: asString(row['zoneId']),
+      name: asString(row['name'], 'Room'),
+      unitNumber: asInt(row['unitNumber'], 1),
       active: asBool(row['isActive'], true),
     );
   }
@@ -1017,6 +1292,7 @@ List<_TimetableRoom> _buildRoomRows(
         roomType: 'body_room',
         totalSlots: 1,
         active: true,
+        allocationMode: 'capacity',
       ),
     );
   }
@@ -1095,23 +1371,18 @@ _ResourceStatus _resourceStatus({
     );
   }
   final used = active.length;
-  final cleaning =
-      active.where((entry) => nowMinutes >= entry.serviceEndMinutes).length;
+  final cleaning = active
+      .where((entry) => nowMinutes >= entry.serviceEndMinutes)
+      .length;
   final freeSlots = (resource.capacity - used).clamp(0, resource.capacity);
   if (used == 0) {
     return const _ResourceStatus('Available now', Color(0xFF10B981));
   }
   if (cleaning == used) {
-    return _ResourceStatus(
-      '$cleaning cleaning',
-      const Color(0xFFF59E0B),
-    );
+    return _ResourceStatus('$cleaning cleaning', const Color(0xFFF59E0B));
   }
   if (freeSlots > 0) {
-    return _ResourceStatus(
-      '$freeSlots available now',
-      const Color(0xFF10B981),
-    );
+    return _ResourceStatus('$freeSlots available now', const Color(0xFF10B981));
   }
   final nextFree = active
       .map((entry) => entry.serviceEndMinutes)
@@ -1426,10 +1697,12 @@ class _SquareIconButton extends StatelessWidget {
     this.iconSize = 20,
   }) : onSelected = null;
 
-  const _SquareIconButton.menu({required this.tooltip, required this.onSelected})
-    : icon = null,
-      iconSize = 20,
-      onPressed = null;
+  const _SquareIconButton.menu({
+    required this.tooltip,
+    required this.onSelected,
+  }) : icon = null,
+       iconSize = 20,
+       onPressed = null;
 
   @override
   Widget build(BuildContext context) {
@@ -1862,7 +2135,9 @@ class _ResourceFilterPanel extends StatelessWidget {
                   );
                 }
                 final resource = resources[index - 1];
-                final resourceEntries = entries.where(resource.matches).toList();
+                final resourceEntries = entries
+                    .where(resource.matches)
+                    .toList();
                 final status = _resourceStatus(
                   resource: resource,
                   entries: resourceEntries,
@@ -1872,12 +2147,12 @@ class _ResourceFilterPanel extends StatelessWidget {
                 final statusLabel = isRoom
                     ? '${resource.capacity} lanes'
                     : status.label.contains('Busy')
-                        ? 'Busy'
-                        : status.label.contains('Cleaning')
-                            ? 'Cleaning'
-                            : resource.available
-                                ? 'Available'
-                                : 'Unavailable';
+                    ? 'Busy'
+                    : status.label.contains('Cleaning')
+                    ? 'Cleaning'
+                    : resource.available
+                    ? 'Available'
+                    : 'Unavailable';
                 return _ResourceFilterCard(
                   icon: resource.avatarIcon,
                   avatarText: resource.avatarText,
@@ -1928,7 +2203,9 @@ class _ResourceFilterCard extends StatelessWidget {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
           side: BorderSide(
-            color: selected ? color.withValues(alpha: 0.75) : const Color(0xFFE2E8F0),
+            color: selected
+                ? color.withValues(alpha: 0.75)
+                : const Color(0xFFE2E8F0),
             width: selected ? 1.4 : 1,
           ),
         ),
@@ -2030,6 +2307,7 @@ class _TimetableOverview extends StatelessWidget {
   final List<_TimetableEntry> entries;
   final List<_TimetableTherapist> therapists;
   final List<_TimetableRoom> rooms;
+  final List<_TimetableRoomUnit> roomUnits;
   final DateTime selectedDate;
   final ValueChanged<_TimetableEntry> onTapEntry;
   final void Function([String? mode]) onOpenTimetable;
@@ -2040,6 +2318,7 @@ class _TimetableOverview extends StatelessWidget {
     required this.entries,
     required this.therapists,
     required this.rooms,
+    required this.roomUnits,
     required this.selectedDate,
     required this.onTapEntry,
     required this.onOpenTimetable,
@@ -2076,20 +2355,17 @@ class _TimetableOverview extends StatelessWidget {
     final nowMinutes = now.hour * 60 + now.minute;
     final selectedToday = _stripDate(selectedDate) == _stripDate(now);
 
-    final inProgress = (selectedToday
-        ? entries.where((e) => e.isHappeningNow(now)).toList()
-        : <_TimetableEntry>[])
-      ..sort((a, b) => a.serviceEndMinutes.compareTo(b.serviceEndMinutes));
+    final inProgress =
+        (selectedToday
+              ? entries.where((e) => e.isHappeningNow(now)).toList()
+              : <_TimetableEntry>[])
+          ..sort((a, b) => a.serviceEndMinutes.compareTo(b.serviceEndMinutes));
     final upNext = entries.where((e) => e.isUpcoming).toList()
       ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
     final busyTherapistIds = inProgress
         .map((e) => e.therapistId)
         .where((id) => id.isNotEmpty)
         .toSet();
-    final busyTherapistEntries = inProgress
-        .where((e) => e.therapistId.isNotEmpty)
-        .toList()
-      ..sort((a, b) => a.serviceEndMinutes.compareTo(b.serviceEndMinutes));
     final freeTherapists = therapists
         .where((t) => t.available && !busyTherapistIds.contains(t.id))
         .toList();
@@ -2098,7 +2374,7 @@ class _TimetableOverview extends StatelessWidget {
       String title,
       List<_TimetableEntry> items,
       Widget Function(BuildContext sheetContext, _TimetableEntry entry)
-          rowBuilder, {
+      rowBuilder, {
       bool contained = false,
     }) {
       _showOverviewMoreSheet(
@@ -2111,7 +2387,21 @@ class _TimetableOverview extends StatelessWidget {
       );
     }
 
-    Widget inProgressSection({int? cap}) {
+    void showAllInProgress() => showMore(
+      'In Progress Now',
+      inProgress,
+      (sheetContext, entry) => _OverviewInProgressCard(
+        entry: entry,
+        selectedToday: selectedToday,
+        nowMinutes: nowMinutes,
+        onTap: () {
+          Navigator.of(sheetContext).pop();
+          onTapEntry(entry);
+        },
+      ),
+    );
+
+    Widget inProgressSection({int? cap, bool useSheetForViewAll = false}) {
       final visible = cap == null ? inProgress : inProgress.take(cap).toList();
       final hidden = inProgress.length - visible.length;
       return _OverviewPanel(
@@ -2120,7 +2410,9 @@ class _TimetableOverview extends StatelessWidget {
           children: [
             _OverviewSectionHeader(
               title: 'In Progress Now (${inProgress.length})',
-              onViewAll: () => onOpenTimetable('staff'),
+              onViewAll: useSheetForViewAll && inProgress.isNotEmpty
+                  ? showAllInProgress
+                  : () => onOpenTimetable('staff'),
             ),
             const SizedBox(height: 10),
             if (inProgress.isEmpty)
@@ -2140,77 +2432,9 @@ class _TimetableOverview extends StatelessWidget {
               ],
               if (hidden > 0) ...[
                 const SizedBox(height: 8),
-                _OverviewMoreRow(
-                  count: hidden,
-                  onTap: () => showMore(
-                    'In Progress Now',
-                    inProgress,
-                    (sheetContext, entry) => _OverviewInProgressCard(
-                      entry: entry,
-                      selectedToday: selectedToday,
-                      nowMinutes: nowMinutes,
-                      onTap: () {
-                        Navigator.of(sheetContext).pop();
-                        onTapEntry(entry);
-                      },
-                    ),
-                  ),
-                ),
+                _OverviewMoreRow(count: hidden, onTap: showAllInProgress),
               ],
             ],
-          ],
-        ),
-      );
-    }
-
-    Widget availableSoonSection({int? cap}) {
-      final visible = cap == null
-          ? busyTherapistEntries
-          : busyTherapistEntries.take(cap).toList();
-      final hidden = busyTherapistEntries.length - visible.length;
-      return _OverviewPanel(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _OverviewSectionHeader(
-              title: 'Available Soon (${busyTherapistEntries.length})',
-              onViewAll: () => onOpenTimetable('staff'),
-            ),
-            const SizedBox(height: 10),
-            if (busyTherapistEntries.isEmpty)
-              const _OverviewEmptyHint(
-                icon: Icons.groups_2_outlined,
-                message: 'No therapists finishing soon.',
-              )
-            else
-              _OverviewContainedList(
-                itemCount: visible.length,
-                itemBuilder: (index) => _OverviewBusyTherapistRow(
-                  entry: visible[index],
-                  selectedToday: selectedToday,
-                  nowMinutes: nowMinutes,
-                  onTap: () => onTapEntry(visible[index]),
-                ),
-                trailingBuilder: hidden > 0
-                    ? () => _OverviewMoreRow(
-                        count: hidden,
-                        onTap: () => showMore(
-                          'Available Soon',
-                          busyTherapistEntries,
-                          (sheetContext, entry) => _OverviewBusyTherapistRow(
-                            entry: entry,
-                            selectedToday: selectedToday,
-                            nowMinutes: nowMinutes,
-                            onTap: () {
-                              Navigator.of(sheetContext).pop();
-                              onTapEntry(entry);
-                            },
-                          ),
-                          contained: true,
-                        ),
-                      )
-                    : null,
-              ),
           ],
         ),
       );
@@ -2221,7 +2445,7 @@ class _TimetableOverview extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _OverviewSectionHeader(
-            title: 'Free Therapists (${freeTherapists.length})',
+            title: 'Therapist Availability (${freeTherapists.length})',
             onViewAll: () => onOpenTimetable('staff'),
           ),
           const SizedBox(height: 10),
@@ -2234,9 +2458,10 @@ class _TimetableOverview extends StatelessWidget {
             LayoutBuilder(
               builder: (context, chipConstraints) {
                 const gap = 10.0;
-                final columns = (chipConstraints.maxWidth / 190)
-                    .floor()
-                    .clamp(1, 4);
+                final columns = (chipConstraints.maxWidth / 190).floor().clamp(
+                  1,
+                  4,
+                );
                 final width =
                     (chipConstraints.maxWidth - gap * (columns - 1)) / columns;
                 return Wrap(
@@ -2259,57 +2484,138 @@ class _TimetableOverview extends StatelessWidget {
       ),
     );
 
-    Widget zonesSection() => _OverviewPanel(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _OverviewSectionHeader(
-            title: 'Zones Live Status',
-            onViewAll: () => onOpenTimetable('rooms'),
+    Widget zonesSection() {
+      final zonesWithUnits =
+          rooms
+              .where((room) => roomUnits.any((unit) => unit.zoneId == room.id))
+              .toList()
+            ..sort((a, b) {
+              int rank(_TimetableRoom room) {
+                final name = room.name.toLowerCase();
+                if (name.contains('ground')) return 0;
+                if (name.contains('upper')) return 1;
+                return 2;
+              }
+
+              final byRank = rank(a).compareTo(rank(b));
+              return byRank != 0 ? byRank : a.name.compareTo(b.name);
+            });
+      final capacityZones =
+          rooms
+              .where((room) => !roomUnits.any((unit) => unit.zoneId == room.id))
+              .toList()
+            ..sort((a, b) {
+              int rank(_TimetableRoom room) =>
+                  room.name.toLowerCase().contains('ground') ? 0 : 1;
+              final byRank = rank(a).compareTo(rank(b));
+              return byRank != 0 ? byRank : a.name.compareTo(b.name);
+            });
+
+      Widget groupLabel(String label) => Padding(
+        padding: const EdgeInsets.only(bottom: 7),
+        child: Text(
+          label,
+          style: const TextStyle(
+            fontSize: 11,
+            fontWeight: FontWeight.w800,
+            color: Color(0xFF64748B),
           ),
-          const SizedBox(height: 10),
-          if (rooms.isEmpty)
-            const _OverviewEmptyHint(
-              icon: Icons.meeting_room_outlined,
-              message: 'No zones found.',
-            )
-          else
-            LayoutBuilder(
-              builder: (context, zoneConstraints) {
-                // Every zone shown directly in a tidy grid — 2 up on a narrow
-                // column, up to 4 across when there's room.
-                const gap = 10.0;
-                final columns = (zoneConstraints.maxWidth / 150)
-                    .floor()
-                    .clamp(2, 4);
-                final width =
-                    (zoneConstraints.maxWidth - gap * (columns - 1)) / columns;
-                return Wrap(
-                  spacing: gap,
-                  runSpacing: gap,
-                  children: [
-                    for (final room in rooms)
-                      SizedBox(
-                        width: width,
-                        child: _OverviewZoneCard(
-                          room: room,
-                          compact: true,
-                          occupied: entries
-                              .where(
-                                (e) =>
-                                    e.roomId == room.id &&
-                                    e.isHappeningNow(now),
-                              )
-                              .length,
-                        ),
-                      ),
-                  ],
-                );
-              },
+        ),
+      );
+
+      Widget roomUnitRow(_TimetableRoom zone) {
+        final units = roomUnits.where((unit) => unit.zoneId == zone.id).toList()
+          ..sort((a, b) => a.unitNumber.compareTo(b.unitNumber));
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            const gap = 8.0;
+            final width = (constraints.maxWidth - gap * 2) / 3;
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < units.length; i++) ...[
+                  if (i > 0) const SizedBox(width: gap),
+                  SizedBox(
+                    width: width,
+                    child: _OverviewRoomUnitCard(
+                      zone: zone,
+                      unit: units[i],
+                      entries: entries,
+                      nowMinutes: nowMinutes,
+                      selectedToday: selectedToday,
+                    ),
+                  ),
+                ],
+              ],
+            );
+          },
+        );
+      }
+
+      Widget capacityZoneRow() => LayoutBuilder(
+        builder: (context, constraints) {
+          const gap = 10.0;
+          final width = (constraints.maxWidth - gap) / 2;
+          return Wrap(
+            spacing: gap,
+            runSpacing: gap,
+            children: [
+              for (final room in capacityZones)
+                SizedBox(
+                  width: width,
+                  child: _OverviewZoneCard(
+                    room: room,
+                    compact: true,
+                    occupied: entries
+                        .where(
+                          (entry) =>
+                              entry.roomId == room.id &&
+                              entry.isHappeningNow(now),
+                        )
+                        .length,
+                  ),
+                ),
+            ],
+          );
+        },
+      );
+
+      return _OverviewPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _OverviewSectionHeader(
+              title: 'Zones Live Status',
+              onViewAll: () => onOpenTimetable('rooms'),
             ),
-        ],
-      ),
-    );
+            const SizedBox(height: 10),
+            if (rooms.isEmpty)
+              const _OverviewEmptyHint(
+                icon: Icons.meeting_room_outlined,
+                message: 'No zones found.',
+              )
+            else ...[
+              for (var i = 0; i < zonesWithUnits.length; i++) ...[
+                groupLabel(
+                  zonesWithUnits[i].name.toLowerCase().contains('ground')
+                      ? 'Ground Massage Rooms'
+                      : zonesWithUnits[i].name.toLowerCase().contains('upper')
+                      ? 'Upper Massage Rooms'
+                      : zonesWithUnits[i].name,
+                ),
+                roomUnitRow(zonesWithUnits[i]),
+                if (i != zonesWithUnits.length - 1 || capacityZones.isNotEmpty)
+                  const SizedBox(height: 12),
+              ],
+              if (capacityZones.isNotEmpty) ...[
+                groupLabel('Foot Zones'),
+                capacityZoneRow(),
+              ],
+            ],
+          ],
+        ),
+      );
+    }
 
     Widget upNextSection({int? cap}) {
       final visible = cap == null ? upNext : upNext.take(cap).toList();
@@ -2369,48 +2675,36 @@ class _TimetableOverview extends StatelessWidget {
           return ListView(
             padding: const EdgeInsets.fromLTRB(14, 16, 14, 28),
             children: [
-              inProgressSection(),
+              inProgressSection(cap: 3, useSheetForViewAll: true),
               const SizedBox(height: 14),
-              availableSoonSection(),
+              zonesSection(),
               const SizedBox(height: 14),
               upNextSection(),
               const SizedBox(height: 14),
               freeTherapistsSection(),
-              const SizedBox(height: 14),
-              zonesSection(),
             ],
           );
         }
-        // Natural-height sections in a single page scroll: no fixed-height
-        // panels, so there are no large empty gaps. Left column leads with
-        // live activity, right column with who frees up next.
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          child: Column(
             children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    inProgressSection(cap: 3),
-                    const SizedBox(height: 16),
-                    zonesSection(),
-                  ],
-                ),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: inProgressSection(cap: 3)),
+                  const SizedBox(width: 16),
+                  Expanded(child: zonesSection()),
+                ],
               ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    availableSoonSection(cap: 4),
-                    const SizedBox(height: 16),
-                    upNextSection(cap: 4),
-                    const SizedBox(height: 16),
-                    freeTherapistsSection(),
-                  ],
-                ),
+              const SizedBox(height: 16),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: upNextSection(cap: 4)),
+                  const SizedBox(width: 16),
+                  Expanded(child: freeTherapistsSection()),
+                ],
               ),
             ],
           ),
@@ -2478,11 +2772,7 @@ class _OverviewMoreRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 2),
-            const Icon(
-              Icons.chevron_right,
-              size: 16,
-              color: Color(0xFF0F766E),
-            ),
+            const Icon(Icons.chevron_right, size: 16, color: Color(0xFF0F766E)),
           ],
         ),
       ),
@@ -2640,11 +2930,7 @@ class _OverviewSectionHeader extends StatelessWidget {
                   ),
                 ),
                 SizedBox(width: 2),
-                Icon(
-                  Icons.chevron_right,
-                  size: 17,
-                  color: Color(0xFF0F766E),
-                ),
+                Icon(Icons.chevron_right, size: 17, color: Color(0xFF0F766E)),
               ],
             ),
           ),
@@ -2733,11 +3019,16 @@ class _OverviewInProgressCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final accent = _avatarColor(entry.staffName);
-    final remaining = entry.serviceEndMinutes - nowMinutes;
-    final remainingLabel = selectedToday && remaining > 0
-        ? 'Ends in ${_overviewDuration(remaining)}'
-        : null;
+    final accent = const Color(0xFF0F766E);
+    final total = (entry.serviceEndMinutes - entry.serviceStartMinutes).clamp(
+      1,
+      1440,
+    );
+    final elapsed = selectedToday
+        ? (nowMinutes - entry.serviceStartMinutes).clamp(0, total)
+        : 0;
+    final remaining = (total - elapsed).clamp(0, total);
+    final progress = elapsed / total;
     return Material(
       color: Colors.white,
       borderRadius: BorderRadius.circular(12),
@@ -2750,225 +3041,146 @@ class _OverviewInProgressCard extends StatelessWidget {
             borderRadius: BorderRadius.circular(12),
             border: Border.all(color: const Color(0xFFE6EAEF)),
           ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              Container(
-                width: 36,
-                height: 36,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: accent.withValues(alpha: 0.14),
-                  shape: BoxShape.circle,
-                ),
-                child: Text(
-                  _initials(entry.staffName),
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                    color: accent,
+              Row(
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: accent.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(Icons.person_outline, color: accent, size: 21),
                   ),
-                ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Flexible(
+                              child: Text(
+                                entry.customerName,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  fontSize: 13.5,
+                                  fontWeight: FontWeight.w900,
+                                  color: Color(0xFF0F172A),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 7),
+                            const _OverviewPill(
+                              label: 'In Progress',
+                              color: Color(0xFF0F766E),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${entry.serviceName} / ${entry.roomDisplayName}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Column(
+                    crossAxisAlignment: CrossAxisAlignment.end,
+                    children: [
+                      Text(
+                        'Ends ${_clockLabel(_minutesToTime(entry.serviceEndMinutes))}',
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF0F172A),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '${_overviewDuration(total)} service',
+                        style: const TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
               ),
-              const SizedBox(width: 10),
-              Expanded(
-                flex: 9,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
+              const SizedBox(height: 9),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.badge_outlined,
+                    size: 13,
+                    color: Color(0xFF64748B),
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
                       entry.staffName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF0F172A),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      entry.customerName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
+                        fontSize: 11,
                         fontWeight: FontWeight.w700,
-                        color: Color(0xFF64748B),
+                        color: Color(0xFF475569),
                       ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                flex: 12,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      entry.serviceCount > 1
-                          ? '${entry.serviceName} (${entry.serviceCount})'
-                          : entry.serviceName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF334155),
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      entry.roomName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                        color: Color(0xFF64748B),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              SizedBox(
-                width: 118,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      entry.operationalTimeRange,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      textAlign: TextAlign.right,
-                      style: const TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF0F172A),
-                      ),
-                    ),
-                    if (remainingLabel != null) ...[
-                      const SizedBox(height: 4),
-                      _OverviewPill(
-                        label: remainingLabel,
-                        color: const Color(0xFF0F766E),
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-class _OverviewBusyTherapistRow extends StatelessWidget {
-  final _TimetableEntry entry;
-  final bool selectedToday;
-  final int nowMinutes;
-  final VoidCallback onTap;
-
-  const _OverviewBusyTherapistRow({
-    required this.entry,
-    required this.selectedToday,
-    required this.nowMinutes,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final accent = _avatarColor(entry.staffName);
-    final remaining = entry.serviceEndMinutes - nowMinutes;
-    final freeInLabel = selectedToday && remaining > 0
-        ? 'Free in ${_overviewDuration(remaining)}'
-        : null;
-
-    return InkWell(
-      onTap: onTap,
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
-        child: Row(
-          children: [
-            Container(
-              width: 38,
-              height: 38,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: accent.withValues(alpha: 0.14),
-                shape: BoxShape.circle,
-              ),
-              child: Text(
-                _initials(entry.staffName),
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                  color: accent,
-                ),
-              ),
-            ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    entry.staffName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 13.5,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF0F172A),
                     ),
                   ),
-                  const SizedBox(height: 2),
                   Text(
-                    entry.serviceName,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    'Started ${_clockLabel(_minutesToTime(entry.serviceStartMinutes))} / ${_overviewDuration(elapsed)} elapsed',
                     style: const TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w600,
                       color: Color(0xFF64748B),
                     ),
                   ),
                 ],
               ),
-            ),
-            const SizedBox(width: 8),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Free at ${_clockLabel(_minutesToTime(entry.serviceEndMinutes))}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 11.5,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF0F172A),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(999),
+                      child: LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 5,
+                        backgroundColor: const Color(0xFFE2E8F0),
+                        valueColor: const AlwaysStoppedAnimation(
+                          Color(0xFF0F9D8A),
+                        ),
+                      ),
+                    ),
                   ),
-                ),
-                if (freeInLabel != null) ...[
-                  const SizedBox(height: 4),
-                  _OverviewPill(
-                    label: freeInLabel,
-                    color: const Color(0xFF0F766E),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${_overviewDuration(remaining)} left',
+                    style: const TextStyle(
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF0F766E),
+                    ),
                   ),
                 ],
-              ],
-            ),
-          ],
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -3066,6 +3278,139 @@ class _StatusDot extends StatelessWidget {
       width: 8,
       height: 8,
       decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+    );
+  }
+}
+
+class _OverviewRoomUnitCard extends StatelessWidget {
+  final _TimetableRoom zone;
+  final _TimetableRoomUnit unit;
+  final List<_TimetableEntry> entries;
+  final int nowMinutes;
+  final bool selectedToday;
+
+  const _OverviewRoomUnitCard({
+    required this.zone,
+    required this.unit,
+    required this.entries,
+    required this.nowMinutes,
+    required this.selectedToday,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final active = entries
+        .where(
+          (entry) =>
+              !entry.isVoided &&
+              entry.roomUnitId == unit.id &&
+              selectedToday &&
+              nowMinutes >= entry.serviceStartMinutes &&
+              nowMinutes < entry.cleanupEndMinutes,
+        )
+        .toList();
+    final entry = active.isEmpty ? null : active.first;
+    final cleaning = entry != null && nowMinutes >= entry.serviceEndMinutes;
+    final status = !selectedToday
+        ? 'Scheduled'
+        : cleaning
+        ? 'Cleaning'
+        : entry != null
+        ? 'Occupied'
+        : 'Available';
+    final color = !selectedToday
+        ? const Color(0xFF64748B)
+        : cleaning
+        ? const Color(0xFFF59E0B)
+        : entry != null
+        ? const Color(0xFFF97316)
+        : const Color(0xFF059669);
+    final detail = entry == null
+        ? (selectedToday ? 'Ready now' : 'View schedule')
+        : cleaning
+        ? 'Until ${_clockLabel(_minutesToTime(entry.cleanupEndMinutes))}'
+        : '${entry.customerName} until ${_clockLabel(_minutesToTime(entry.serviceEndMinutes))}';
+
+    return Container(
+      padding: const EdgeInsets.all(9),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE6EAEF)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  Icons.meeting_room_outlined,
+                  size: 15,
+                  color: color,
+                ),
+              ),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  unit.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF0F172A),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            zone.name,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF64748B),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Row(
+            children: [
+              _StatusDot(color: color),
+              const SizedBox(width: 5),
+              Text(
+                status,
+                style: TextStyle(
+                  fontSize: 10.5,
+                  fontWeight: FontWeight.w900,
+                  color: color,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 3),
+          Text(
+            detail,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 10,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF64748B),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -3279,7 +3624,7 @@ class _OverviewUpNextRow extends StatelessWidget {
                       const SizedBox(width: 3),
                       Expanded(
                         child: Text(
-                          '${entry.serviceName} · ${entry.roomName}',
+                          '${entry.serviceName} / ${entry.roomDisplayName}',
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
@@ -3295,10 +3640,7 @@ class _OverviewUpNextRow extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            const _OverviewPill(
-              label: 'Awaiting',
-              color: Color(0xFFF59E0B),
-            ),
+            const _OverviewPill(label: 'Awaiting', color: Color(0xFFF59E0B)),
           ],
         ),
       ),
@@ -3312,12 +3654,7 @@ class _StatChip extends StatelessWidget {
   final Color color;
   final IconData icon;
 
-  const _StatChip(
-    this.label,
-    this.value,
-    this.color, {
-    required this.icon,
-  });
+  const _StatChip(this.label, this.value, this.color, {required this.icon});
 
   @override
   Widget build(BuildContext context) {
@@ -3509,17 +3846,12 @@ class _TimetableControlsState extends State<_TimetableControls> {
                         widget.controller.clear();
                         FocusScope.of(context).unfocus();
                       },
-                      icon: Icon(
-                        _searchExpanded ? Icons.close : Icons.search,
-                      ),
+                      icon: Icon(_searchExpanded ? Icons.close : Icons.search),
                       tooltip: _searchExpanded ? 'Close search' : 'Search',
                     ),
                   ],
                 ),
-                if (_searchExpanded) ...[
-                  const SizedBox(height: 8),
-                  search,
-                ],
+                if (_searchExpanded) ...[const SizedBox(height: 8), search],
                 if (widget.filterExpanded) ...[
                   const SizedBox(height: 10),
                   filterPanel,
@@ -3742,27 +4074,20 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
   static const double rowTopPad = 14;
   static const double rowBottomPad = 14;
 
-  /// The narrowest appointment block is 62px (~28 min at this scale), so
-  /// anything shorter is inflated for lane assignment to keep blocks from
-  /// painting over each other. Back-to-back 30-minute bookings still share
-  /// a lane.
-  static int _visualEnd(_TimetableEntry entry) {
-    final min = entry.serviceStartMinutes + 28;
-    return entry.cleanupEndMinutes > min ? entry.cleanupEndMinutes : min;
-  }
-
   late final ScrollController _scrollController;
   bool _scrolled = false;
 
   int get _canvasStartMinute => _floorToHour(widget.openMinute);
-  int get _canvasEndMinute => _ceilToHour(widget.closeMinute);
+  int get _canvasEndMinute => _timetableCanvasEndMinute(
+    closeMinute: widget.closeMinute,
+    entries: widget.entries,
+    selectedDate: widget.selectedDate,
+  );
 
   @override
   void initState() {
     super.initState();
-    _scrollController = ScrollController(
-      initialScrollOffset: _initialOffset(),
-    );
+    _scrollController = ScrollController(initialScrollOffset: _initialOffset());
     _scrolled = _scrollController.initialScrollOffset > 2;
     _scrollController.addListener(_onScroll);
   }
@@ -3798,22 +4123,36 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
   }
 
   double _initialOffset() {
-    final now = DateTime.now();
-    if (_stripDate(widget.selectedDate) != _stripDate(now)) return 0;
-    final nowMinutes = now.hour * 60 + now.minute;
+    final nowMinutes = _timetableNowMinute(
+      selectedDate: widget.selectedDate,
+      canvasEndMinute: _canvasEndMinute,
+    );
+    if (nowMinutes == null) return 0;
     if (nowMinutes <= _canvasStartMinute) return 0;
-    final timelineWidth =
-        (_canvasEndMinute - _canvasStartMinute) * minuteWidth;
+    final timelineWidth = (_canvasEndMinute - _canvasStartMinute) * minuteWidth;
     final target = (nowMinutes - _canvasStartMinute) * minuteWidth - 220;
-    return target.clamp(0.0, (timelineWidth - hourWidth).clamp(0.0, timelineWidth));
+    return target.clamp(
+      0.0,
+      (timelineWidth - hourWidth).clamp(0.0, timelineWidth),
+    );
   }
 
   double _rowHeightFor(List<_TimetableEntry> entries) {
-    final lanes = _assignLanesFlat(entries, endOf: _visualEnd);
+    final visibleEntries = entries
+        .where(
+          (entry) => _entryIntersectsTimeline(
+            entry,
+            _canvasStartMinute,
+            _canvasEndMinute,
+          ),
+        )
+        .toList();
+    final lanes = _assignLanesFlat(visibleEntries);
     final laneCount = lanes.isEmpty
         ? 1
         : lanes.map((l) => l.lane).reduce((a, b) => a > b ? a : b) + 1;
-    final height = rowTopPad +
+    final height =
+        rowTopPad +
         laneCount * laneHeight +
         (laneCount - 1) * laneGap +
         rowBottomPad;
@@ -3836,8 +4175,12 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
         : (widget.mode == 'rooms' ? 156.0 : 132.0);
     final timelineWidth = (canvasEndMinute - canvasStartMinute) * minuteWidth;
     final now = DateTime.now();
-    final nowMinutes = now.hour * 60 + now.minute;
-    final selectedToday = _stripDate(widget.selectedDate) == _stripDate(now);
+    final timelineNowMinute = _timetableNowMinute(
+      selectedDate: widget.selectedDate,
+      canvasEndMinute: canvasEndMinute,
+    );
+    final nowMinutes = timelineNowMinute ?? 0;
+    final selectedToday = timelineNowMinute != null;
     final showNow =
         selectedToday &&
         nowMinutes >= canvasStartMinute &&
@@ -3917,7 +4260,9 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
                               ),
                               top: 9,
                               child: _TimelineNowPill(
-                                label: _shortClockLabel(_minutesToTime(nowMinutes)),
+                                label: _shortClockLabel(
+                                  _minutesToTime(nowMinutes),
+                                ),
                               ),
                             ),
                         ],
@@ -4079,10 +4424,7 @@ class _TimelineHoursHeader extends StatelessWidget {
               left: (hour * 60 - canvasStartMinute) * minuteWidth,
               top: 0,
               bottom: 0,
-              child: Container(
-                width: 1,
-                color: const Color(0xFFEFF3F7),
-              ),
+              child: Container(width: 1, color: const Color(0xFFEFF3F7)),
             ),
           for (var hour = firstHour; hour < lastHour; hour++)
             Positioned(
@@ -4137,20 +4479,24 @@ class _ResourceRowTimeline extends StatelessWidget {
   Widget build(BuildContext context) {
     final sorted = [...entries]
       ..sort((a, b) => a.serviceStartMinutes.compareTo(b.serviceStartMinutes));
-    final blockingEntries = sorted.where((entry) => !entry.isVoided).toList();
-    final lanes = _assignLanesFlat(
-      sorted,
-      endOf: _ResourceTimetableGridState._visualEnd,
-    );
-    final laneCount = lanes.isEmpty
-        ? 1
-        : lanes.map((l) => l.lane).reduce((a, b) => a > b ? a : b) + 1;
-
+    final visibleEntries = sorted
+        .where(
+          (entry) => _entryIntersectsTimeline(
+            entry,
+            canvasStartMinute,
+            canvasEndMinute,
+          ),
+        )
+        .toList();
+    final blockingEntries = visibleEntries
+        .where((entry) => !entry.isVoided && !entry.isNoShow)
+        .toList();
+    final lanes = _assignLanesFlat(visibleEntries);
     final now = DateTime.now();
     final selectedToday = _stripDate(selectedDate) == _stripDate(now);
-    final selectedBeforeToday = _stripDate(selectedDate).isBefore(
-      _stripDate(now),
-    );
+    final selectedBeforeToday = _stripDate(
+      selectedDate,
+    ).isBefore(_stripDate(now));
     final nowMinutes = now.hour * 60 + now.minute;
 
     return Container(
@@ -4171,51 +4517,22 @@ class _ResourceRowTimeline extends StatelessWidget {
             canvasEndMinute: canvasEndMinute,
             minuteWidth: minuteWidth,
           ),
-          if (lanes.isEmpty)
-            for (final segment in _freeSegments(
-              blockingEntries,
-              openMinute,
-              closeMinute,
-              minuteWidth,
-            ))
-              _FreeAvailabilitySegment(
-                segment: segment,
-                hasServicesInRow: blockingEntries.isNotEmpty,
-                openMinute: openMinute,
-                canvasStartMinute: canvasStartMinute,
-                minuteWidth: minuteWidth,
-                top: topPad,
-                height: laneHeight,
-                selectedToday: selectedToday,
-                selectedBeforeToday: selectedBeforeToday,
-                nowMinutes: nowMinutes,
-              )
-          else
-            for (var laneIndex = 0; laneIndex < laneCount; laneIndex++)
-              for (final segment in _freeSegments(
-                lanes
-                    .where((lane) => lane.lane == laneIndex)
-                    .map((lane) => lane.entry)
-                    .where((entry) => !entry.isVoided)
-                    .toList(),
-                openMinute,
-                closeMinute,
-                minuteWidth,
-              ))
-                _FreeAvailabilitySegment(
-                  segment: segment,
-                  hasServicesInRow: lanes.any(
-                    (lane) => lane.lane == laneIndex,
-                  ),
-                  openMinute: openMinute,
-                  canvasStartMinute: canvasStartMinute,
-                  minuteWidth: minuteWidth,
-                  top: topPad + laneIndex * (laneHeight + laneGap),
-                  height: laneHeight,
-                  selectedToday: selectedToday,
-                  selectedBeforeToday: selectedBeforeToday,
-                  nowMinutes: nowMinutes,
-                ),
+          for (final segment in _freeSegments(
+            blockingEntries,
+            openMinute,
+            closeMinute,
+          ))
+            _FreeAvailabilitySegment(
+              segment: segment,
+              closeMinute: closeMinute,
+              canvasStartMinute: canvasStartMinute,
+              minuteWidth: minuteWidth,
+              top: topPad,
+              height: laneHeight,
+              selectedToday: selectedToday,
+              selectedBeforeToday: selectedBeforeToday,
+              nowMinutes: nowMinutes,
+            ),
           for (final lane in lanes)
             _ResourceAppointmentBlock(
               entry: lane.entry,
@@ -4385,27 +4702,28 @@ class _ResourceAppointmentBlock extends StatelessWidget {
     final style = _statusStyle(entry);
     final left = (entry.serviceStartMinutes - canvasStartMinute) * minuteWidth;
     final serviceWidth =
-        ((entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteWidth)
-            .clamp(62.0, double.infinity)
-            .toDouble();
+        (entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteWidth;
     final cleanupMinutes = entry.bufferAfterMinutes.clamp(0, 240);
     final cleanupLeft =
         (entry.serviceEndMinutes - canvasStartMinute) * minuteWidth;
-    final bufferWidth = cleanupMinutes > 0
-        ? (cleanupMinutes * minuteWidth).clamp(34.0, double.infinity)
-        : 0.0;
+    final bufferWidth = cleanupMinutes * minuteWidth;
     final large = serviceWidth >= 154;
     final medium = serviceWidth >= 108 && serviceWidth < 154;
     final small = serviceWidth < 96;
     final showTinyIcon = serviceWidth >= 76;
     final displayName = small
-        ? _compactInitials(entry.customerName)
+        ? serviceWidth >= 50
+              ? _shortCustomerName(entry.customerName)
+              : _compactInitials(entry.customerName)
         : medium
         ? _shortCustomerName(entry.customerName)
         : entry.customerName;
     final timeLabel = small
         ? _compactDurationLabel(
-            (entry.serviceEndMinutes - entry.serviceStartMinutes).clamp(0, 1440),
+            (entry.serviceEndMinutes - entry.serviceStartMinutes).clamp(
+              0,
+              1440,
+            ),
           )
         : serviceWidth >= 130
         ? _meridiemRangeLabel(
@@ -4647,8 +4965,7 @@ class _BufferBlock extends StatelessWidget {
 
 class _FreeAvailabilitySegment extends StatelessWidget {
   final _ScheduleSegment segment;
-  final bool hasServicesInRow;
-  final int openMinute;
+  final int closeMinute;
   final int canvasStartMinute;
   final double minuteWidth;
   final double top;
@@ -4659,8 +4976,7 @@ class _FreeAvailabilitySegment extends StatelessWidget {
 
   const _FreeAvailabilitySegment({
     required this.segment,
-    required this.hasServicesInRow,
-    required this.openMinute,
+    required this.closeMinute,
     required this.canvasStartMinute,
     required this.minuteWidth,
     required this.top,
@@ -4672,40 +4988,61 @@ class _FreeAvailabilitySegment extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final left = (segment.start - canvasStartMinute) * minuteWidth;
-    final width = (segment.end - segment.start) * minuteWidth;
+    final isPastGap =
+        selectedBeforeToday || (selectedToday && segment.end <= nowMinutes);
+    final visibleStart =
+        selectedToday &&
+            nowMinutes > segment.start &&
+            nowMinutes < segment.end
+        ? nowMinutes
+        : segment.start;
+    if (visibleStart >= segment.end) return const SizedBox.shrink();
+    final left = (visibleStart - canvasStartMinute) * minuteWidth;
+    final width = (segment.end - visibleStart) * minuteWidth;
     if (width < 8) return const SizedBox.shrink();
     final finalSlotAvailable =
         segment.isFinalAfterBusy &&
-        (selectedBeforeToday || (selectedToday && nowMinutes >= segment.start));
-    final shouldLabel =
-        width >= 72 &&
-        (segment.isFinalAfterBusy ||
-            (!hasServicesInRow &&
-                segment.start <= openMinute &&
-                !segment.afterBusy));
+        selectedToday &&
+        nowMinutes >= segment.start;
+    final isBoundedGap = segment.end < closeMinute;
+    final shouldLabel = !isPastGap && segment.afterBusy && width >= 72;
+    final useCompactLabel = width < 150;
+    final labelTime = _clockLabel(
+      _minutesToTime(
+        segment.isFinalAfterBusy ? segment.labelStart : segment.end,
+      ),
+    );
     final label = finalSlotAvailable
         ? 'Free'
         : segment.isFinalAfterBusy
-        ? 'Free after ${_clockLabel(_minutesToTime(segment.labelStart))}'
-        : segment.start <= openMinute
-        ? 'Free'
+        ? useCompactLabel
+              ? 'Free after\n$labelTime'
+              : 'Free after $labelTime'
+        : isBoundedGap
+        ? useCompactLabel
+              ? 'Free until\n$labelTime'
+              : 'Free until $labelTime'
         : '';
     final showSubtitle =
         shouldLabel &&
         width >= 150 &&
         (!segment.isFinalAfterBusy || finalSlotAvailable);
+    final subtitle = isBoundedGap
+        ? '${_clockLabel(_minutesToTime(visibleStart))} - ${_clockLabel(_minutesToTime(segment.end))}'
+        : 'Available';
+    final alignLabelStart =
+        segment.isFinalAfterBusy && !finalSlotAvailable && !useCompactLabel;
     return Positioned(
       left: left,
       top: top,
       width: width,
       height: height,
       child: Container(
-        alignment: segment.isFinalAfterBusy && !finalSlotAvailable
+        alignment: alignLabelStart
             ? Alignment.centerLeft
             : Alignment.center,
         padding: EdgeInsets.symmetric(
-          horizontal: segment.isFinalAfterBusy && !finalSlotAvailable ? 14 : 8,
+          horizontal: alignLabelStart ? 14 : 8,
           vertical: 8,
         ),
         decoration: BoxDecoration(
@@ -4719,16 +5056,16 @@ class _FreeAvailabilitySegment extends StatelessWidget {
         child: shouldLabel
             ? Column(
                 mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: segment.isFinalAfterBusy && !finalSlotAvailable
+                crossAxisAlignment: alignLabelStart
                     ? CrossAxisAlignment.start
                     : CrossAxisAlignment.center,
                 children: [
                   Text(
                     label,
-                    textAlign: segment.isFinalAfterBusy && !finalSlotAvailable
+                    textAlign: alignLabelStart
                         ? TextAlign.left
                         : TextAlign.center,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: const TextStyle(
                       color: Color(0xFF166534),
@@ -4739,11 +5076,11 @@ class _FreeAvailabilitySegment extends StatelessWidget {
                   ),
                   if (showSubtitle) ...[
                     const SizedBox(height: 3),
-                    const Text(
-                      'Available',
+                    Text(
+                      subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
+                      style: const TextStyle(
                         color: Color(0xFF475569),
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -4847,9 +5184,7 @@ class _DashedNowLine extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return CustomPaint(
-      painter: _DashedLinePainter(
-        _timetableAccent.withValues(alpha: 0.85),
-      ),
+      painter: _DashedLinePainter(_timetableAccent.withValues(alpha: 0.85)),
       size: Size.infinite,
     );
   }
@@ -4931,58 +5266,26 @@ class _ScheduleSegment {
   }) : labelStart = labelStart ?? start;
 }
 
-/// The appointment/buffer blocks enforce a minimum pixel width so their
-/// icon and label stay legible even for very short bookings. That means
-/// their rendered right edge can sit past [_TimetableEntry.cleanupEndMinutes]
-/// in time-space. Free segments must start after that *visual* edge, not
-/// the raw time, or the "Free after" label ends up rendered underneath the
-/// buffer chip.
-double _visualBlockEndMinutes(_TimetableEntry entry, double minuteWidth) {
-  const serviceMinPx = 62.0;
-  const bufferMinPx = 34.0;
-  final serviceWidthPx =
-      (entry.serviceEndMinutes - entry.serviceStartMinutes) * minuteWidth;
-  final serviceVisualEnd = serviceWidthPx < serviceMinPx
-      ? entry.serviceStartMinutes + serviceMinPx / minuteWidth
-      : entry.serviceEndMinutes.toDouble();
-  final actualServiceEnd = entry.serviceEndMinutes.toDouble();
-  final cleanupMinutes = entry.bufferAfterMinutes.clamp(0, 240);
-  if (cleanupMinutes <= 0) {
-    return actualServiceEnd > serviceVisualEnd
-        ? actualServiceEnd
-        : serviceVisualEnd;
-  }
-  final bufferWidthPx = cleanupMinutes * minuteWidth;
-  final visualBufferMinutes = bufferWidthPx < bufferMinPx
-      ? bufferMinPx / minuteWidth
-      : cleanupMinutes.toDouble();
-  final cleanupVisualEnd = actualServiceEnd + visualBufferMinutes;
-  return cleanupVisualEnd > serviceVisualEnd
-      ? cleanupVisualEnd
-      : serviceVisualEnd;
-}
-
-int _actualBlockEndMinutes(_TimetableEntry entry) => entry.cleanupEndMinutes;
-
 List<_ScheduleSegment> _freeSegments(
   List<_TimetableEntry> entries,
   int openMinute,
   int closeMinute,
-  double minuteWidth,
 ) {
-  final busy = entries
-      .map(
-        (entry) => _ScheduleSegment(
-          entry.serviceStartMinutes.clamp(openMinute, closeMinute).toInt(),
-          _visualBlockEndMinutes(entry, minuteWidth)
-              .ceil()
-              .clamp(openMinute, closeMinute),
-          labelStart: _actualBlockEndMinutes(entry).clamp(openMinute, closeMinute),
-        ),
-      )
-      .where((segment) => segment.end > segment.start)
-      .toList()
-    ..sort((a, b) => a.start.compareTo(b.start));
+  final busy =
+      entries
+          .map(
+            (entry) => _ScheduleSegment(
+              entry.serviceStartMinutes.clamp(openMinute, closeMinute).toInt(),
+              entry.cleanupEndMinutes.clamp(openMinute, closeMinute),
+              labelStart: entry.cleanupEndMinutes.clamp(
+                openMinute,
+                closeMinute,
+              ),
+            ),
+          )
+          .where((segment) => segment.end > segment.start)
+          .toList()
+        ..sort((a, b) => a.start.compareTo(b.start));
 
   final free = <_ScheduleSegment>[];
   var cursor = openMinute;
@@ -5020,12 +5323,9 @@ List<_ScheduleSegment> _freeSegments(
 }
 
 /// Overlap grouping and lane assignment. [endOf] decides where an entry's
-/// occupied span ends; the default is the real cleanup end. Callers that
-/// render entries with a minimum pixel size pass an inflated end (e.g.
-/// `max(cleanupEnd, start + minVisualMinutes)`) so blocks that would collide
-/// on screen are pushed into a side-by-side lane instead of painting on top
-/// of each other. Back-to-back bookings (next start == previous end) stay in
-/// the same lane because the comparison is strict.
+/// occupied span ends; the default is the real cleanup end. Back-to-back
+/// bookings (next start == previous end) stay in the same lane because the
+/// comparison is strict.
 List<List<_TimetableEntry>> _groupOverlapping(
   List<_TimetableEntry> entries, {
   int Function(_TimetableEntry entry)? endOf,
@@ -5079,6 +5379,55 @@ List<_EntryLane> _assignLanesFlat(
     }
   }
   return result;
+}
+
+bool _entryIntersectsTimeline(
+  _TimetableEntry entry,
+  int canvasStartMinute,
+  int canvasEndMinute,
+) {
+  final start = entry.serviceStartMinutes;
+  final end = entry.serviceEndMinutes;
+  return end > start && end > canvasStartMinute && start < canvasEndMinute;
+}
+
+int _timetableCanvasEndMinute({
+  required int closeMinute,
+  required List<_TimetableEntry> entries,
+  required DateTime selectedDate,
+}) {
+  var latestMinute = closeMinute;
+
+  for (final entry in entries) {
+    if (entry.isCancelled || entry.isVoided || entry.isNoShow) continue;
+    if (entry.serviceEndMinutes <= entry.serviceStartMinutes) continue;
+    if (entry.cleanupEndMinutes > latestMinute) {
+      latestMinute = entry.cleanupEndMinutes;
+    }
+  }
+
+  final now = DateTime.now();
+  final dayOffset = _stripDate(now).difference(_stripDate(selectedDate)).inDays;
+  if (dayOffset == 0) {
+    final nowMinute = now.hour * 60 + now.minute;
+    if (nowMinute > latestMinute) latestMinute = nowMinute;
+  }
+
+  return _ceilToHour(latestMinute);
+}
+
+int? _timetableNowMinute({
+  required DateTime selectedDate,
+  required int canvasEndMinute,
+}) {
+  final now = DateTime.now();
+  final dayOffset = _stripDate(now).difference(_stripDate(selectedDate)).inDays;
+  if (dayOffset == 0) return now.hour * 60 + now.minute;
+  if (dayOffset == 1 && canvasEndMinute > 24 * 60) {
+    final minute = 24 * 60 + now.hour * 60 + now.minute;
+    if (minute <= canvasEndMinute) return minute;
+  }
+  return null;
 }
 
 class _MobileTimetable extends StatefulWidget {
@@ -5322,7 +5671,11 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
   late final ScrollController _scrollController;
 
   int get _canvasStartMinute => _floorToHour(widget.openMinute);
-  int get _canvasEndMinute => _ceilToHour(widget.closeMinute);
+  int get _canvasEndMinute => _timetableCanvasEndMinute(
+    closeMinute: widget.closeMinute,
+    entries: widget.entries,
+    selectedDate: widget.selectedDate,
+  );
 
   static int _visualEnd(_TimetableEntry entry) {
     final min = entry.serviceStartMinutes + minVisualMinutes;
@@ -5332,9 +5685,7 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
   @override
   void initState() {
     super.initState();
-    _scrollController = ScrollController(
-      initialScrollOffset: _initialOffset(),
-    );
+    _scrollController = ScrollController(initialScrollOffset: _initialOffset());
   }
 
   @override
@@ -5362,9 +5713,11 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
   }
 
   double _initialOffset() {
-    final now = DateTime.now();
-    if (_stripDate(widget.selectedDate) != _stripDate(now)) return 0;
-    final nowMinutes = now.hour * 60 + now.minute;
+    final nowMinutes = _timetableNowMinute(
+      selectedDate: widget.selectedDate,
+      canvasEndMinute: _canvasEndMinute,
+    );
+    if (nowMinutes == null) return 0;
     if (nowMinutes <= _canvasStartMinute) return 0;
     final target =
         topPad + (nowMinutes - _canvasStartMinute) * minuteHeight - 150;
@@ -5396,9 +5749,12 @@ class _MobileTimelineBoardState extends State<_MobileTimelineBoard> {
         topPad +
         (canvasEndMinute - canvasStartMinute) * minuteHeight +
         bottomPad;
-    final now = DateTime.now();
-    final nowMinutes = now.hour * 60 + now.minute;
-    final selectedToday = _stripDate(widget.selectedDate) == _stripDate(now);
+    final timelineNowMinute = _timetableNowMinute(
+      selectedDate: widget.selectedDate,
+      canvasEndMinute: canvasEndMinute,
+    );
+    final nowMinutes = timelineNowMinute ?? 0;
+    final selectedToday = timelineNowMinute != null;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -5709,10 +6065,7 @@ class _MobileTimelineNowLine extends StatelessWidget {
   final double top;
   final double contentWidth;
 
-  const _MobileTimelineNowLine({
-    required this.top,
-    required this.contentWidth,
-  });
+  const _MobileTimelineNowLine({required this.top, required this.contentWidth});
 
   @override
   Widget build(BuildContext context) {
@@ -5759,7 +6112,7 @@ class _MobileTimelineEntryCard extends StatelessWidget {
   });
 
   String get _resourceLabel =>
-      mode == 'rooms' ? entry.roomName : entry.staffName;
+      mode == 'rooms' ? entry.roomDisplayName : entry.staffName;
 
   @override
   Widget build(BuildContext context) {
@@ -5917,7 +6270,10 @@ class _MobileStatusPill extends StatelessWidget {
           Container(
             width: 6,
             height: 6,
-            decoration: BoxDecoration(color: style.color, shape: BoxShape.circle),
+            decoration: BoxDecoration(
+              color: style.color,
+              shape: BoxShape.circle,
+            ),
           ),
           const SizedBox(width: 5),
           Text(
@@ -6078,7 +6434,8 @@ class _MobileCollapseHandle extends StatelessWidget {
   }
 }
 
-String _mobileBandKey(List<_TimetableEntry> band) => band.map((e) => e.id).join(',');
+String _mobileBandKey(List<_TimetableEntry> band) =>
+    band.map((e) => e.id).join(',');
 
 int _groupStart(List<_TimetableEntry> group) =>
     group.map((e) => e.serviceStartMinutes).reduce((a, b) => a < b ? a : b);
@@ -6339,7 +6696,7 @@ class _MobileEntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = _statusStyle(entry);
-    final secondary = mode == 'staff' ? entry.roomName : entry.staffName;
+    final secondary = mode == 'staff' ? entry.roomDisplayName : entry.staffName;
     return SizedBox(
       width: width,
       child: Material(
@@ -6426,7 +6783,10 @@ class _MobileEntryCard extends StatelessWidget {
                 if (entry.bufferAfterMinutes > 0) ...[
                   const SizedBox(height: 5),
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 3,
+                    ),
                     decoration: BoxDecoration(
                       color: const Color(0xFFF1F3F5),
                       borderRadius: BorderRadius.circular(6),
@@ -6572,10 +6932,301 @@ class _MobileResourceChip extends StatelessWidget {
   }
 }
 
+class _TimetableTherapistSwitchOption {
+  final _TimetableTherapist therapist;
+  final bool isAvailable;
+  final String statusLabel;
+
+  const _TimetableTherapistSwitchOption({
+    required this.therapist,
+    required this.isAvailable,
+    required this.statusLabel,
+  });
+}
+
+class _TimetableTherapistSwitchSelection {
+  final String therapistId;
+  final String splitMethod;
+  final String reason;
+
+  const _TimetableTherapistSwitchSelection({
+    required this.therapistId,
+    required this.splitMethod,
+    required this.reason,
+  });
+}
+
+class _TimetableTherapistSwitchDialog extends StatefulWidget {
+  final String currentTherapistName;
+  final String requiredWindow;
+  final List<_TimetableTherapistSwitchOption> options;
+  final bool receivesFullCommission;
+
+  const _TimetableTherapistSwitchDialog({
+    required this.currentTherapistName,
+    required this.requiredWindow,
+    required this.options,
+    required this.receivesFullCommission,
+  });
+
+  @override
+  State<_TimetableTherapistSwitchDialog> createState() =>
+      _TimetableTherapistSwitchDialogState();
+}
+
+class _TimetableTherapistSwitchDialogState
+    extends State<_TimetableTherapistSwitchDialog> {
+  final _reasonController = TextEditingController();
+  String? _selectedId;
+  String _splitMethod = 'service_time';
+
+  @override
+  void initState() {
+    super.initState();
+    for (final option in widget.options) {
+      if (!option.isAvailable) continue;
+      _selectedId = option.therapist.id;
+      break;
+    }
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  void _confirm() {
+    final selectedId = _selectedId;
+    if (selectedId == null) return;
+    Navigator.pop(
+      context,
+      _TimetableTherapistSwitchSelection(
+        therapistId: selectedId,
+        splitMethod: _splitMethod,
+        reason: _reasonController.text.trim(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+      title: const Text('Switch Therapist'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${widget.currentTherapistName} will be released from the remaining service time.',
+              ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  const Icon(
+                    Icons.schedule_outlined,
+                    size: 18,
+                    color: Color(0xFF6B7280),
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Coverage needed: ${widget.requiredWindow}',
+                      style: const TextStyle(
+                        color: Color(0xFF6B7280),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text(
+                'Replacement therapist',
+                style: TextStyle(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 280),
+                child: ListView.separated(
+                  shrinkWrap: true,
+                  itemCount: widget.options.length,
+                  separatorBuilder: (_, _) => const SizedBox(height: 8),
+                  itemBuilder: (context, index) {
+                    final option = widget.options[index];
+                    final therapist = option.therapist;
+                    final selected = _selectedId == therapist.id;
+                    final statusColor = option.isAvailable
+                        ? _timetableAccent
+                        : const Color(0xFFB45309);
+                    return Material(
+                      color: option.isAvailable
+                          ? selected
+                                ? const Color(0xFFEAF5EF)
+                                : Colors.white
+                          : const Color(0xFFF8FAFC),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                        side: BorderSide(
+                          color: selected
+                              ? _timetableAccent
+                              : const Color(0xFFE5E7EB),
+                          width: selected ? 1.5 : 1,
+                        ),
+                      ),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: option.isAvailable
+                            ? () => setState(() => _selectedId = therapist.id)
+                            : null,
+                        child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Row(
+                            children: [
+                              CircleAvatar(
+                                radius: 20,
+                                backgroundColor: option.isAvailable
+                                    ? const Color(0xFFDDF2E7)
+                                    : const Color(0xFFE2E8F0),
+                                foregroundColor: option.isAvailable
+                                    ? _timetableAccent
+                                    : const Color(0xFF6B7280),
+                                child: Text(
+                                  therapist.initials,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(
+                                      therapist.name,
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                        color: option.isAvailable
+                                            ? const Color(0xFF0F172A)
+                                            : const Color(0xFF6B7280),
+                                      ),
+                                    ),
+                                    const SizedBox(height: 3),
+                                    Text(
+                                      option.statusLabel,
+                                      style: TextStyle(
+                                        color: statusColor,
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (selected)
+                                const Icon(
+                                  Icons.check_circle,
+                                  color: _timetableAccent,
+                                )
+                              else
+                                Icon(
+                                  option.isAvailable
+                                      ? Icons.radio_button_unchecked
+                                      : Icons.block_outlined,
+                                  color: option.isAvailable
+                                      ? const Color(0xFF6B7280)
+                                      : const Color(0xFFB45309),
+                                ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (_selectedId == null) ...[
+                const SizedBox(height: 10),
+                const Text(
+                  'No therapist can cover the remaining service without a conflict.',
+                  style: TextStyle(
+                    color: Color(0xFFB45309),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+              const SizedBox(height: 16),
+              if (widget.receivesFullCommission)
+                const Text(
+                  'The replacement receives 100% commission because the switch is before or within 15 minutes of service start.',
+                  style: TextStyle(fontWeight: FontWeight.w600),
+                )
+              else ...[
+                const Text(
+                  'Commission split',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 8),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(
+                      value: 'service_time',
+                      label: Text('By time'),
+                      icon: Icon(Icons.schedule_outlined),
+                    ),
+                    ButtonSegment(
+                      value: 'half',
+                      label: Text('50 / 50'),
+                      icon: Icon(Icons.balance_outlined),
+                    ),
+                  ],
+                  selected: {_splitMethod},
+                  onSelectionChanged: (selection) =>
+                      setState(() => _splitMethod = selection.first),
+                ),
+              ],
+              const SizedBox(height: 10),
+              TextField(
+                controller: _reasonController,
+                decoration: const InputDecoration(
+                  labelText: 'Reason (optional)',
+                  border: OutlineInputBorder(),
+                ),
+                maxLines: 2,
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _selectedId == null ? null : _confirm,
+          child: const Text('Switch'),
+        ),
+      ],
+    );
+  }
+}
+
 class _TimetableDetailSheet extends StatelessWidget {
   final _TimetableEntry entry;
+  final Future<bool> Function()? onStart;
+  final Future<bool> Function()? onSwitchTherapist;
 
-  const _TimetableDetailSheet({required this.entry});
+  const _TimetableDetailSheet({
+    required this.entry,
+    this.onStart,
+    this.onSwitchTherapist,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -6605,6 +7256,8 @@ class _TimetableDetailSheet extends StatelessWidget {
                   child: _TimetableDetailCard(
                     entry: entry,
                     onClose: () => Navigator.pop(context),
+                    onStart: onStart,
+                    onSwitchTherapist: onSwitchTherapist,
                     compact: true,
                   ),
                 ),
@@ -6617,22 +7270,41 @@ class _TimetableDetailSheet extends StatelessWidget {
   }
 }
 
-class _TimetableDetailCard extends StatelessWidget {
+class _TimetableDetailCard extends StatefulWidget {
   final _TimetableEntry entry;
   final VoidCallback onClose;
+  final Future<bool> Function()? onStart;
+  final Future<bool> Function()? onSwitchTherapist;
   final bool compact;
 
   const _TimetableDetailCard({
     required this.entry,
     required this.onClose,
+    this.onStart,
+    this.onSwitchTherapist,
     this.compact = false,
   });
 
   @override
+  State<_TimetableDetailCard> createState() => _TimetableDetailCardState();
+}
+
+class _TimetableDetailCardState extends State<_TimetableDetailCard> {
+  bool _saving = false;
+
+  Future<void> _run(Future<bool> Function()? action) async {
+    if (_saving || action == null) return;
+    setState(() => _saving = true);
+    await action();
+    if (mounted) setState(() => _saving = false);
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final entry = widget.entry;
     final style = _statusStyle(entry);
     return Container(
-      padding: EdgeInsets.all(compact ? 20 : 22),
+      padding: EdgeInsets.all(widget.compact ? 20 : 22),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(8),
@@ -6656,7 +7328,11 @@ class _TimetableDetailCard extends StatelessWidget {
                   color: style.color,
                 ),
                 const Spacer(),
-                IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
+                IconButton(
+                  onPressed: widget.onClose,
+                  icon: const Icon(Icons.close),
+                  tooltip: 'Close',
+                ),
               ],
             ),
             const SizedBox(height: 12),
@@ -6716,7 +7392,7 @@ class _TimetableDetailCard extends StatelessWidget {
             _DetailRow(
               icon: Icons.meeting_room_outlined,
               label: 'Room / Zone',
-              title: entry.roomName,
+              title: entry.roomDisplayName,
             ),
             _DetailRow(
               icon: Icons.calendar_today_outlined,
@@ -6725,22 +7401,19 @@ class _TimetableDetailCard extends StatelessWidget {
             ),
             _DetailRow(
               icon: Icons.schedule_outlined,
-              // A walk-in has a single service time (no prior reservation),
-              // so it reads as "Start time" rather than "Booked time".
-              label: entry.isWalkIn ? 'Start time' : 'Booked time',
+              label: 'Booked time',
               title: entry.bookedTimeRange,
               subtitle: entry.bufferAfterMinutes > 0
                   ? entry.cleanupUntilLabel
                   : null,
             ),
-            // Actual start/complete timing is a booking concept; walk-ins run
-            // for their booked window and complete automatically.
-            if (!entry.isWalkIn && entry.actualStartedAt != null)
+            if (entry.actualStartedAt != null)
               _DetailRow(
                 icon: Icons.play_circle_outline,
                 label: 'Actual service time',
                 title: entry.actualServiceTimeRange,
-                subtitle: entry.actualServiceCompletionLabel,
+                subtitle:
+                    'Service duration: ${_compactDurationLabel(entry.scheduledServiceMinutes)}',
               ),
             _DetailRow(
               icon: Icons.payments_outlined,
@@ -6769,6 +7442,59 @@ class _TimetableDetailCard extends StatelessWidget {
                 label: 'Paid',
                 title: entry.paidLabel,
               ),
+            ],
+            if (entry.canStartService || entry.canSwitchTherapist) ...[
+              const Divider(height: 26),
+              if (entry.canStartService)
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: FilledButton.icon(
+                    onPressed: _saving ? null : () => _run(widget.onStart),
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 17,
+                            height: 17,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.play_arrow_rounded),
+                    label: const Text('Start Service'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: _timetableAccent,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ),
+              if (entry.canSwitchTherapist)
+                SizedBox(
+                  width: double.infinity,
+                  height: 48,
+                  child: OutlinedButton.icon(
+                    onPressed: _saving
+                        ? null
+                        : () => _run(widget.onSwitchTherapist),
+                    icon: _saving
+                        ? const SizedBox(
+                            width: 17,
+                            height: 17,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.swap_horiz_rounded),
+                    label: const Text('Switch Therapist'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: _timetableAccent,
+                      side: const BorderSide(color: _timetableAccent),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ),
             ],
           ],
         ),
@@ -7096,9 +7822,9 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
   }
   if (entry.isCompleted) {
     return const _StatusStyle(
-      color: Color(0xFF059669),
-      background: Color(0xFFF0FDF4),
-      border: Color(0xFF86EFAC),
+      color: Color(0xFF047857),
+      background: Color(0xFFE7F8EF),
+      border: Color(0xFF34D399),
     );
   }
   if (entry.isLateArrival) {
@@ -7150,10 +7876,9 @@ int _readServiceCount(Object? raw, String fallbackLabel) {
   void addName(Object? value) {
     if (value == null) return;
     if (value is Map) {
-      final name =
-          asString(value['name']).isNotEmpty
-              ? asString(value['name'])
-              : asString(value['serviceName']);
+      final name = asString(value['name']).isNotEmpty
+          ? asString(value['name'])
+          : asString(value['serviceName']);
       if (name.trim().isNotEmpty) names.add(name.trim().toLowerCase());
       return;
     }

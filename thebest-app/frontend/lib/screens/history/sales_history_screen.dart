@@ -189,6 +189,22 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         if (groupId.isEmpty) continue;
         appointmentsByGroup.putIfAbsent(groupId, () => []).add(appointment);
       }
+      final allocationRows = await _appointmentRepository
+          .therapistAllocationsForAppointments([
+            ...appointments.keys,
+            ...groupAppointmentRows.map((row) => _asString(row['id'])),
+          ]);
+      final allocationsByAppointment =
+          <String, List<Map<String, dynamic>>>{};
+      for (final allocation in allocationRows) {
+        final appointmentId = _asString(
+          allocation['appointmentId'] ?? allocation['appointment_id'],
+        );
+        if (appointmentId.isEmpty) continue;
+        allocationsByAppointment
+            .putIfAbsent(appointmentId, () => [])
+            .add(allocation);
+      }
       final linkedCustomerIds = appointments.values
           .map((d) => _asString(d['customerId']))
           .where((id) => id.isNotEmpty);
@@ -205,11 +221,6 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
           ).map((item) => _asString(item['id'], _asString(item['serviceId']))),
         ),
       ].where((id) => id.isNotEmpty);
-      final therapistIds = [
-        ...transactionData.map((d) => _asString(d['therapistId'])),
-        ...appointments.values.map((d) => _asString(d['therapistId'])),
-        ...groupAppointmentRows.map((d) => _asString(d['therapistId'])),
-      ].where((id) => id.isNotEmpty);
       final roomIds = [
         ...transactionData.map((d) => _asString(d['roomId'])),
         ...appointments.values.map((d) => _asString(d['roomId'])),
@@ -222,7 +233,11 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         ...groupCustomerIds,
       ]);
       final services = await _loadDocMap('services', serviceIds);
-      final therapists = await _loadDocMap('therapists', therapistIds);
+      final therapistRows = await _dashboardRepository.listTherapists();
+      final therapists = {
+        for (final therapist in therapistRows)
+          _asString(therapist['id']): therapist,
+      }..remove('');
       final rooms = await _loadDocMap('rooms', roomIds);
 
       final orders = transactionDocs
@@ -235,6 +250,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
               services: services,
               therapists: therapists,
               rooms: rooms,
+              allocationsByAppointment: allocationsByAppointment,
             ),
           )
           .where(
@@ -353,8 +369,65 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         order: order,
         isAdmin: _isAdmin,
         onVoid: () => _voidOrder(order),
+        onEditTherapists: () => _editTherapistAllocations(order),
       ),
     );
+  }
+
+  Future<void> _editTherapistAllocations(_HistoryOrder order) async {
+    final appointmentIds = order.linkedAppointmentIds;
+    if (!_isAdmin || appointmentIds.isEmpty) return;
+    var appointmentId = appointmentIds.first;
+    if (appointmentIds.length > 1) {
+      final selected = await showDialog<String>(
+        context: context,
+        builder: (context) => SimpleDialog(
+          title: const Text('Select service'),
+          children: [
+            for (var index = 0; index < appointmentIds.length; index++)
+              SimpleDialogOption(
+                onPressed: () => Navigator.pop(context, appointmentIds[index]),
+                child: Text('Pax ${index + 1} service'),
+              ),
+          ],
+        ),
+      );
+      if (selected == null || !mounted) return;
+      appointmentId = selected;
+    }
+
+    final existing = await _appointmentRepository.therapistAllocations(
+      appointmentId,
+    );
+    if (!mounted) return;
+    final saved = await showDialog<_TherapistAllocationEdit>(
+      context: context,
+      builder: (context) => _TherapistAllocationDialog(
+        therapists: _therapists,
+        existing: existing,
+      ),
+    );
+    if (saved == null || !mounted) return;
+    try {
+      await _appointmentRepository.setCompletedTherapistAllocations(
+        appointmentId: appointmentId,
+        allocations: saved.allocations,
+        reason: saved.reason,
+      );
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      await _loadHistory();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Therapist commission updated')),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Unable to update commission: $error')),
+        );
+      }
+    }
   }
 
   Future<void> _voidOrder(_HistoryOrder order) async {
@@ -609,6 +682,7 @@ class _HistoryOrder {
   final String receiptNumber;
   final String appointmentId;
   final String appointmentGroupId;
+  final List<String> linkedAppointmentIds;
   final String source;
   final String customerId;
   final String customerName;
@@ -622,6 +696,7 @@ class _HistoryOrder {
   final int itemCount;
   final List<_HistoryServiceGroup> serviceGroups;
   final List<Map<String, dynamic>> rawServiceItems;
+  final List<Map<String, dynamic>> therapistAllocations;
   final double servicePrice;
   final double sstAmount;
   final double totalAmount;
@@ -637,6 +712,7 @@ class _HistoryOrder {
     required this.receiptNumber,
     required this.appointmentId,
     required this.appointmentGroupId,
+    required this.linkedAppointmentIds,
     required this.source,
     required this.customerId,
     required this.customerName,
@@ -650,6 +726,7 @@ class _HistoryOrder {
     required this.itemCount,
     required this.serviceGroups,
     required this.rawServiceItems,
+    required this.therapistAllocations,
     required this.servicePrice,
     required this.sstAmount,
     required this.totalAmount,
@@ -669,6 +746,8 @@ class _HistoryOrder {
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
+    required Map<String, List<Map<String, dynamic>>>
+        allocationsByAppointment,
   }) {
     final appointmentId = _asString(tx['appointmentId']);
     final appointmentGroupId = _asString(tx['appointmentGroupId']);
@@ -695,9 +774,9 @@ class _HistoryOrder {
     final serviceId = _asString(tx['serviceId']).isNotEmpty
         ? _asString(tx['serviceId'])
         : _asString(appointment['serviceId']);
-    final therapistId = _asString(tx['therapistId']).isNotEmpty
-        ? _asString(tx['therapistId'])
-        : _asString(appointment['therapistId']);
+    final therapistId = _asString(appointment['therapistId']).isNotEmpty
+        ? _asString(appointment['therapistId'])
+        : _asString(tx['therapistId']);
     final roomId = _asString(tx['roomId']).isNotEmpty
         ? _asString(tx['roomId'])
         : _asString(appointment['roomId']);
@@ -772,11 +851,11 @@ class _HistoryOrder {
       _asString(service['name'], 'Service'),
     );
     final therapistName = _asString(
-      tx['therapistName'],
-      _asString(therapist['name'], '-'),
+      therapist['name'],
+      _asString(tx['therapistName'], '-'),
     );
     final roomName = _asString(tx['roomName'], _asString(room['name'], '-'));
-    final serviceGroups = _HistoryServiceGroup.fromItems(
+    final baseServiceGroups = _HistoryServiceGroup.fromItems(
       rawItems,
       fallbackCustomerName: customerName,
       fallbackServiceName: serviceName,
@@ -784,12 +863,82 @@ class _HistoryOrder {
       fallbackRoomName: roomName,
       fallbackAmount: servicePrice,
     );
+    final linkedAppointmentRows = appointmentId.isNotEmpty
+        ? [appointment]
+        : List<Map<String, dynamic>>.from(groupAppointments)
+      ..sort((left, right) {
+        final leftCreated = _tryDateTime(
+          left['createdAt'] ?? left['created_at'],
+        );
+        final rightCreated = _tryDateTime(
+          right['createdAt'] ?? right['created_at'],
+        );
+        return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
+            .compareTo(rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0));
+      });
+    final serviceGroups = <_HistoryServiceGroup>[];
+    for (var index = 0; index < baseServiceGroups.length; index++) {
+      final baseGroup = baseServiceGroups[index];
+      if (index >= linkedAppointmentRows.length) {
+        serviceGroups.add(baseGroup);
+        continue;
+      }
+      final linkedAppointment = linkedAppointmentRows[index];
+      final linkedId = _asString(linkedAppointment['id']);
+      final allocationRows = List<Map<String, dynamic>>.from(
+        allocationsByAppointment[linkedId] ?? const [],
+      )..sort((left, right) {
+          final leftCreated = _tryDateTime(
+            left['createdAt'] ?? left['created_at'],
+          );
+          final rightCreated = _tryDateTime(
+            right['createdAt'] ?? right['created_at'],
+          );
+          return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
+              .compareTo(
+                rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0),
+              );
+        });
+      final allocationNames = <String>[];
+      for (final allocation in allocationRows) {
+        final share = _asDouble(
+          allocation['commissionShare'] ?? allocation['commission_share'],
+        );
+        if (share <= 0) continue;
+        final allocationTherapistId = _asString(
+          allocation['therapistId'] ?? allocation['therapist_id'],
+        );
+        final name = _asString(therapists[allocationTherapistId]?['name']);
+        if (name.isNotEmpty && !allocationNames.contains(name)) {
+          allocationNames.add(name);
+        }
+      }
+      if (allocationNames.isEmpty) {
+        final currentTherapistId = _asString(
+          linkedAppointment['therapistId'],
+        );
+        final currentName = _asString(
+          therapists[currentTherapistId]?['name'],
+          baseGroup.therapistName,
+        );
+        if (currentName.isNotEmpty) allocationNames.add(currentName);
+      }
+      serviceGroups.add(
+        baseGroup.copyWithTherapistNames(allocationNames),
+      );
+    }
 
     return _HistoryOrder(
       id: _asString(tx['id']),
       receiptNumber: _asString(tx['receiptNumber'], _asString(tx['id'])),
       appointmentId: appointmentId,
       appointmentGroupId: appointmentGroupId,
+      linkedAppointmentIds: appointmentId.isNotEmpty
+          ? [appointmentId]
+          : groupAppointments
+              .map((item) => _asString(item['id']))
+              .where((id) => id.isNotEmpty)
+              .toList(),
       source: source,
       customerId: customerId,
       customerName: customerName,
@@ -803,6 +952,12 @@ class _HistoryOrder {
       itemCount: itemCount <= 0 ? 1 : itemCount,
       serviceGroups: serviceGroups,
       rawServiceItems: rawItems,
+      therapistAllocations: [
+        if (appointmentId.isNotEmpty)
+          ...(allocationsByAppointment[appointmentId] ?? const []),
+        for (final item in groupAppointments)
+          ...(allocationsByAppointment[_asString(item['id'])] ?? const []),
+      ],
       servicePrice: servicePrice,
       sstAmount: _asDouble(tx['sstAmount']),
       totalAmount: _asDouble(
@@ -872,6 +1027,7 @@ class _HistoryServiceGroup {
   final String customerName;
   final List<String> services;
   final String therapistName;
+  final List<String> therapistNames;
   final String roomName;
   final String startTime;
   final String endTime;
@@ -882,6 +1038,7 @@ class _HistoryServiceGroup {
     required this.customerName,
     required this.services,
     required this.therapistName,
+    required this.therapistNames,
     required this.roomName,
     required this.startTime,
     required this.endTime,
@@ -890,6 +1047,21 @@ class _HistoryServiceGroup {
 
   String get serviceLabel =>
       services.isEmpty ? 'Service' : services.join(', ');
+
+  _HistoryServiceGroup copyWithTherapistNames(List<String> names) {
+    final resolved = names.where((name) => name.trim().isNotEmpty).toList();
+    return _HistoryServiceGroup(
+      paxNumber: paxNumber,
+      customerName: customerName,
+      services: services,
+      therapistName: resolved.isEmpty ? therapistName : resolved.first,
+      therapistNames: resolved.isEmpty ? [therapistName] : resolved,
+      roomName: roomName,
+      startTime: startTime,
+      endTime: endTime,
+      amount: amount,
+    );
+  }
 
   String get timeLabel {
     if (startTime.isEmpty && endTime.isEmpty) return '';
@@ -912,6 +1084,7 @@ class _HistoryServiceGroup {
           customerName: fallbackCustomerName,
           services: [fallbackServiceName],
           therapistName: fallbackTherapistName,
+          therapistNames: [fallbackTherapistName],
           roomName: fallbackRoomName,
           startTime: '',
           endTime: '',
@@ -954,6 +1127,12 @@ class _HistoryServiceGroup {
           first['assignedTherapistName'],
           fallbackTherapistName,
         ),
+        therapistNames: [
+          _asString(
+            first['assignedTherapistName'],
+            fallbackTherapistName,
+          ),
+        ],
         roomName: _asString(first['assignedRoomName'], fallbackRoomName),
         startTime: _asString(first['startTime']),
         endTime: _asString(first['endTime']),
@@ -2060,11 +2239,13 @@ class _OrderDetailSheet extends StatelessWidget {
   final _HistoryOrder order;
   final bool isAdmin;
   final VoidCallback onVoid;
+  final VoidCallback onEditTherapists;
 
   const _OrderDetailSheet({
     required this.order,
     required this.isAdmin,
     required this.onVoid,
+    required this.onEditTherapists,
   });
 
   @override
@@ -2135,6 +2316,25 @@ class _OrderDetailSheet extends StatelessWidget {
             _DetailRow('Service Net', _money(order.servicePrice)),
             _DetailRow('SST', _money(order.sstAmount)),
             _DetailRow('Total', _money(order.totalAmount), strong: true),
+            if (isAdmin && order.isServiceCompleted && !order.isVoided) ...[
+              const SizedBox(height: 18),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: onEditTherapists,
+                  icon: const Icon(Icons.group_add_outlined, size: 18),
+                  label: const Text('Edit Therapist Commission'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: _teal,
+                    side: const BorderSide(color: _teal),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                ),
+              ),
+            ],
             if (isAdmin && !order.isVoided) ...[
               const SizedBox(height: 18),
               SizedBox(
@@ -2163,6 +2363,281 @@ class _OrderDetailSheet extends StatelessWidget {
       ),
     );
   }
+}
+
+class _TherapistAllocationEdit {
+  const _TherapistAllocationEdit({
+    required this.allocations,
+    required this.reason,
+  });
+
+  final List<Map<String, dynamic>> allocations;
+  final String reason;
+}
+
+class _TherapistAllocationDialog extends StatefulWidget {
+  const _TherapistAllocationDialog({
+    required this.therapists,
+    required this.existing,
+  });
+
+  final Map<String, Map<String, dynamic>> therapists;
+  final List<Map<String, dynamic>> existing;
+
+  @override
+  State<_TherapistAllocationDialog> createState() =>
+      _TherapistAllocationDialogState();
+}
+
+class _TherapistAllocationDialogState
+    extends State<_TherapistAllocationDialog> {
+  final _reasonController = TextEditingController();
+  late final List<_EditableTherapistShare> _shares;
+
+  @override
+  void initState() {
+    super.initState();
+    _shares = widget.existing
+        .map(
+          (row) => _EditableTherapistShare(
+            therapistId: _asString(
+              row['therapistId'] ?? row['therapist_id'],
+            ),
+            percent: (_asDouble(
+                      row['commissionShare'] ?? row['commission_share'],
+                    ) *
+                    100)
+                .round(),
+          ),
+        )
+        .where((share) => share.therapistId.isNotEmpty)
+        .toList();
+    if (_shares.isEmpty && widget.therapists.isNotEmpty) {
+      _shares.add(
+        _EditableTherapistShare(
+          therapistId: '',
+          percent: 100,
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _reasonController.dispose();
+    super.dispose();
+  }
+
+  void _equalize() {
+    if (_shares.isEmpty) return;
+    final base = 100 ~/ _shares.length;
+    var remaining = 100;
+    for (var index = 0; index < _shares.length; index++) {
+      final value = index == _shares.length - 1 ? remaining : base;
+      _shares[index].percent = value;
+      remaining -= value;
+    }
+  }
+
+  void _addTherapist() {
+    if (_shares.any((share) => share.therapistId.isEmpty)) return;
+    final used = _shares
+        .map((share) => share.therapistId)
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    final available = widget.therapists.keys.where((id) => !used.contains(id));
+    if (available.isEmpty) return;
+    setState(() {
+      _shares.add(
+        _EditableTherapistShare(
+          therapistId: '',
+          percent: 0,
+        ),
+      );
+    });
+  }
+
+  void _removeTherapist(int index) {
+    if (_shares.length <= 1) return;
+    setState(() {
+      _shares.removeAt(index);
+      _equalize();
+    });
+  }
+
+  void _submit() {
+    final reason = _reasonController.text.trim();
+    if (_shares.any((share) => share.therapistId.isEmpty)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Choose a therapist for every row')),
+      );
+      return;
+    }
+    final total = _shares.fold<int>(0, (sum, share) => sum + share.percent);
+    if (total != 100) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Commission must total 100%')),
+      );
+      return;
+    }
+    Navigator.pop(
+      context,
+      _TherapistAllocationEdit(
+        reason: reason,
+        allocations: _shares
+            .map(
+              (share) => {
+                'therapist_id': share.therapistId,
+                'commission_share': share.percent / 100,
+              },
+            )
+            .toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final total = _shares.fold<int>(0, (sum, share) => sum + share.percent);
+    final selectedTherapistIds = _shares
+        .map((share) => share.therapistId)
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    final canAddTherapist =
+        !_shares.any((share) => share.therapistId.isEmpty) &&
+        selectedTherapistIds.length < widget.therapists.length;
+    return AlertDialog(
+      title: const Text('Edit therapist commission'),
+      content: SizedBox(
+        width: 520,
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var index = 0; index < _shares.length; index++) ...[
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey(_shares[index]),
+                        initialValue: _shares[index].therapistId.isEmpty
+                            ? null
+                            : _shares[index].therapistId,
+                        decoration: const InputDecoration(
+                          labelText: 'Therapist',
+                          hintText: 'Select therapist',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: widget.therapists.entries
+                            .where(
+                              (entry) =>
+                                  entry.key == _shares[index].therapistId ||
+                                  !_shares.any(
+                                    (share) => share.therapistId == entry.key,
+                                  ),
+                            )
+                            .map(
+                              (entry) => DropdownMenuItem(
+                                value: entry.key,
+                                child: Text(_asString(entry.value['name'])),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (value) {
+                          if (value != null) {
+                            setState(() {
+                              _shares[index].therapistId = value;
+                              _equalize();
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    SizedBox(
+                      width: 105,
+                      child: DropdownButtonFormField<int>(
+                        initialValue: _shares[index].percent,
+                        decoration: const InputDecoration(
+                          labelText: 'Share',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          for (final percent in (
+                            {0, 25, 50, 75, 100, _shares[index].percent}
+                                  .toList()
+                              ..sort()
+                          ))
+                            DropdownMenuItem(
+                              value: percent,
+                              child: Text('$percent%'),
+                            ),
+                        ],
+                        onChanged: (value) {
+                          if (value != null) {
+                            setState(() => _shares[index].percent = value);
+                          }
+                        },
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Remove therapist',
+                      onPressed: _shares.length > 1
+                          ? () => _removeTherapist(index)
+                          : null,
+                      icon: const Icon(Icons.remove_circle_outline),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+              ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: canAddTherapist ? _addTherapist : null,
+                  icon: const Icon(Icons.add),
+                  label: const Text('Add therapist'),
+                ),
+              ),
+              Text(
+                'Total: $total%',
+                style: TextStyle(
+                  color: total == 100 ? _teal : const Color(0xFFE53935),
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _reasonController,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Correction reason (optional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: const Text('Save')),
+      ],
+    );
+  }
+}
+
+class _EditableTherapistShare {
+  _EditableTherapistShare({
+    required this.therapistId,
+    required this.percent,
+  });
+
+  String therapistId;
+  int percent;
 }
 
 class _DetailRow extends StatelessWidget {
@@ -2270,11 +2745,14 @@ class _ServiceGroupCard extends StatelessWidget {
             label: 'Service',
             value: group.serviceLabel,
           ),
-          _ServiceDetailLine(
-            icon: Icons.person_outline,
-            label: 'Therapist',
-            value: group.therapistName,
-          ),
+          for (var index = 0; index < group.therapistNames.length; index++)
+            _ServiceDetailLine(
+              icon: Icons.person_outline,
+              label: group.therapistNames.length == 1
+                  ? 'Therapist'
+                  : 'Therapist ${index + 1}',
+              value: group.therapistNames[index],
+            ),
           _ServiceDetailLine(
             icon: Icons.meeting_room_outlined,
             label: 'Room / Zone',
@@ -3625,6 +4103,36 @@ class _StaffCommissionScreen extends StatelessWidget {
     for (final order in orders.where(
       (order) => !order.isVoided && order.isServiceCompleted,
     )) {
+      if (order.therapistAllocations.isNotEmpty) {
+        for (final allocation in order.therapistAllocations) {
+          final therapistId = _asString(
+            allocation['therapistId'] ?? allocation['therapist_id'],
+          );
+          if (therapistId.isEmpty) continue;
+          final therapistName = _asString(
+            therapists[therapistId]?['name'],
+            'Therapist',
+          );
+          final commission = _asDouble(
+            allocation['commissionAmount'] ?? allocation['commission_amount'],
+          );
+          if (commission <= 0) continue;
+          final earning = earnings.putIfAbsent(
+            therapistId,
+            () => _StaffEarning(id: therapistId, name: therapistName),
+          );
+          earning.commission += commission;
+          earning.serviceCount += 1;
+          earning.lines.add(
+            _StaffOrderLine(
+              order: order,
+              items: order.rawServiceItems,
+              commission: commission,
+            ),
+          );
+        }
+        continue;
+      }
       final items = order.rawServiceItems.isNotEmpty
           ? order.rawServiceItems
           : [
@@ -3717,7 +4225,9 @@ class _StaffCommissionScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final earnings = _computeEarnings().values.toList()
+    final earnings = _computeEarnings().values
+        .where((earning) => earning.commission > 0)
+        .toList()
       ..sort((a, b) => b.commission.compareTo(a.commission));
     final totalCommission = earnings.fold<double>(
       0,

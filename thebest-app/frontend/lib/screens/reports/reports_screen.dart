@@ -254,6 +254,21 @@ Future<_ReportSnapshot> _loadReportSnapshot({
     if (groupId.isEmpty) continue;
     appointmentsByGroup.putIfAbsent(groupId, () => []).add(appointment);
   }
+  final allocationRows = await appointmentRepository
+      .therapistAllocationsForAppointments([
+        ...appointments.keys,
+        ...groupAppointments.map((row) => _asString(row['id'])),
+      ]);
+  final allocationsByAppointment = <String, List<Map<String, dynamic>>>{};
+  for (final allocation in allocationRows) {
+    final appointmentId = _asString(
+      allocation['appointmentId'] ?? allocation['appointment_id'],
+    );
+    if (appointmentId.isEmpty) continue;
+    allocationsByAppointment
+        .putIfAbsent(appointmentId, () => [])
+        .add(allocation);
+  }
   final services = await serviceRepository.listServices();
   final staff = await therapistRepository.listTherapists();
   final servicesById = {
@@ -271,6 +286,7 @@ Future<_ReportSnapshot> _loadReportSnapshot({
           appointmentsByGroup: appointmentsByGroup,
           services: servicesById,
           staff: staffById,
+          allocationsByAppointment: allocationsByAppointment,
         ),
       )
       .where(
@@ -516,6 +532,7 @@ class _ReportOrder {
   final String counterStaffName;
   final String paymentMethod;
   final List<_ReportServiceItem> serviceItems;
+  final List<Map<String, dynamic>> therapistAllocations;
   final double serviceNet;
   final double sstAmount;
   final double totalAmount;
@@ -537,6 +554,7 @@ class _ReportOrder {
     required this.counterStaffName,
     required this.paymentMethod,
     required this.serviceItems,
+    required this.therapistAllocations,
     required this.serviceNet,
     required this.sstAmount,
     required this.totalAmount,
@@ -553,6 +571,8 @@ class _ReportOrder {
     required Map<String, List<Map<String, dynamic>>> appointmentsByGroup,
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> staff,
+    required Map<String, List<Map<String, dynamic>>>
+        allocationsByAppointment,
   }) {
     final appointmentId = _asString(transaction['appointmentId']);
     final appointmentGroupId = _asString(transaction['appointmentGroupId']);
@@ -667,6 +687,12 @@ class _ReportOrder {
       ),
       paymentMethod: _asString(transaction['paymentMethod'], 'other'),
       serviceItems: serviceItems,
+      therapistAllocations: [
+        if (appointmentId.isNotEmpty)
+          ...(allocationsByAppointment[appointmentId] ?? const []),
+        for (final item in groupAppointments)
+          ...(allocationsByAppointment[_asString(item['id'])] ?? const []),
+      ],
       serviceNet: serviceNet,
       sstAmount: sstAmount,
       totalAmount: totalAmount <= 0 ? serviceNet : totalAmount,
@@ -919,7 +945,7 @@ class _ReportData {
       );
       var calculatedTherapistCommission = 0.0;
       var calculatedCounterCommission = 0.0;
-      var hasAssignedServiceStaff = false;
+      var hasAssignedServiceStaff = order.therapistAllocations.isNotEmpty;
 
       for (final item in order.serviceItems) {
         final serviceKey = item.id.isNotEmpty
@@ -947,7 +973,7 @@ class _ReportData {
           item.assignedTherapistId,
           item.assignedTherapistName,
         );
-        if (itemStaffId.isNotEmpty) {
+        if (itemStaffId.isNotEmpty && order.therapistAllocations.isEmpty) {
           hasAssignedServiceStaff = true;
           final itemStaff = staff[itemStaffId] ?? <String, dynamic>{};
           final itemStaffRole = _normalizeRole(
@@ -994,6 +1020,33 @@ class _ReportData {
             staffRole: 'Counter',
           );
         }
+      }
+      for (final allocation in order.therapistAllocations) {
+        final allocationStaffId = _asString(
+          allocation['therapistId'] ?? allocation['therapist_id'],
+        );
+        if (allocationStaffId.isEmpty) continue;
+        final allocationStaff =
+            staff[allocationStaffId] ?? <String, dynamic>{};
+        final share = _asDouble(
+          allocation['commissionShare'] ?? allocation['commission_share'],
+        );
+        final amount = _asDouble(
+          allocation['commissionAmount'] ?? allocation['commission_amount'],
+        );
+        final entry = staffTotals.putIfAbsent(
+          allocationStaffId,
+          () => _MutableStaffCommission(
+            id: allocationStaffId,
+            name: _asString(allocationStaff['name'], 'Therapist'),
+            role: _normalizeRole(allocationStaff['role']),
+          ),
+        );
+        entry
+          ..commission += amount
+          ..jobs += 1
+          ..sales += order.serviceNet * share;
+        staffCommission += amount;
       }
       final orderStaffCommission = order.therapistCommissionAmount > 0
           ? order.therapistCommissionAmount
@@ -3930,7 +3983,26 @@ List<_StaffOrderRecord> _recordsForStaff({
       commission += _counterPoolCommissionForOrder(order, services);
       if (commission > 0) roles.add('Counter Commission');
     } else {
-      if (assignedItems.isNotEmpty) {
+      final storedAllocations = order.therapistAllocations.where(
+        (allocation) =>
+            _asString(
+              allocation['therapistId'] ?? allocation['therapist_id'],
+            ) ==
+            staff.id,
+      );
+      if (storedAllocations.isNotEmpty) {
+        commission += storedAllocations.fold<double>(
+          0,
+          (total, allocation) =>
+              total +
+              _asDouble(
+                allocation['commissionAmount'] ??
+                    allocation['commission_amount'],
+              ),
+        );
+        roles.add('Therapist');
+      } else if (order.therapistAllocations.isEmpty &&
+          assignedItems.isNotEmpty) {
         for (final item in assignedItems) {
           commission += _commissionForItem(
             item,
@@ -3940,7 +4012,7 @@ List<_StaffOrderRecord> _recordsForStaff({
           );
         }
         roles.add('Therapist');
-      } else if (therapistMatches) {
+      } else if (order.therapistAllocations.isEmpty && therapistMatches) {
         commission += _therapistCommissionForOrder(
           order,
           services,

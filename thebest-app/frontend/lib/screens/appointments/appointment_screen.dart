@@ -132,6 +132,7 @@ class _ScheduleAppointment {
   final String serviceDescription;
   final String therapistId;
   final String therapistName;
+  final List<String> therapistNames;
   final String roomId;
   final String roomName;
   final String notes;
@@ -170,6 +171,7 @@ class _ScheduleAppointment {
     required this.serviceDescription,
     required this.therapistId,
     required this.therapistName,
+    required this.therapistNames,
     required this.roomId,
     required this.roomName,
     required this.notes,
@@ -191,6 +193,7 @@ class _ScheduleAppointment {
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
     Map<String, dynamic>? transaction,
+    List<Map<String, dynamic>> therapistAllocations = const [],
     required int lateGraceMinutes,
     required int delayWarningMinutes,
   }) {
@@ -210,6 +213,34 @@ class _ScheduleAppointment {
     final customerName = isGuestCustomer && _isGuestName(rawCustomerName)
         ? 'Guest'
         : rawCustomerName ?? 'Customer';
+    final allocationRows = List<Map<String, dynamic>>.from(
+      therapistAllocations,
+    )..sort((left, right) {
+        final leftCreated = _readDateTime(
+          left['createdAt'] ?? left['created_at'],
+        );
+        final rightCreated = _readDateTime(
+          right['createdAt'] ?? right['created_at'],
+        );
+        return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
+            .compareTo(rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0));
+      });
+    final allocationNames = <String>[];
+    for (final allocation in allocationRows) {
+      final allocationTherapistId =
+          allocation['therapistId']?.toString() ??
+          allocation['therapist_id']?.toString() ??
+          '';
+      final name = therapists[allocationTherapistId]?['name']?.toString() ?? '';
+      if (name.isNotEmpty && !allocationNames.contains(name)) {
+        allocationNames.add(name);
+      }
+    }
+    final primaryTherapistName =
+        data['therapistName']?.toString() ??
+        therapist?['name']?.toString() ??
+        'Unassigned';
+    if (allocationNames.isEmpty) allocationNames.add(primaryTherapistName);
 
     return _ScheduleAppointment(
       id: data['id']?.toString() ?? '',
@@ -256,10 +287,8 @@ class _ScheduleAppointment {
           service?['description']?.toString() ??
           'Wellness treatment',
       therapistId: therapistId,
-      therapistName:
-          data['therapistName']?.toString() ??
-          therapist?['name']?.toString() ??
-          'Unassigned',
+      therapistName: primaryTherapistName,
+      therapistNames: allocationNames,
       roomId: roomId,
       roomName:
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
@@ -414,16 +443,18 @@ class _ScheduleAppointment {
   String get bookedTimeRange =>
       '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
   bool get hasActualTiming => actualStartedAt != null;
-  DateTime? get actualServiceEndAt => actualStartedAt
-      ?.toLocal()
-      .add(Duration(minutes: scheduledServiceMinutes));
+  DateTime? get actualServiceEndAt => actualStartedAt == null
+      ? null
+      : endAt?.toLocal() ??
+            actualStartedAt!
+                .toLocal()
+                .add(Duration(minutes: scheduledServiceMinutes));
   String get actualServiceTimeRange {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
     if (started == null || ended == null) return '';
     return '${DateFormat('h:mm a').format(started)} - '
-        '${DateFormat('h:mm a').format(ended)} '
-        '(${_durationLabel(scheduledServiceMinutes)})';
+        '${DateFormat('h:mm a').format(ended)}';
   }
   String? get actualServiceCompletionLabel => null;
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
@@ -463,8 +494,8 @@ class _ScheduleAppointment {
 
   bool get serviceWindowEnded => DateTime.now().isAfter(_serviceEndDateTime);
   bool get isServiceDateToday => _stripTime(date) == _stripTime(DateTime.now());
-  // Staff may check a customer in up to 30 minutes before the scheduled start
-  // (early arrival). Mirrors the server guard in migration 050.
+  // Used for arrival/status messaging. Starting itself is permitted at any
+  // time on the appointment date.
   bool get isServiceStartDue => !DateTime.now().isBefore(
     _serviceStartDateTime.subtract(const Duration(minutes: 30)),
   );
@@ -480,15 +511,11 @@ class _ScheduleAppointment {
     if (status == 'completed') return true;
     // Paid services auto-complete once their booked window has passed after
     // check-in/start. Walk-ins keep their original automatic completion rule.
-    return (status == 'in_progress' || isWalkIn) &&
-        hasPayment &&
-        serviceWindowEnded;
+    return status == 'in_progress' && hasPayment && serviceWindowEnded;
   }
 
   bool get isInProgress {
     if (isCancelled || isNoShow || isCompleted) return false;
-    // A paid walk-in is the service happening now, until its window ends.
-    if (isWalkIn) return hasPayment;
     return status == 'in_progress';
   }
 
@@ -496,11 +523,11 @@ class _ScheduleAppointment {
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
   // Staff only need to confirm payment or check in; completion is automatic.
   bool get canAdvance =>
-      isPending && !isWalkIn && isServiceDateToday && isServiceStartDue;
+      isPending && isServiceDateToday;
   // payment_status on the appointment (043) is the single source of truth.
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
   bool get isRefunded => paymentStatus.toLowerCase() == 'refunded';
-  bool get isAwaiting => isPending && hasPayment && !isWalkIn;
+  bool get isAwaiting => isPending && hasPayment;
   String get durationLabel => _durationLabel(displayDurationMinutes);
   bool get isGuestAccount =>
       customerId.trim().isEmpty || customerId == 'walk_in_guest';
@@ -539,7 +566,9 @@ class _ScheduleAppointment {
     if (isCancelled) return 'Cancelled';
     if (isNoShow) return 'No Show';
     if (arrivalDelayLabel.isNotEmpty) return arrivalDelayLabel;
-    return isAwaiting ? 'Awaiting' : 'Payment Pending';
+    return isAwaiting
+        ? (canAdvance ? 'Ready to Start' : 'Awaiting')
+        : 'Payment Pending';
   }
 
   String get paymentStatusLabel {
@@ -633,10 +662,7 @@ class _AppointmentGroup {
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
   // Staff only need to confirm payment or check in; completion is automatic.
   bool get canAdvance =>
-      isPending &&
-      !primary.isWalkIn &&
-      primary.isServiceDateToday &&
-      primary.isServiceStartDue;
+      isPending && primary.isServiceDateToday;
   bool get hasPayment => primary.hasPayment;
   bool get isRefunded => primary.isRefunded;
   bool get isAwaiting => appointments.any((a) => a.isAwaiting);
@@ -671,7 +697,7 @@ class _AppointmentGroup {
       : arrivalDelayLabel.isNotEmpty
       ? arrivalDelayLabel
       : isAwaiting
-      ? 'Awaiting'
+      ? (canAdvance ? 'Ready to Start' : 'Awaiting')
       : 'Payment Pending';
   String get durationLabel => _durationLabel(durationMinutes);
 
@@ -864,6 +890,18 @@ class _AppointmentTherapist {
   }
 }
 
+class _TherapistSwitchOption {
+  const _TherapistSwitchOption({
+    required this.therapist,
+    required this.isAvailable,
+    required this.statusLabel,
+  });
+
+  final _AppointmentTherapist therapist;
+  final bool isAvailable;
+  final String statusLabel;
+}
+
 bool _readBool(Object? value, [bool fallback = false]) {
   if (value is bool) return value;
   if (value is num) return value != 0;
@@ -920,6 +958,24 @@ class AppointmentsScreen extends StatefulWidget {
   State<AppointmentsScreen> createState() => _AppointmentsScreenState();
 }
 
+enum _AppointmentStatusFilter { all, inProgress, completed, awaiting }
+
+extension on _AppointmentStatusFilter {
+  String get label => switch (this) {
+    _AppointmentStatusFilter.all => 'All Status',
+    _AppointmentStatusFilter.inProgress => 'In Progress',
+    _AppointmentStatusFilter.completed => 'Completed',
+    _AppointmentStatusFilter.awaiting => 'Awaiting',
+  };
+
+  IconData get icon => switch (this) {
+    _AppointmentStatusFilter.all => Icons.calendar_today_outlined,
+    _AppointmentStatusFilter.inProgress => Icons.play_circle_outline,
+    _AppointmentStatusFilter.completed => Icons.check_circle_outline,
+    _AppointmentStatusFilter.awaiting => Icons.pending_actions_outlined,
+  };
+}
+
 class _AppointmentsScreenState extends State<AppointmentsScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _dashboardRepository = DashboardRepository();
@@ -932,6 +988,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   List<_ScheduleAppointment> _appointments = [];
   List<_AppointmentTherapist> _therapists = [];
   _AppointmentGroup? _selectedGroup;
+  _AppointmentStatusFilter _statusFilter = _AppointmentStatusFilter.all;
   bool _showTabletTimeline = false;
   int _openHour = 9;
   int _closeHour = 21;
@@ -954,10 +1011,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     super.dispose();
   }
 
-  // The day strip shows a 6-day window with the selected day second, so the
-  // user sees one day of context before and four days ahead.
-  static DateTime _windowStartFor(DateTime date) =>
-      _stripTime(date).subtract(const Duration(days: 1));
+  // Keep the selected day first so the strip always reads forward from the
+  // day the counter is currently managing.
+  static DateTime _windowStartFor(DateTime date) => _stripTime(date);
 
   String _dateKey(DateTime date) => DateFormat('yyyy-MM-dd').format(date);
 
@@ -1000,7 +1056,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   List<DateTime> get _visibleDays =>
-      List.generate(6, (index) => _windowStart.add(Duration(days: index)));
+      List.generate(7, (index) => _windowStart.add(Duration(days: index)));
 
   List<_AppointmentGroup> get _appointmentGroups {
     final byGroup = <String, List<_ScheduleAppointment>>{};
@@ -1039,11 +1095,36 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         .toList();
   }
 
-  List<_AppointmentGroup> get _selectedDayGroups {
+  List<_AppointmentGroup> get _selectedDaySearchGroups {
     final key = _dateKey(_selectedDate);
     final list = _filteredGroups.where((a) => a.dateKey == key).toList();
     list.sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
     return list;
+  }
+
+  bool _matchesStatusFilter(
+    _AppointmentGroup group,
+    _AppointmentStatusFilter filter,
+  ) => switch (filter) {
+    _AppointmentStatusFilter.all => true,
+    _AppointmentStatusFilter.inProgress => group.isInProgress,
+    _AppointmentStatusFilter.completed => group.isCompleted,
+    _AppointmentStatusFilter.awaiting => group.isPending,
+  };
+
+  List<_AppointmentGroup> get _selectedDayGroups => _selectedDaySearchGroups
+      .where((group) => _matchesStatusFilter(group, _statusFilter))
+      .toList();
+
+  void _setStatusFilter(_AppointmentStatusFilter filter) {
+    if (_statusFilter == filter) return;
+    setState(() {
+      _statusFilter = filter;
+      final selected = _selectedGroup;
+      if (selected != null && !_matchesStatusFilter(selected, filter)) {
+        _selectedGroup = null;
+      }
+    });
   }
 
   List<_ScheduleAppointment> _appointmentsForDay(DateTime date) {
@@ -1054,16 +1135,19 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         .toList();
   }
 
-  int get _pendingCount => _selectedDayGroups.where((a) => a.isPending).length;
+  int get _pendingCount =>
+      _selectedDaySearchGroups.where((a) => a.isPending).length;
 
   int get _inProgressCount =>
-      _selectedDayGroups.where((a) => a.isInProgress).length;
+      _selectedDaySearchGroups.where((a) => a.isInProgress).length;
 
   int get _completedCount =>
-      _selectedDayGroups.where((a) => a.isCompleted).length;
+      _selectedDaySearchGroups.where((a) => a.isCompleted).length;
 
-  double get _selectedDaySales =>
-      _selectedDayGroups.fold<double>(0, (total, group) => total + group.price);
+  double get _selectedDaySales => _selectedDaySearchGroups.fold<double>(
+    0,
+    (total, group) => total + group.price,
+  );
 
   Future<void> _loadAppointments() async {
     setState(() {
@@ -1089,6 +1173,20 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           .where((id) => id.isNotEmpty)
           .toSet()
           .toList();
+      final therapistAllocationRows = await _appointmentRepository
+          .therapistAllocationsForAppointments(appointmentIds);
+      final therapistAllocationsByAppointment =
+          <String, List<Map<String, dynamic>>>{};
+      for (final allocation in therapistAllocationRows) {
+        final appointmentId =
+            allocation['appointmentId']?.toString() ??
+            allocation['appointment_id']?.toString() ??
+            '';
+        if (appointmentId.isEmpty) continue;
+        therapistAllocationsByAppointment
+            .putIfAbsent(appointmentId, () => [])
+            .add(allocation);
+      }
       final transactionResults = await Future.wait([
         _transactionTable.findIn(
           'appointment_id',
@@ -1118,9 +1216,17 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       final serviceIds = appointmentRows
           .map((data) => data['serviceId']?.toString() ?? '')
           .where((id) => id.isNotEmpty);
-      final therapistIds = appointmentRows
-          .map((data) => data['therapistId']?.toString() ?? '')
-          .where((id) => id.isNotEmpty);
+      final therapistIds = [
+        ...appointmentRows.map(
+          (data) => data['therapistId']?.toString() ?? '',
+        ),
+        ...therapistAllocationRows.map(
+          (data) =>
+              data['therapistId']?.toString() ??
+              data['therapist_id']?.toString() ??
+              '',
+        ),
+      ].where((id) => id.isNotEmpty);
       final roomIds = appointmentRows
           .map((data) => data['roomId']?.toString() ?? '')
           .where((id) => id.isNotEmpty);
@@ -1165,6 +1271,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       transactionsByAppointment[data['id']?.toString()] ??
                       transactionsByGroup[data['appointmentGroupId']
                           ?.toString()],
+                  therapistAllocations:
+                      therapistAllocationsByAppointment[data['id']
+                          ?.toString()] ??
+                      const [],
                   lateGraceMinutes: _businessRuleSettings.lateGraceMinutes,
                   delayWarningMinutes:
                       _businessRuleSettings.delayWarningMinutes,
@@ -1221,10 +1331,18 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   void _selectDate(DateTime date) {
+    final normalized = _stripTime(date);
+    final windowEnd = _windowStart.add(const Duration(days: 6));
+    final shiftedWindow =
+        normalized.isBefore(_windowStart) || normalized.isAfter(windowEnd);
     setState(() {
-      _selectedDate = _stripTime(date);
+      _selectedDate = normalized;
+      if (shiftedWindow) {
+        _windowStart = _windowStartFor(normalized);
+      }
       _selectedGroup = null;
     });
+    if (shiftedWindow) _loadAppointments();
   }
 
   Future<void> _openBooking() async {
@@ -1439,6 +1557,341 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     );
   }
 
+  Future<void> _openTherapistSwitch(
+    _ScheduleAppointment appointment,
+  ) async {
+    final candidates = _therapists
+        .where(
+          (therapist) =>
+              therapist.id != appointment.therapistId &&
+              therapist.role.toLowerCase() == 'therapist',
+        )
+        .toList();
+    if (candidates.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No replacement therapists available')),
+      );
+      return;
+    }
+
+    final now = DateTime.now();
+    final requiredStart = now.isAfter(appointment._serviceStartDateTime)
+        ? now
+        : appointment._serviceStartDateTime;
+    final requiredEnd = appointment._serviceEndDateTime;
+    final requiredWindow =
+        '${DateFormat('h:mm a').format(requiredStart)} - '
+        '${DateFormat('h:mm a').format(requiredEnd)}';
+    final options = await Future.wait(
+      candidates.map((therapist) async {
+        if (!therapist.available) {
+          return _TherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Not available for assignment',
+          );
+        }
+        if (!requiredEnd.isAfter(requiredStart)) {
+          return _TherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Service window has ended',
+          );
+        }
+        try {
+          final availability = await CspService.validateSlot(
+            date: appointment.dateKey,
+            startTime: DateFormat('HH:mm:ss').format(requiredStart),
+            endTime: DateFormat('HH:mm:ss').format(requiredEnd),
+            therapistId: therapist.id,
+            roomId: appointment.roomId,
+            excludeId: appointment.id,
+          );
+          final busyUntil = availability.therapistBusyUntil;
+          return _TherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: availability.therapistAvailable,
+            statusLabel: availability.therapistAvailable
+                ? 'Available $requiredWindow'
+                : busyUntil == null
+                ? 'Conflicts during this service window'
+                : 'Busy until ${_clockLabel(busyUntil)}',
+          );
+        } catch (_) {
+          return _TherapistSwitchOption(
+            therapist: therapist,
+            isAvailable: false,
+            statusLabel: 'Availability could not be confirmed',
+          );
+        }
+      }),
+    );
+    options.sort((left, right) {
+      if (left.isAvailable != right.isAvailable) {
+        return left.isAvailable ? -1 : 1;
+      }
+      return left.therapist.name.compareTo(right.therapist.name);
+    });
+    if (!mounted) return;
+    final availableOptions = options.where((option) => option.isAvailable);
+    String? selectedId = availableOptions.isEmpty
+        ? null
+        : availableOptions.first.therapist.id;
+    var splitMethod = 'service_time';
+    final reasonController = TextEditingController();
+    final startedAt = appointment.actualStartedAt?.toLocal();
+    final receivesFullCommission = startedAt == null ||
+        !DateTime.now().isAfter(startedAt.add(const Duration(minutes: 15)));
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Switch therapist'),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${appointment.therapistName} will be released from the remaining service time.',
+                  ),
+                  const SizedBox(height: 6),
+                  Row(
+                    children: [
+                      const Icon(
+                        Icons.schedule_outlined,
+                        size: 18,
+                        color: _scheduleMuted,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Coverage needed: $requiredWindow',
+                        style: const TextStyle(
+                          color: _scheduleMuted,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Replacement therapist',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                  const SizedBox(height: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 280),
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: options.length,
+                      separatorBuilder: (_, _) => const SizedBox(height: 8),
+                      itemBuilder: (context, index) {
+                        final option = options[index];
+                        final therapist = option.therapist;
+                        final selected = selectedId == therapist.id;
+                        final statusColor = option.isAvailable
+                            ? _scheduleGreen
+                            : const Color(0xFFB45309);
+                        return Material(
+                          color: option.isAvailable
+                              ? selected
+                                    ? const Color(0xFFEAF5EF)
+                                    : Colors.white
+                              : const Color(0xFFF8FAFC),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                            side: BorderSide(
+                              color: selected
+                                  ? _scheduleGreen
+                                  : _scheduleBorder,
+                              width: selected ? 1.5 : 1,
+                            ),
+                          ),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(8),
+                            onTap: option.isAvailable
+                                ? () => setDialogState(
+                                    () => selectedId = therapist.id,
+                                  )
+                                : null,
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Row(
+                                children: [
+                                  CircleAvatar(
+                                    radius: 20,
+                                    backgroundColor: option.isAvailable
+                                        ? const Color(0xFFDDF2E7)
+                                        : const Color(0xFFE2E8F0),
+                                    foregroundColor: option.isAvailable
+                                        ? _scheduleGreen
+                                        : _scheduleMuted,
+                                    child: Text(
+                                      therapist.initials,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.w700,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                          therapist.name,
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.w700,
+                                            color: option.isAvailable
+                                                ? _scheduleInk
+                                                : _scheduleMuted,
+                                          ),
+                                        ),
+                                        const SizedBox(height: 3),
+                                        Text(
+                                          option.statusLabel,
+                                          style: TextStyle(
+                                            color: statusColor,
+                                            fontSize: 13,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  if (selected)
+                                    const Icon(
+                                      Icons.check_circle,
+                                      color: _scheduleGreen,
+                                    )
+                                  else
+                                    Icon(
+                                      option.isAvailable
+                                          ? Icons.radio_button_unchecked
+                                          : Icons.block_outlined,
+                                      color: option.isAvailable
+                                          ? _scheduleMuted
+                                          : const Color(0xFFB45309),
+                                    ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                  ),
+                  if (selectedId == null) ...[
+                    const SizedBox(height: 10),
+                    const Text(
+                      'No therapist can cover the full remaining service without a conflict.',
+                      style: TextStyle(
+                        color: Color(0xFFB45309),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  if (receivesFullCommission)
+                    const Text(
+                      'The replacement receives 100% commission because the switch is before or within 15 minutes of service start.',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    )
+                  else ...[
+                    const Text(
+                      'Commission split',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    const SizedBox(height: 8),
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(
+                          value: 'service_time',
+                          label: Text('By time'),
+                          icon: Icon(Icons.schedule_outlined),
+                        ),
+                        ButtonSegment(
+                          value: 'half',
+                          label: Text('50 / 50'),
+                          icon: Icon(Icons.balance_outlined),
+                        ),
+                      ],
+                      selected: {splitMethod},
+                      onSelectionChanged: (selection) => setDialogState(
+                        () => splitMethod = selection.first,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: reasonController,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason (optional)',
+                      border: OutlineInputBorder(),
+                    ),
+                    maxLines: 2,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: selectedId == null
+                  ? null
+                  : () => Navigator.pop(dialogContext, true),
+              child: const Text('Switch'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed != true || !mounted) {
+      reasonController.dispose();
+      return;
+    }
+    try {
+      final result = await _appointmentRepository.switchTherapist(
+        appointmentId: appointment.id,
+        newTherapistId: selectedId!,
+        splitMethod: splitMethod,
+        reason: reasonController.text.trim(),
+      );
+      if (!mounted) return;
+      await _loadAppointments();
+      if (!mounted) return;
+      final method = result['commission_method']?.toString() ?? splitMethod;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            method == 'early_replacement'
+                ? 'Therapist switched - replacement receives 100% commission'
+                : method == 'half'
+                ? 'Therapist switched - commission split 50 / 50'
+                : 'Therapist switched - commission split by service time',
+          ),
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(friendlyErrorMessage(error))),
+        );
+      }
+    } finally {
+      reasonController.dispose();
+    }
+  }
+
   void _showMobileSummary(_AppointmentGroup group) {
     showModalBottomSheet<void>(
       context: context,
@@ -1468,6 +1921,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       activeAppointmentId: appointment.id,
                     );
                   },
+                  onSwitchPax: (appointment) async {
+                    Navigator.pop(context);
+                    await _openTherapistSwitch(appointment);
+                  },
                   onComplete: group.canAdvance
                       ? () async {
                           Navigator.pop(context);
@@ -1493,6 +1950,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                     Navigator.pop(context);
                     await _openEdit(group.primary);
                   },
+                  onSwitchTherapist: group.primary.isCancelled ||
+                          group.primary.isNoShow ||
+                          group.primary.isCompleted
+                      ? null
+                      : () async {
+                          Navigator.pop(context);
+                          await _openTherapistSwitch(group.primary);
+                        },
                   onComplete: group.primary.canAdvance
                       ? () async {
                           Navigator.pop(context);
@@ -1588,29 +2053,41 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     if (_error != null) return _ScheduleError(onRetry: _loadAppointments);
 
     final appointments = _selectedDayGroups;
+    final dayAppointments = _selectedDaySearchGroups;
     return ListView(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 90),
       children: [
         _MobileDaySummary(
-          count: appointments.length,
+          count: dayAppointments.length,
           pending: _pendingCount,
           inProgress: _inProgressCount,
           completed: _completedCount,
           sales: _selectedDaySales,
         ),
         const SizedBox(height: 16),
+        Row(
+          children: [
+            const Expanded(
+              child: Text(
+                'Appointments',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w900,
+                  color: _scheduleInk,
+                ),
+              ),
+            ),
+            _ScheduleStatusFilterButton(
+              selected: _statusFilter,
+              onChanged: _setStatusFilter,
+              compact: true,
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
         if (appointments.isEmpty)
           const _ScheduleEmptyState()
         else ...[
-          const Text(
-            'Upcoming Appointments',
-            style: TextStyle(
-              fontSize: 17,
-              fontWeight: FontWeight.w900,
-              color: _scheduleInk,
-            ),
-          ),
-          const SizedBox(height: 10),
           _MobileTimeline(
             appointments: appointments,
             onTapAppointment: (appointment) {
@@ -1674,6 +2151,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                         _selectedGroup!,
                         activeAppointmentId: appointment.id,
                       ),
+                      onSwitchPax: _openTherapistSwitch,
                       onComplete: _selectedGroup!.canAdvance
                           ? () => _selectedGroup!.hasPayment
                                 ? _startGroupService(_selectedGroup!)
@@ -1687,6 +2165,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       appointment: _selectedGroup!.primary,
                       onClose: () => setState(() => _selectedGroup = null),
                       onEdit: () => _openEdit(_selectedGroup!.primary),
+                      onSwitchTherapist:
+                          _selectedGroup!.primary.isCancelled ||
+                              _selectedGroup!.primary.isNoShow ||
+                              _selectedGroup!.primary.isCompleted
+                          ? null
+                          : () => _openTherapistSwitch(
+                              _selectedGroup!.primary,
+                            ),
                       onComplete: _selectedGroup!.primary.canAdvance
                           ? () => _selectedGroup!.primary.hasPayment
                                 ? _startService(_selectedGroup!.primary)
@@ -1708,6 +2194,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     if (_error != null) return _ScheduleError(onRetry: _loadAppointments);
 
     final appointments = _selectedDayGroups;
+    final dayAppointments = _selectedDaySearchGroups;
     // The whole tablet body scrolls as one page, so the full day's schedule
     // and every therapist are reachable together instead of two separate
     // inner scroll areas.
@@ -1717,25 +2204,29 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           _TabletDaySummary(
-            count: appointments.length,
+            count: dayAppointments.length,
             pending: _pendingCount,
             inProgress: _inProgressCount,
             completed: _completedCount,
             sales: _selectedDaySales,
+            selectedFilter: _statusFilter,
+            onFilterChanged: _setStatusFilter,
           ),
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Expanded(
-                child: appointments.isEmpty
-                    ? const _ScheduleEmptyState()
-                    : _TabletScheduleSection(
-                        selectedDate: _selectedDate,
-                        showTimeline: _showTabletTimeline,
-                        onViewChanged: (showTimeline) =>
-                            setState(() => _showTabletTimeline = showTimeline),
-                        list: _TabletAppointmentList(
+                child: _TabletScheduleSection(
+                  selectedDate: _selectedDate,
+                  selectedFilter: _statusFilter,
+                  onFilterChanged: _setStatusFilter,
+                  showTimeline: _showTabletTimeline,
+                  onViewChanged: (showTimeline) =>
+                      setState(() => _showTabletTimeline = showTimeline),
+                  list: appointments.isEmpty
+                      ? const _ScheduleEmptyState()
+                      : _TabletAppointmentList(
                           appointments: appointments,
                           selectedId: _selectedGroup?.id,
                           onSelect: (appointment) =>
@@ -1744,7 +2235,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                               ? _openEditGroup(appointment)
                               : _openEdit(appointment.primary),
                         ),
-                        timeline: _TabletTimeline(
+                  timeline: appointments.isEmpty
+                      ? const _ScheduleEmptyState()
+                      : _TabletTimeline(
                           appointments: appointments,
                           openHour: _openHour,
                           closeHour: _closeHour,
@@ -1753,14 +2246,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                           onSelect: (appointment) =>
                               setState(() => _selectedGroup = appointment),
                         ),
-                      ),
+                ),
               ),
               const SizedBox(width: 16),
               SizedBox(
                 width: 330,
                 child: _AppointmentTherapistPanel(
                   therapists: _therapists,
-                  appointments: appointments,
+                  appointments: dayAppointments,
                   selectedDate: _selectedDate,
                 ),
               ),
@@ -2381,24 +2874,24 @@ class _ScheduleCalendarStrip extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             SizedBox(
-              height: 66,
-              child: ListView.separated(
-                scrollDirection: Axis.horizontal,
-                itemCount: days.length,
-                separatorBuilder: (_, _) => const SizedBox(width: 7),
-                itemBuilder: (context, index) {
-                  final day = days[index];
-                  return SizedBox(
-                    width: 50,
-                    child: _DayTile(
-                      day: day,
-                      selected: _stripTime(day) == _stripTime(selectedDate),
-                      count: appointmentsForDay(day).length,
-                      compact: true,
-                      onTap: () => onSelect(day),
+              height: 64,
+              child: Row(
+                children: [
+                  for (var index = 0; index < days.length; index++) ...[
+                    if (index > 0) const SizedBox(width: 4),
+                    Expanded(
+                      child: _DayTile(
+                        day: days[index],
+                        selected:
+                            _stripTime(days[index]) ==
+                            _stripTime(selectedDate),
+                        count: appointmentsForDay(days[index]).length,
+                        compact: true,
+                        onTap: () => onSelect(days[index]),
+                      ),
                     ),
-                  );
-                },
+                  ],
+                ],
               ),
             ),
           ],
@@ -2590,7 +3083,7 @@ class _DayTile extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: selected ? selectedColor : Colors.white,
-          borderRadius: BorderRadius.circular(compact ? 18 : 10),
+        borderRadius: BorderRadius.circular(compact ? 10 : 10),
           border: compact && !selected
               ? null
               : Border.all(
@@ -2837,6 +3330,8 @@ class _TabletDaySummary extends StatelessWidget {
   final int inProgress;
   final int completed;
   final double sales;
+  final _AppointmentStatusFilter selectedFilter;
+  final ValueChanged<_AppointmentStatusFilter> onFilterChanged;
 
   const _TabletDaySummary({
     required this.count,
@@ -2844,6 +3339,8 @@ class _TabletDaySummary extends StatelessWidget {
     required this.inProgress,
     required this.completed,
     required this.sales,
+    required this.selectedFilter,
+    required this.onFilterChanged,
   });
 
   @override
@@ -2856,6 +3353,8 @@ class _TabletDaySummary extends StatelessWidget {
             label: "Total Appointments",
             value: count,
             color: const Color(0xFF2563EB),
+            selected: selectedFilter == _AppointmentStatusFilter.all,
+            onTap: () => onFilterChanged(_AppointmentStatusFilter.all),
           ),
         ),
         const SizedBox(width: 12),
@@ -2865,6 +3364,9 @@ class _TabletDaySummary extends StatelessWidget {
             label: 'In Progress',
             value: inProgress,
             color: const Color(0xFFF97316),
+            selected: selectedFilter == _AppointmentStatusFilter.inProgress,
+            onTap: () =>
+                onFilterChanged(_AppointmentStatusFilter.inProgress),
           ),
         ),
         const SizedBox(width: 12),
@@ -2874,6 +3376,8 @@ class _TabletDaySummary extends StatelessWidget {
             label: 'Completed',
             value: completed,
             color: const Color(0xFF059669),
+            selected: selectedFilter == _AppointmentStatusFilter.completed,
+            onTap: () => onFilterChanged(_AppointmentStatusFilter.completed),
           ),
         ),
         const SizedBox(width: 12),
@@ -2883,6 +3387,8 @@ class _TabletDaySummary extends StatelessWidget {
             label: 'Awaiting',
             value: pending,
             color: const Color(0xFF7C3AED),
+            selected: selectedFilter == _AppointmentStatusFilter.awaiting,
+            onTap: () => onFilterChanged(_AppointmentStatusFilter.awaiting),
           ),
         ),
         const SizedBox(width: 12),
@@ -2904,23 +3410,23 @@ class _TabletStatCard extends StatelessWidget {
   final String label;
   final int value;
   final Color color;
+  final bool selected;
+  final VoidCallback onTap;
 
   const _TabletStatCard({
     required this.icon,
     required this.label,
     required this.value,
     required this.color,
+    required this.selected,
+    required this.onTap,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      constraints: const BoxConstraints(minHeight: 78),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.white,
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
         boxShadow: const [
           BoxShadow(
             color: Color(0x06000000),
@@ -2929,48 +3435,68 @@ class _TabletStatCard extends StatelessWidget {
           ),
         ],
       ),
-      child: Row(
-        children: [
-          Container(
-            width: 42,
-            height: 42,
-            decoration: BoxDecoration(
-              color: color.withValues(alpha: 0.12),
-              shape: BoxShape.circle,
-            ),
-            child: Icon(icon, color: color, size: 22),
+      child: Material(
+        color: selected ? color.withValues(alpha: 0.06) : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: selected ? color.withValues(alpha: 0.65) : _scheduleBorder,
+            width: selected ? 1.5 : 1,
           ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisAlignment: MainAxisAlignment.center,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  label,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF334155),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(minHeight: 58),
+              child: Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: color.withValues(alpha: 0.12),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(icon, color: color, size: 22),
                   ),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  '$value',
-                  style: const TextStyle(
-                    fontSize: 21,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF0F172A),
-                    height: 1,
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          label,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF334155),
+                          ),
+                        ),
+                        const SizedBox(height: 5),
+                        Text(
+                          '$value',
+                          style: const TextStyle(
+                            fontSize: 21,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF0F172A),
+                            height: 1,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
-        ],
+        ),
       ),
     );
   }
@@ -3057,6 +3583,8 @@ class _TabletMoneyStatCard extends StatelessWidget {
 
 class _TabletScheduleSection extends StatelessWidget {
   final DateTime selectedDate;
+  final _AppointmentStatusFilter selectedFilter;
+  final ValueChanged<_AppointmentStatusFilter> onFilterChanged;
   final bool showTimeline;
   final ValueChanged<bool> onViewChanged;
   final Widget list;
@@ -3064,6 +3592,8 @@ class _TabletScheduleSection extends StatelessWidget {
 
   const _TabletScheduleSection({
     required this.selectedDate,
+    required this.selectedFilter,
+    required this.onFilterChanged,
     required this.showTimeline,
     required this.onViewChanged,
     required this.list,
@@ -3104,7 +3634,10 @@ class _TabletScheduleSection extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 14),
-              const _ScheduleStatusFilterButton(),
+              _ScheduleStatusFilterButton(
+                selected: selectedFilter,
+                onChanged: onFilterChanged,
+              ),
               const SizedBox(width: 10),
               _ScheduleViewToggle(
                 showTimeline: showTimeline,
@@ -3121,23 +3654,126 @@ class _TabletScheduleSection extends StatelessWidget {
 }
 
 class _ScheduleStatusFilterButton extends StatelessWidget {
-  const _ScheduleStatusFilterButton();
+  final _AppointmentStatusFilter selected;
+  final ValueChanged<_AppointmentStatusFilter> onChanged;
+  final bool compact;
+
+  const _ScheduleStatusFilterButton({
+    required this.selected,
+    required this.onChanged,
+    this.compact = false,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return OutlinedButton.icon(
-      onPressed: () {},
-      icon: const Icon(Icons.filter_alt_outlined, size: 17),
-      label: const Text('All Status'),
-      style: OutlinedButton.styleFrom(
-        foregroundColor: _scheduleInk,
-        backgroundColor: Colors.white,
-        side: const BorderSide(color: Color(0xFFE5E7EB)),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        textStyle: const TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w900,
+    final active = selected != _AppointmentStatusFilter.all;
+    return Tooltip(
+      message: 'Filter appointments: ${selected.label}',
+      child: PopupMenuButton<_AppointmentStatusFilter>(
+        initialValue: selected,
+        onSelected: onChanged,
+        tooltip: '',
+        position: PopupMenuPosition.under,
+        offset: const Offset(0, 6),
+        color: Colors.white,
+        elevation: 8,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: _scheduleBorder),
+        ),
+        itemBuilder: (context) => _AppointmentStatusFilter.values
+            .map(
+              (filter) => PopupMenuItem<_AppointmentStatusFilter>(
+                value: filter,
+                child: Row(
+                  children: [
+                    Icon(
+                      filter.icon,
+                      size: 19,
+                      color: filter == selected
+                          ? _scheduleGreen
+                          : _scheduleMuted,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        filter.label,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: filter == selected
+                              ? FontWeight.w900
+                              : FontWeight.w700,
+                          color: _scheduleInk,
+                        ),
+                      ),
+                    ),
+                    if (filter == selected)
+                      const Icon(
+                        Icons.check_rounded,
+                        size: 18,
+                        color: _scheduleGreen,
+                      ),
+                  ],
+                ),
+              ),
+            )
+            .toList(),
+        child: Container(
+          width: compact ? 40 : null,
+          height: 40,
+          padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 13),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFFEAF5EF) : Colors.white,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: active ? _scheduleGreen : _scheduleBorder,
+            ),
+          ),
+          child: compact
+              ? Stack(
+                  alignment: Alignment.center,
+                  children: [
+                    Icon(
+                      Icons.filter_alt_outlined,
+                      size: 20,
+                      color: active ? _scheduleGreen : _scheduleInk,
+                    ),
+                    if (active)
+                      const Positioned(
+                        top: 7,
+                        right: 7,
+                        child: CircleAvatar(
+                          radius: 3,
+                          backgroundColor: _scheduleGreen,
+                        ),
+                      ),
+                  ],
+                )
+              : Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.filter_alt_outlined,
+                      size: 17,
+                      color: active ? _scheduleGreen : _scheduleInk,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      selected.label,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                        color: _scheduleInk,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    const Icon(
+                      Icons.keyboard_arrow_down_rounded,
+                      size: 18,
+                      color: _scheduleMuted,
+                    ),
+                  ],
+                ),
         ),
       ),
     );
@@ -4237,13 +4873,13 @@ class _MobileTimeline extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         for (var groupIndex = 0; groupIndex < groups.length; groupIndex++) ...[
-          _MobileAgendaTimeHeader(
-            appointments: groups[groupIndex],
-            onTap: groups[groupIndex].length > 1
-                ? () => onTapCluster(groups[groupIndex])
-                : null,
-          ),
-          const SizedBox(height: 8),
+          if (groups[groupIndex].length > 1) ...[
+            _MobileAgendaTimeHeader(
+              appointments: groups[groupIndex],
+              onTap: () => onTapCluster(groups[groupIndex]),
+            ),
+            const SizedBox(height: 8),
+          ],
           for (var index = 0; index < groups[groupIndex].length; index++) ...[
             _MobileAppointmentCard(
               appointment: groups[groupIndex][index],
@@ -4776,116 +5412,135 @@ class _MobileAppointmentCard extends StatelessWidget {
       _minutesToTime(appointment.primary.endMinutes),
     );
     final timeLabel =
-        '${_compactTimeRange(startClock, endClock)} · '
+        '${_compactTimeRange(startClock, endClock)} | '
         '${appointment.primary.durationMinutes} min';
     return Material(
       color: Colors.white,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(8),
         side: BorderSide(color: colors.border),
       ),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: IntrinsicHeight(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 13, 12, 13),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Container(
-                width: 4,
-                decoration: BoxDecoration(
-                  color: colors.accent,
-                  borderRadius: const BorderRadius.horizontal(
-                    left: Radius.circular(12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 36,
+                    height: 36,
+                    decoration: BoxDecoration(
+                      color: colors.accent.withValues(alpha: 0.11),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.person_outline_rounded,
+                      size: 19,
+                      color: colors.accent,
+                    ),
                   ),
-                ),
-              ),
-              // Left: customer, service, time.
-              Expanded(
-                flex: 6,
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(12, 12, 10, 12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Text(
-                        appointment.customerName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w900,
-                          color: _scheduleInk,
-                          height: 1.15,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        _appointmentServiceLabel(appointment),
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 13.5,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF334155),
-                          height: 1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      _MobileCardInfoRow(
-                        icon: Icons.schedule_outlined,
-                        label: timeLabel,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              Container(width: 1, color: const Color(0xFFE5E7EB)),
-              // Right: status, therapist, room, price.
-              Expanded(
-                flex: 5,
-                child: Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: _MobileAppointmentStatusTag(
-                          label: appointment.statusLabel,
-                          colors: colors,
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      _MobileCardInfoRow(
-                        icon: Icons.person_outline,
-                        label: appointment.therapistName,
-                      ),
-                      const SizedBox(height: 6),
-                      _MobileCardInfoRow(
-                        icon: Icons.location_on_outlined,
-                        label: appointment.roomName,
-                      ),
-                      const SizedBox(height: 10),
-                      Align(
-                        alignment: Alignment.centerRight,
-                        child: Text(
-                          appointment.priceLabel,
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          appointment.customerName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 17,
+                          style: const TextStyle(
+                            fontSize: 15.5,
                             fontWeight: FontWeight.w900,
-                            color: colors.accent,
-                            height: 1,
+                            color: _scheduleInk,
+                            height: 1.15,
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 3),
+                        Text(
+                          _appointmentServiceLabel(appointment),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12.8,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF475569),
+                            height: 1.25,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                ),
+                  const SizedBox(width: 8),
+                  _MobileAppointmentStatusTag(
+                    label: appointment.statusLabel,
+                    colors: colors,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 11),
+              Divider(height: 1, color: colors.border),
+              const SizedBox(height: 10),
+              Row(
+                children: [
+                  Icon(
+                    Icons.schedule_outlined,
+                    size: 16,
+                    color: colors.accent,
+                  ),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      timeLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: Color(0xFF334155),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    appointment.priceLabel,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 15.5,
+                      fontWeight: FontWeight.w900,
+                      color: colors.accent,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 9),
+              Row(
+                children: [
+                  Expanded(
+                    child: _MobileCardInfoRow(
+                      icon: Icons.badge_outlined,
+                      label: appointment.therapistName,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: _MobileCardInfoRow(
+                      icon: Icons.meeting_room_outlined,
+                      label: appointment.roomName,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.chevron_right_rounded,
+                    size: 20,
+                    color: colors.accent,
+                  ),
+                ],
               ),
             ],
           ),
@@ -4906,14 +5561,14 @@ class _MobileCardInfoRow extends StatelessWidget {
     return Row(
       children: [
         Icon(icon, size: 15, color: const Color(0xFF64748B)),
-        const SizedBox(width: 7),
+        const SizedBox(width: 6),
         Expanded(
           child: Text(
             label,
-            maxLines: 2,
+            maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: const TextStyle(
-              fontSize: 12.5,
+              fontSize: 12,
               fontWeight: FontWeight.w700,
               color: Color(0xFF475569),
               height: 1.25,
@@ -4938,7 +5593,7 @@ class _MobileAppointmentStatusTag extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 128),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: colors.accent.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(999),
@@ -5413,6 +6068,7 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
   final VoidCallback onClose;
   final VoidCallback onEditGroup;
   final void Function(_ScheduleAppointment appointment) onEditPax;
+  final void Function(_ScheduleAppointment appointment) onSwitchPax;
   final VoidCallback? onComplete;
   final VoidCallback? onCancel;
 
@@ -5421,6 +6077,7 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
     required this.onClose,
     required this.onEditGroup,
     required this.onEditPax,
+    required this.onSwitchPax,
     required this.onComplete,
     required this.onCancel,
     this.compact = false,
@@ -5539,7 +6196,7 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
                 icon: Icons.play_circle_outline,
                 label: 'Actual service time',
                 title: group.primary.actualServiceTimeRange,
-                subtitle: group.primary.actualServiceCompletionLabel,
+                subtitle: 'Service duration: ${group.primary.durationLabel}',
               ),
             _SummaryItem(
               icon: Icons.payments_outlined,
@@ -5575,6 +6232,11 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
                 index: index,
                 appointment: group.appointments[index],
                 onEdit: () => onEditPax(group.appointments[index]),
+                onSwitch: group.appointments[index].isCancelled ||
+                        group.appointments[index].isNoShow ||
+                        group.appointments[index].isCompleted
+                    ? null
+                    : () => onSwitchPax(group.appointments[index]),
               ),
             const SizedBox(height: 12),
             if (onComplete != null)
@@ -5612,11 +6274,13 @@ class _GroupPaxDetailCard extends StatelessWidget {
   final int index;
   final _ScheduleAppointment appointment;
   final VoidCallback onEdit;
+  final VoidCallback? onSwitch;
 
   const _GroupPaxDetailCard({
     required this.index,
     required this.appointment,
     required this.onEdit,
+    required this.onSwitch,
   });
 
   @override
@@ -5676,8 +6340,25 @@ class _GroupPaxDetailCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 3),
+                for (var therapistIndex = 0;
+                    therapistIndex < appointment.therapistNames.length;
+                    therapistIndex++)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      '${appointment.therapistNames.length == 1 ? 'Therapist' : 'Therapist ${therapistIndex + 1}'}: ${appointment.therapistNames[therapistIndex]}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: Color(0xFF6B7280),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 2),
                 Text(
-                  '${appointment.therapistName} - ${appointment.roomName} - ${appointment.priceLabel} - ${appointment.cleanupUntilLabel}',
+                  '${appointment.roomName} - ${appointment.priceLabel} - ${appointment.cleanupUntilLabel}',
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -5689,11 +6370,22 @@ class _GroupPaxDetailCard extends StatelessWidget {
               ],
             ),
           ),
-          IconButton(
-            tooltip: 'Edit pax',
-            onPressed: onEdit,
-            icon: const Icon(Icons.edit_outlined, size: 18),
-            color: const Color(0xFFF59E0B),
+          Column(
+            children: [
+              if (onSwitch != null)
+                IconButton(
+                  tooltip: 'Switch therapist',
+                  onPressed: onSwitch,
+                  icon: const Icon(Icons.swap_horiz_rounded, size: 18),
+                  color: const Color(0xFF1B6B72),
+                ),
+              IconButton(
+                tooltip: 'Edit pax',
+                onPressed: onEdit,
+                icon: const Icon(Icons.edit_outlined, size: 18),
+                color: const Color(0xFFF59E0B),
+              ),
+            ],
           ),
         ],
       ),
@@ -5801,6 +6493,7 @@ class _AppointmentSummaryPanel extends StatelessWidget {
   final bool compact;
   final VoidCallback onClose;
   final VoidCallback onEdit;
+  final VoidCallback? onSwitchTherapist;
   final VoidCallback? onComplete;
   final VoidCallback? onCancel;
 
@@ -5808,6 +6501,7 @@ class _AppointmentSummaryPanel extends StatelessWidget {
     required this.appointment,
     required this.onClose,
     required this.onEdit,
+    required this.onSwitchTherapist,
     required this.onComplete,
     required this.onCancel,
     this.compact = false,
@@ -5892,11 +6586,16 @@ class _AppointmentSummaryPanel extends StatelessWidget {
               title: appointment.serviceName,
               subtitle: appointment.serviceDescription,
             ),
-            _SummaryItem(
-              icon: Icons.person_outline,
-              label: 'Therapist',
-              title: appointment.therapistName,
-            ),
+            for (var therapistIndex = 0;
+                therapistIndex < appointment.therapistNames.length;
+                therapistIndex++)
+              _SummaryItem(
+                icon: Icons.person_outline,
+                label: appointment.therapistNames.length == 1
+                    ? 'Therapist'
+                    : 'Therapist ${therapistIndex + 1}',
+                title: appointment.therapistNames[therapistIndex],
+              ),
             _SummaryItem(
               icon: Icons.meeting_room_outlined,
               label: 'Room / Zone',
@@ -5920,7 +6619,7 @@ class _AppointmentSummaryPanel extends StatelessWidget {
                 icon: Icons.play_circle_outline,
                 label: 'Actual service time',
                 title: appointment.actualServiceTimeRange,
-                subtitle: appointment.actualServiceCompletionLabel,
+                subtitle: 'Service duration: ${appointment.durationLabel}',
               ),
             _SummaryItem(
               icon: Icons.payments_outlined,
@@ -5972,6 +6671,13 @@ class _AppointmentSummaryPanel extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 18),
+            if (onSwitchTherapist != null)
+              _PanelActionButton(
+                icon: Icons.swap_horiz_rounded,
+                label: 'Switch Therapist',
+                color: const Color(0xFF1B6B72),
+                onPressed: onSwitchTherapist!,
+              ),
             if (onComplete != null)
               _PanelActionButton(
                 icon: appointment.hasPayment

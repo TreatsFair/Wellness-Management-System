@@ -72,9 +72,11 @@ class PaymentService {
     required String paymentMethod,
     required String receiptNumber,
     String transactionNotes = '',
+    bool startImmediately = true,
+    String? draftSessionId,
   }) async {
     final rows = await _client.rpc(
-      'create_walkin_appointment_with_payment',
+      'create_staff_walkin_with_payment',
       params: {
         'p_customer_id': _nullIfBlank(customerId),
         'p_therapist_id': therapistId,
@@ -97,6 +99,8 @@ class PaymentService {
         'p_payment_method': paymentMethod,
         'p_receipt_number': receiptNumber,
         'p_transaction_notes': transactionNotes,
+        'p_start_immediately': startImmediately,
+        'p_draft_session_id': _nullIfBlank(draftSessionId),
       },
     );
     return PaymentResult.fromMap(_firstMap(rows));
@@ -119,9 +123,11 @@ class PaymentService {
     required String paymentMethod,
     required String receiptNumber,
     String transactionNotes = '',
+    bool startImmediately = true,
+    String? draftSessionId,
   }) async {
     final rows = await _client.rpc(
-      'create_walkin_appointment_group_with_payment',
+      'create_staff_walkin_group_with_payment',
       params: {
         'p_customer_id': _nullIfBlank(customerId),
         'p_group_name': groupName,
@@ -139,6 +145,8 @@ class PaymentService {
         'p_payment_method': paymentMethod,
         'p_receipt_number': receiptNumber,
         'p_transaction_notes': transactionNotes,
+        'p_start_immediately': startImmediately,
+        'p_draft_session_id': _nullIfBlank(draftSessionId),
       },
     );
     return PaymentResult.fromMap(_firstMap(rows));

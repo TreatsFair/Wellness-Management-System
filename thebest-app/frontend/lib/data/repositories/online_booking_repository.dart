@@ -61,9 +61,9 @@ class OnlineBookingRepository {
     await _client.from('online_booking_outlet_settings').upsert({
       'outlet_id': outletId,
       ...values,
-      'slot_interval_minutes': 30,
-      'maximum_booking_days': 7,
-      'same_day_booking_allowed': false,
+      'slot_interval_minutes': values['slot_interval_minutes'] ?? 30,
+      'maximum_booking_days': values['maximum_booking_days'] ?? 7,
+      'same_day_booking_allowed': values['same_day_booking_allowed'] ?? false,
       'public_therapist_names_allowed': false,
       'updated_at': DateTime.now().toUtc().toIso8601String(),
     }, onConflict: 'outlet_id');

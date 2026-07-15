@@ -232,6 +232,12 @@ bool _isWalkInAppointment(Map<String, dynamic> data) {
   return type == 'walkin' || type == 'walk_in' || type == 'walk-in';
 }
 
+bool _isReservedWalkInAppointment(Map<String, dynamic> data) {
+  if (!_isWalkInAppointment(data)) return false;
+  final status = _asString(data['status']).toLowerCase().trim();
+  return status == 'confirmed' && _isPaid(data);
+}
+
 bool _isPendingAppointmentStatus(String status) {
   return status == 'pending' ||
       status == 'confirmed' ||
@@ -326,7 +332,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
         (data) =>
             !_isCancelled(data) &&
             !_isVoidedPayment(data) &&
-            !_isWalkInAppointment(data),
+            (!_isWalkInAppointment(data) ||
+                _isReservedWalkInAppointment(data)),
       );
       final todayAppointments = activeAppointments
           .where((data) => _asString(data['date']) == todayKey)
@@ -394,8 +401,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         for (final appointment in therapistAppointments) {
           final status = _asString(appointment['status']).toLowerCase();
           if (!_isPendingAppointmentStatus(status)) continue;
-          final start = _timeToMinutes(_asString(appointment['startTime']));
-          final end = _timeToMinutes(_asString(appointment['endTime']));
+          final actualStart = _asDateTime(appointment['actualStartedAt'])
+              ?.toLocal();
+          final expectedEnd = _asDateTime(appointment['endAt'])?.toLocal();
+          final start = actualStart == null
+              ? _timeToMinutes(_asString(appointment['startTime']))
+              : actualStart.hour * 60 + actualStart.minute;
+          final end = expectedEnd == null
+              ? _timeToMinutes(_asString(appointment['endTime']))
+              : expectedEnd.hour * 60 + expectedEnd.minute;
           if (start <= nowMinutes && end > nowMinutes) {
             currentAppointment = appointment;
             break;
@@ -407,9 +421,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final busyUntil = _asString(data['busyUntil']);
         final isAvailable = availability is bool ? availability : true;
         final isFree = currentAppointment == null && isAvailable;
+        final liveEnd = currentAppointment == null
+            ? null
+            : _asDateTime(currentAppointment['endAt'])?.toLocal();
         final endTime = currentAppointment == null
             ? busyUntil
-            : _asString(currentAppointment['endTime']);
+            : liveEnd == null
+            ? _asString(currentAppointment['endTime'])
+            : DateFormat('HH:mm').format(liveEnd);
         final status = isFree
             ? 'Free now'
             : endTime.isEmpty

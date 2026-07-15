@@ -1,3 +1,5 @@
+import 'package:supabase_flutter/supabase_flutter.dart';
+
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/payment_service.dart';
 import '../services/supabase_table_service.dart';
@@ -233,11 +235,29 @@ class AppointmentRepository {
   Future<Map<String, dynamic>> startAppointment(
     String id, {
     DateTime? startedAt,
-  }) {
-    return updateAppointment(id, {
-      'status': 'in_progress',
-      'actualStartedAt': (startedAt ?? DateTime.now()).toUtc().toIso8601String(),
-    });
+  }) async {
+    final result = await _table.client.rpc(
+      'start_appointment_service',
+      params: {
+        'p_appointment_id': id,
+        'p_started_at': (startedAt ?? DateTime.now()).toUtc().toIso8601String(),
+      },
+    );
+    return _firstResultMap(result);
+  }
+
+  Future<Map<String, dynamic>> adjustServiceEnd(
+    String id, {
+    required DateTime expectedEndAt,
+  }) async {
+    final result = await _table.client.rpc(
+      'adjust_appointment_service_end',
+      params: {
+        'p_appointment_id': id,
+        'p_expected_end_at': expectedEndAt.toUtc().toIso8601String(),
+      },
+    );
+    return _firstResultMap(result);
   }
 
   Future<void> startAppointmentGroup(
@@ -247,6 +267,87 @@ class AppointmentRepository {
     final timestamp = startedAt ?? DateTime.now();
     for (final id in appointmentIds) {
       await startAppointment(id, startedAt: timestamp);
+    }
+  }
+
+  Future<Map<String, dynamic>> switchTherapist({
+    required String appointmentId,
+    required String newTherapistId,
+    String splitMethod = 'service_time',
+    String reason = '',
+  }) async {
+    final rows = await _table.client.rpc(
+      'switch_appointment_therapist',
+      params: {
+        'p_appointment_id': appointmentId,
+        'p_new_therapist_id': newTherapistId,
+        'p_split_method': splitMethod,
+        'p_reason': reason,
+      },
+    );
+    final row = _firstResultMap(rows);
+    if (row['success'] != true) {
+      throw Exception(
+        asString(
+          row['error_message'] ?? row['errorMessage'],
+          asString(row['error_code'] ?? row['errorCode'], 'Switch failed'),
+        ),
+      );
+    }
+    return row;
+  }
+
+  Future<List<Map<String, dynamic>>> therapistAllocations(
+    String appointmentId,
+  ) async {
+    final rows = await _table.client
+        .from('appointment_therapist_allocations')
+        .select()
+        .eq('appointment_id', appointmentId)
+        .order('commission_share', ascending: false);
+    return rows.map((row) => Map<String, dynamic>.from(row)).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> therapistAllocationsForAppointments(
+    Iterable<String> appointmentIds,
+  ) async {
+    final ids = appointmentIds.where((id) => id.trim().isNotEmpty).toSet();
+    if (ids.isEmpty) return const [];
+    try {
+      final rows = await _table.client
+          .from('appointment_therapist_allocations')
+          .select()
+          .inFilter('appointment_id', ids.toList());
+      return rows.map((row) => Map<String, dynamic>.from(row)).toList();
+    } on PostgrestException catch (error) {
+      // Reports and sales history can still use the appointment's primary
+      // therapist while PostgREST refreshes after a deployment.
+      if (error.code == 'PGRST205') return const [];
+      rethrow;
+    }
+  }
+
+  Future<void> setCompletedTherapistAllocations({
+    required String appointmentId,
+    required List<Map<String, dynamic>> allocations,
+    required String reason,
+  }) async {
+    final rows = await _table.client.rpc(
+      'set_completed_therapist_allocations',
+      params: {
+        'p_appointment_id': appointmentId,
+        'p_allocations': allocations,
+        'p_reason': reason,
+      },
+    );
+    final row = _firstResultMap(rows);
+    if (row['success'] != true) {
+      throw Exception(
+        asString(
+          row['error_message'] ?? row['errorMessage'],
+          asString(row['error_code'] ?? row['errorCode'], 'Update failed'),
+        ),
+      );
     }
   }
 
@@ -329,6 +430,14 @@ class AppointmentRepository {
   }
 
   Future<void> deleteAppointment(String id) => _table.delete(id);
+}
+
+Map<String, dynamic> _firstResultMap(Object? rows) {
+  if (rows is List && rows.isNotEmpty && rows.first is Map) {
+    return Map<String, dynamic>.from(rows.first as Map);
+  }
+  if (rows is Map) return Map<String, dynamic>.from(rows);
+  return <String, dynamic>{};
 }
 
 bool _canCreateCustomer(Map<String, dynamic>? values) {
