@@ -159,15 +159,34 @@ class _RoomZone {
 class _TimeSlot {
   final String start, end;
   final bool isRecommended, isAvailable;
+  final int score;
+  final String reason;
 
   const _TimeSlot({
     required this.start,
     required this.end,
     required this.isRecommended,
     required this.isAvailable,
+    this.score = 0,
+    this.reason = '',
   });
 
   String get label => '${_bookingTimeLabel(start)} - ${_bookingTimeLabel(end)}';
+
+  String get reasonLabel {
+    switch (reason) {
+      case 'fills_between_bookings':
+        return 'Fills a schedule gap';
+      case 'starts_after_booking':
+        return 'Starts after current booking';
+      case 'ends_before_booking':
+        return 'Ends before current booking';
+      case 'balances_workload':
+        return 'Balances staff workload';
+      default:
+        return 'Good schedule fit';
+    }
+  }
 }
 
 class _Customer {
@@ -189,12 +208,14 @@ class _Customer {
 }
 
 class _BookingAllocation {
+  final String appointmentId;
   final List<_Service> services;
   final _Therapist therapist;
   final _RoomZone room;
   final _TimeSlot slot;
 
   const _BookingAllocation({
+    this.appointmentId = '',
     required this.services,
     required this.therapist,
     required this.room,
@@ -239,6 +260,7 @@ class _BookingAllocation {
 
   Map<String, dynamic> toCspAllocation() {
     return {
+      if (appointmentId.isNotEmpty) 'appointment_id': appointmentId,
       'therapist_id': therapist.id,
       'room_id': room.id,
       'service_id': primaryService.id,
@@ -255,6 +277,8 @@ class _BookingAllocation {
 class AppointmentEditAllocation {
   final String appointmentId;
   final List<String> serviceIds;
+  final List<String> bookedServiceIds;
+  final List<String> lockedServiceIds;
   final String therapistId;
   final String roomId;
   final String startTime;
@@ -263,6 +287,8 @@ class AppointmentEditAllocation {
   const AppointmentEditAllocation({
     required this.appointmentId,
     required this.serviceIds,
+    this.bookedServiceIds = const [],
+    this.lockedServiceIds = const [],
     required this.therapistId,
     required this.roomId,
     required this.startTime,
@@ -277,8 +303,11 @@ class AppointmentEditPayload {
   final String customerId;
   final String customerName;
   final String customerPhone;
+  final String notes;
   final List<AppointmentEditAllocation> allocations;
   final int activePaxIndex;
+  final bool checkInMode;
+  final bool hasPayment;
 
   const AppointmentEditPayload({
     this.appointmentId,
@@ -287,8 +316,11 @@ class AppointmentEditPayload {
     required this.customerId,
     required this.customerName,
     required this.customerPhone,
+    this.notes = '',
     required this.allocations,
     this.activePaxIndex = 0,
+    this.checkInMode = false,
+    this.hasPayment = false,
   });
 
   bool get isGroup => appointmentGroupId?.trim().isNotEmpty == true;
@@ -331,6 +363,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   bool _summaryExpanded = false;
   bool _isConfirming = false;
   bool _loadingSlots = false;
+  int _slotRequestSerial = 0;
   bool _didApplyEditPayload = false;
 
   // Data
@@ -376,6 +409,23 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   bool get _isEditing => widget.editPayload != null;
+  bool get _isCheckInMode => widget.editPayload?.checkInMode == true;
+  bool get _locksPaxCount => widget.editPayload?.hasPayment == true;
+
+  Set<String> get _lockedServiceIds {
+    final payload = widget.editPayload;
+    if (payload == null || (!payload.hasPayment && !_isCheckInMode)) {
+      return const {};
+    }
+    if (_activePaxIndex < 0 || _activePaxIndex >= payload.allocations.length) {
+      return const {};
+    }
+    final allocation = payload.allocations[_activePaxIndex];
+    return (allocation.lockedServiceIds.isEmpty
+            ? allocation.serviceIds
+            : allocation.lockedServiceIds)
+        .toSet();
+  }
 
   void _applyEditPayloadIfNeeded() {
     if (_didApplyEditPayload || widget.editPayload == null || !mounted) return;
@@ -400,6 +450,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       }
       allocations.add(
         _BookingAllocation(
+          appointmentId: editAllocation.appointmentId,
           services: services,
           therapist: therapistMatches.first,
           room: roomMatches.first,
@@ -640,11 +691,25 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   // ── CSP — Slot Generation ──────────────────────────────────────
 
+  bool _isOriginalEditStart(int paxIndex, String start) {
+    final payload = widget.editPayload;
+    if (payload == null ||
+        paxIndex < 0 ||
+        paxIndex >= payload.allocations.length) {
+      return false;
+    }
+    return _bookingCleanTime(payload.allocations[paxIndex].startTime) ==
+        _bookingCleanTime(start);
+  }
+
   Future<void> _generateSlots() async {
     if (_selectedServices.isEmpty) return;
     if (_selectedTherapist == null) return;
     if (_selectedRoom == null) return;
 
+    final requestSerial = ++_slotRequestSerial;
+    final requestPaxIndex = _activePaxIndex;
+    final requestedStart = _selectedSlot?.start;
     if (mounted) {
       setState(() => _loadingSlots = true);
     }
@@ -666,12 +731,79 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               end: slot.endTime,
               isRecommended: slot.isRecommended,
               isAvailable: slot.isAvailable,
+              score: slot.score,
+              reason: slot.reason,
             ),
           )
           .toList();
-      if (mounted) setState(() => _slots = slots);
+      if (!mounted ||
+          requestSerial != _slotRequestSerial ||
+          requestPaxIndex != _activePaxIndex) {
+        return;
+      }
+      final matchingSlots = requestedStart == null
+          ? const <_TimeSlot>[]
+          : slots
+                .where(
+                  (slot) =>
+                      slot.isAvailable && slot.start == requestedStart,
+                )
+                .toList();
+      var matchingSlot = matchingSlots.isEmpty ? null : matchingSlots.first;
+      if (matchingSlot == null &&
+          requestedStart != null &&
+          _isOriginalEditStart(requestPaxIndex, requestedStart)) {
+        final requestedEnd = _bookingMinutesToTime(
+          _bookingTimeToMinutes(requestedStart) + duration,
+        );
+        final validation = await CspService.validateSlot(
+          date: DateFormat('yyyy-MM-dd').format(_selectedDate),
+          startTime: requestedStart,
+          endTime: requestedEnd,
+          therapistId: _selectedTherapist!.id,
+          roomId: _selectedRoom!.id,
+          excludeId: _activeEditAppointmentId,
+        );
+        if (!mounted ||
+            requestSerial != _slotRequestSerial ||
+            requestPaxIndex != _activePaxIndex) {
+          return;
+        }
+        if (validation.therapistAvailable && !validation.roomFull) {
+          matchingSlot = _TimeSlot(
+            start: requestedStart,
+            end: requestedEnd,
+            isRecommended: false,
+            isAvailable: true,
+            reason: 'confirmed_booking',
+          );
+          slots.insert(0, matchingSlot);
+        }
+      }
+      setState(() {
+        _slots = slots;
+        if (requestedStart != null) {
+          _selectedSlot = matchingSlot;
+          if (matchingSlot == null) {
+            _paxAllocations[requestPaxIndex] = null;
+          }
+        }
+      });
+      if (requestedStart != null && matchingSlot == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Pax ${requestPaxIndex + 1} no longer fits at the selected time. Choose another time, therapist, or room.',
+            ),
+            backgroundColor: const Color(0xFFE53935),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
     } catch (e) {
-      if (mounted) {
+      if (mounted &&
+          requestSerial == _slotRequestSerial &&
+          requestPaxIndex == _activePaxIndex) {
         setState(() => _slots = []);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -682,7 +814,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => _loadingSlots = false);
+      if (mounted && requestSerial == _slotRequestSerial) {
+        setState(() => _loadingSlots = false);
+      }
     }
   }
 
@@ -694,6 +828,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   // ── Selection Handlers ─────────────────────────────────────────
 
   void _onServiceSelected(_Service s) {
+    if (_lockedServiceIds.contains(s.id) &&
+        _selectedServices.any((service) => service.id == s.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Booked services stay in this visit')),
+      );
+      return;
+    }
+    final isRemoving = _selectedServices.any((service) => service.id == s.id);
+    _slotRequestSerial++;
     var shouldGenerateSlots = false;
     setState(() {
       final existingIndex = _selectedServices.indexWhere(
@@ -710,6 +853,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       }
       final requiredRoomType = _requiredRoomType;
       if (_selectedRoom != null &&
+          !isRemoving &&
           requiredRoomType.isNotEmpty &&
           _selectedRoom!.type != requiredRoomType) {
         _selectedRoom = null;
@@ -735,6 +879,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       ),
       isRecommended: slot.isRecommended,
       isAvailable: slot.isAvailable,
+      score: slot.score,
+      reason: slot.reason,
     );
   }
 
@@ -749,6 +895,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _onTherapistSelected(_Therapist t) {
+    _slotRequestSerial++;
     setState(() {
       _selectedTherapist = t;
       _selectedSlot = null;
@@ -760,6 +907,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _onRoomSelected(_RoomZone r) {
+    _slotRequestSerial++;
     setState(() {
       _selectedRoom = r;
       _selectedSlot = null;
@@ -773,6 +921,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _setSelectedDate(DateTime date) {
+    _slotRequestSerial++;
     setState(() {
       _selectedDate = _stripDate(date);
       _selectedSlot = null;
@@ -808,6 +957,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   _BookingAllocation? get _currentAllocation {
     if (!_hasCurrentAllocation) return null;
     return _BookingAllocation(
+      appointmentId: _activeEditAppointmentId ?? '',
       services: List<_Service>.from(_selectedServices),
       therapist: _selectedTherapist!,
       room: _selectedRoom!,
@@ -824,6 +974,22 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   List<_BookingAllocation> get _checkoutAllocations =>
       _allocationSlots.whereType<_BookingAllocation>().toList();
+
+  bool get _hasUnpaidAddOns {
+    final payload = widget.editPayload;
+    if (payload == null || !payload.hasPayment) return false;
+    final paidIdsByAppointment = {
+      for (final allocation in payload.allocations)
+        allocation.appointmentId: allocation.lockedServiceIds.toSet(),
+    };
+    return _checkoutAllocations.any((allocation) {
+      final paidIds =
+          paidIdsByAppointment[allocation.appointmentId] ?? const <String>{};
+      return allocation.services.any(
+        (service) => !paidIds.contains(service.id),
+      );
+    });
+  }
 
   double get _bookingTotalPrice => _checkoutAllocations.fold(
     0,
@@ -843,6 +1009,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _clearCurrentAllocationSelection() {
+    _slotRequestSerial++;
     _selectedServices.clear();
     _selectedTherapist = null;
     _selectedRoom = null;
@@ -964,6 +1131,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _clearPax(int index) {
+    if (_isCheckInMode) return;
     setState(() {
       _paxAllocations[index] = null;
       _activePaxIndex = index;
@@ -972,7 +1140,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _setPaxCount(int count) {
-    if (count < 1) return;
+    if (count < 1 || _isCheckInMode || _locksPaxCount) return;
     setState(() {
       final current = _currentAllocation;
       if (current != null && _canStoreCurrentAllocation()) {
@@ -1016,6 +1184,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   bool get _canConfirm =>
       _selectedCustomer != null &&
       _checkoutAllocations.length == _paxCount &&
+      !_loadingSlots &&
       _selectedSlotIsAvailable &&
       _paxConflictMessage == null;
 
@@ -1067,16 +1236,41 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
       final CspCreateResult result;
       if (_isEditing && widget.editPayload!.isGroup) {
+        final editAllocations = widget.editPayload!.allocations;
+        final editAllocationsById = {
+          for (final allocation in editAllocations)
+            allocation.appointmentId: allocation,
+        };
         result = await CspService.updateAppointmentGroup(
           appointmentGroupId: widget.editPayload!.appointmentGroupId!,
           customerId: _selectedCustomer!.id,
           groupName: _selectedCustomer!.name,
           paxCount: allocations.length,
           date: dateStr,
-          allocations: allocations
-              .map((allocation) => allocation.toCspAllocation())
-              .toList(),
+          allocations: [
+            for (var index = 0; index < allocations.length; index++)
+              {
+                ...allocations[index].toCspAllocation(),
+                'notes': widget.editPayload!.notes,
+                if (_isCheckInMode || widget.editPayload!.hasPayment)
+                  'service_items': allocations[index].serviceItems
+                      .map(
+                        (item) => {
+                          ...item,
+                          'lineType': (editAllocationsById[allocations[index]
+                                          .appointmentId]
+                                      ?.bookedServiceIds ??
+                                  const <String>[])
+                              .contains(item['id'])
+                              ? 'booked'
+                              : 'add_on',
+                        },
+                      )
+                      .toList(),
+              },
+          ],
           type: 'appointment',
+          notes: widget.editPayload!.notes,
         );
       } else if (_isEditing && widget.editPayload!.appointmentId != null) {
         final allocation = allocations.first;
@@ -1089,16 +1283,34 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           endTime: allocation.endTime,
         );
         if (result.success) {
-          await _appointmentRepository
-              .updateAppointment(widget.editPayload!.appointmentId!, {
-                'customerId': _selectedCustomer!.id,
-                'serviceId': allocation.primaryService.id,
-                'serviceName': allocation.serviceNameSummary,
-                'serviceItems': allocation.serviceItems,
-                'itemCount': allocation.services.length,
-                'totalPrice': allocation.price,
-                'type': 'appointment',
-              });
+          final editAllocation = widget.editPayload!.allocations.first;
+          final bookedServiceIds =
+              (editAllocation.bookedServiceIds.isEmpty
+                      ? editAllocation.serviceIds
+                      : editAllocation.bookedServiceIds)
+                  .toSet();
+          await _appointmentRepository.updateAppointment(
+            widget.editPayload!.appointmentId!,
+            {
+              'customerId': _selectedCustomer!.id,
+              'serviceId': allocation.primaryService.id,
+              'serviceName': allocation.serviceNameSummary,
+              'serviceItems': allocation.serviceItems
+                  .map(
+                    (item) => {
+                      ...item,
+                      if (_isCheckInMode || widget.editPayload!.hasPayment)
+                        'lineType': bookedServiceIds.contains(item['id'])
+                            ? 'booked'
+                            : 'add_on',
+                    },
+                  )
+                  .toList(),
+              'itemCount': allocation.services.length,
+              'totalPrice': allocation.price,
+              'type': 'appointment',
+            },
+          );
         }
       } else if (allocations.length == 1) {
         final allocation = allocations.first;
@@ -1153,7 +1365,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             behavior: SnackBarBehavior.floating,
           ),
         );
-        Navigator.pop(context, popResult ?? true);
+        Navigator.pop(
+          context,
+          popResult ?? (_isCheckInMode ? 'checkInSaved' : true),
+        );
       }
     } catch (e) {
       if (mounted) {
@@ -1178,7 +1393,6 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       body: _loadingData
           ? const Center(
               child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
@@ -1196,7 +1410,11 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       child: Column(
         children: [
           _TabletHeader(
-            title: _isEditing ? 'Edit Appointment' : 'New Appointment',
+            title: _isCheckInMode
+                ? 'Check In Appointment'
+                : _isEditing
+                ? 'Edit Appointment'
+                : 'New Appointment',
             onBack: () => Navigator.pop(context),
           ),
           Expanded(
@@ -1230,8 +1448,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                         const SizedBox(height: 16),
                         _StepCard(
                           number: 4,
-                          title: 'Recommended Time Slots',
-                          badge: _AiBadge(),
+                          title: 'Available Time Slots',
                           child: _buildTimeSlotsSection(),
                         ),
                         const SizedBox(height: 32),
@@ -1269,7 +1486,11 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       child: Column(
         children: [
           _PhoneHeader(
-            title: _isEditing ? 'Edit Appointment' : 'New Appointment',
+            title: _isCheckInMode
+                ? 'Check In Appointment'
+                : _isEditing
+                ? 'Edit Appointment'
+                : 'New Appointment',
             onBack: () => Navigator.pop(context),
           ),
           Expanded(
@@ -1297,8 +1518,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                   const SizedBox(height: 12),
                   _StepCard(
                     number: 4,
-                    title: 'Recommended Time Slots',
-                    badge: _AiBadge(),
+                    title: 'Available Time Slots',
                     child: _buildTimeSlotsSection(),
                   ),
                   const SizedBox(height: 120),
@@ -1319,11 +1539,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             canConfirm: _canConfirm,
             isConfirming: _isConfirming,
             onConfirm: () => _confirmAppointment(),
-            confirmLabel: _isEditing
+            confirmLabel: _isCheckInMode
+                ? 'Continue to Check In'
+                : _isEditing
                 ? 'Save Appointment'
                 : 'Confirm Appointment',
-            onSecondaryConfirm: _isEditing && widget.editPayload!.isGroup
-                ? _saveAndConfirmGroupPayment
+            onSecondaryConfirm:
+                _isEditing && !_isCheckInMode && _hasUnpaidAddOns
+                ? _saveAndCollectAddOnPayment
                 : null,
             selectedDate: _selectedDate,
             selectedCustomer: _selectedCustomer,
@@ -1453,8 +1676,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     );
   }
 
-  Future<void> _saveAndConfirmGroupPayment() {
-    return _confirmAppointment(popResult: 'confirmGroupPayment');
+  Future<void> _saveAndCollectAddOnPayment() {
+    return _confirmAppointment(popResult: 'collectAddOnPayment');
   }
 
   Widget _buildPaxCountControl() {
@@ -1509,7 +1732,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
           _PaxStepperButton(
             icon: Icons.remove,
-            onTap: _paxCount <= 1 ? null : () => _setPaxCount(_paxCount - 1),
+            onTap: _paxCount <= 1 || _isCheckInMode || _locksPaxCount
+                ? null
+                : () => _setPaxCount(_paxCount - 1),
           ),
           Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -1524,7 +1749,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
           _PaxStepperButton(
             icon: Icons.add,
-            onTap: () => _setPaxCount(_paxCount + 1),
+            onTap: _isCheckInMode || _locksPaxCount
+                ? null
+                : () => _setPaxCount(_paxCount + 1),
           ),
         ],
       ),
@@ -1700,11 +1927,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       return const _SlotsLoadingPanel();
     }
 
-    final recommended = _slots
-        .where((s) => s.isRecommended && s.isAvailable)
-        .toList();
+    final ranked = _slots.where((s) => s.isRecommended && s.isAvailable).toList()
+      ..sort((left, right) {
+        final byScore = right.score.compareTo(left.score);
+        return byScore != 0 ? byScore : left.start.compareTo(right.start);
+      });
+    final recommended = ranked.take(3).toList();
+    final recommendedStarts = recommended.map((slot) => slot.start).toSet();
     final standard = _slots
-        .where((s) => !s.isRecommended && s.isAvailable)
+        .where((s) => s.isAvailable && !recommendedStarts.contains(s.start))
         .toList();
     final unavailable = _slots.where((s) => !s.isAvailable).toList();
 
@@ -1716,7 +1947,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Slots filtered based on therapist and room availability',
+          'Times use the outlet interval and current therapist and room availability',
           style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
         ),
         if (_isEditing && _previousSlotReference != null) ...[
@@ -1731,11 +1962,12 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
         // Recommended
         if (recommended.isNotEmpty) ...[
-          Row(
-            children: const [
-              Text('⭐ ', style: TextStyle(fontSize: 14)),
+          const Row(
+            children: [
+              Icon(Icons.schedule_outlined, size: 16, color: Color(0xFF1B6B72)),
+              SizedBox(width: 7),
               Text(
-                'Recommended',
+                'Best Fit',
                 style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -1743,7 +1975,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                 ),
               ),
               Text(
-                ' — Minimizes Schedule Gaps',
+                ' - ranked from nearby bookings',
                 style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
               ),
             ],
@@ -1784,24 +2016,13 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           const SizedBox(height: 14),
         ],
 
-        // Unavailable
         if (unavailable.isNotEmpty) ...[
-          const Text(
-            'Unavailable',
-            style: TextStyle(fontSize: 13, color: Color(0xFF9E9E9E)),
-          ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: unavailable
-                .map((s) => _UnavailableChip(label: s.label))
-                .toList(),
-          ),
-          const SizedBox(height: 8),
-          const Text(
-            'Therapist or room already booked at these times',
-            style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+          Text(
+            '${unavailable.length} unavailable time${unavailable.length == 1 ? '' : 's'} hidden',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Color(0xFF9E9E9E),
+            ),
           ),
         ],
       ],
@@ -1925,7 +2146,11 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                     )
                   : const Icon(Icons.check, size: 18),
               label: Text(
-                _isEditing ? 'Save Appointment' : 'Confirm Appointment',
+                _isCheckInMode
+                    ? 'Continue to Check In'
+                    : _isEditing
+                    ? 'Save Appointment'
+                    : 'Confirm Appointment',
                 style: const TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w600,
@@ -1943,18 +2168,18 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             ),
           ),
 
-          if (_isEditing && widget.editPayload!.isGroup) ...[
+          if (_isEditing && !_isCheckInMode && _hasUnpaidAddOns) ...[
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
               height: 50,
               child: OutlinedButton.icon(
                 onPressed: _canConfirm && !_isConfirming
-                    ? _saveAndConfirmGroupPayment
+                    ? _saveAndCollectAddOnPayment
                     : null,
                 icon: const Icon(Icons.point_of_sale_outlined, size: 18),
                 label: const Text(
-                  'Confirm Group Payment',
+                  'Save & Collect Add-on Payment',
                   style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
                 ),
                 style: OutlinedButton.styleFrom(
@@ -2384,13 +2609,11 @@ class _StepCard extends StatelessWidget {
   final int number;
   final String title;
   final Widget child;
-  final Widget? badge;
 
   const _StepCard({
     required this.number,
     required this.title,
     required this.child,
-    this.badge,
   });
 
   @override
@@ -2441,7 +2664,6 @@ class _StepCard extends StatelessWidget {
                   color: Color(0xFF1A1A2E),
                 ),
               ),
-              if (badge != null) ...[const SizedBox(width: 8), badge!],
             ],
           ),
           const SizedBox(height: 16),
@@ -2478,33 +2700,6 @@ class _PaxStepperButton extends StatelessWidget {
           size: 16,
           color: enabled ? const Color(0xFF1B6B72) : const Color(0xFFCBD5E1),
         ),
-      ),
-    );
-  }
-}
-
-class _AiBadge extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF59E0B),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: const Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text('⚡ ', style: TextStyle(fontSize: 11)),
-          Text(
-            'AI',
-            style: TextStyle(
-              fontSize: 11,
-              fontWeight: FontWeight.bold,
-              color: Colors.white,
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -3778,8 +3973,8 @@ class _SlotTile extends StatelessWidget {
             width: isSelected ? 2 : 1,
           ),
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               slot.label,
@@ -3789,10 +3984,11 @@ class _SlotTile extends StatelessWidget {
                 color: isSelected ? Colors.white : const Color(0xFF1B6B72),
               ),
             ),
+            const SizedBox(height: 4),
             Text(
-              'Best Fit',
+              slot.reasonLabel,
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 11,
                 color: isSelected
                     ? Colors.white.withValues(alpha: 0.85)
                     : const Color(0xFF1B6B72),
@@ -3840,40 +4036,6 @@ class _SlotChip extends StatelessWidget {
             color: isSelected ? Colors.white : const Color(0xFF1A1A2E),
           ),
         ),
-      ),
-    );
-  }
-}
-
-class _UnavailableChip extends StatelessWidget {
-  final String label;
-  const _UnavailableChip({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF5F5F5),
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              fontSize: 12,
-              color: Color(0xFFBDBDBD),
-              decoration: TextDecoration.lineThrough,
-            ),
-          ),
-          const SizedBox(width: 4),
-          const Text(
-            '✕',
-            style: TextStyle(fontSize: 10, color: Color(0xFFBDBDBD)),
-          ),
-        ],
       ),
     );
   }
@@ -4268,7 +4430,7 @@ class _PhoneBottomBar extends StatelessWidget {
                           : null,
                       icon: const Icon(Icons.point_of_sale_outlined, size: 16),
                       label: const Text(
-                        'Confirm Group Payment',
+                        'Save & Collect Add-on Payment',
                         style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w700,

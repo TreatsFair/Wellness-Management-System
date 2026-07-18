@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
@@ -11,6 +13,7 @@ import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 import '../../data/services/supabase_table_service.dart';
 import '../therapists/therapist_screen.dart';
+import 'accessibility_screen.dart';
 import 'online_booking_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
@@ -125,7 +128,6 @@ class ManagementScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _page,
       body: SafeArea(
         child: Column(
           children: [
@@ -193,6 +195,18 @@ class ManagementScreen extends StatelessWidget {
                         ),
                       ),
                     ),
+                  _ManagementOption(
+                    icon: Icons.accessibility_new_outlined,
+                    color: const Color(0xFF0F766E),
+                    title: 'Accessibility',
+                    subtitle: 'Adjust text, controls, cards, and display size',
+                    onTap: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const AccessibilityScreen(),
+                      ),
+                    ),
+                  ),
                   if (userRole == 'admin')
                     _ManagementOption(
                       icon: Icons.language_outlined,
@@ -236,7 +250,7 @@ class _ManagementHeader extends StatelessWidget {
 
     return Container(
       width: double.infinity,
-      color: Colors.white,
+      color: context.appSurface,
       padding: EdgeInsets.fromLTRB(4, 14, horizontalPadding, 14),
       child: Row(
         children: [
@@ -248,7 +262,7 @@ class _ManagementHeader extends StatelessWidget {
                 Text(
                   title,
                   style: TextStyle(
-                    color: _ink,
+                    color: context.appText,
                     fontSize: isCompact ? 18 : 22,
                     fontWeight: FontWeight.w800,
                   ),
@@ -257,7 +271,7 @@ class _ManagementHeader extends StatelessWidget {
                   const SizedBox(height: 4),
                   Text(
                     subtitle,
-                    style: const TextStyle(color: _muted, fontSize: 14),
+                    style: TextStyle(color: context.appMuted, fontSize: 14),
                   ),
                 ],
               ],
@@ -287,10 +301,11 @@ class _ManagementOption extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Material(
-        color: Colors.white,
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(8),
         elevation: 1,
         shadowColor: Colors.black.withValues(alpha: 0.12),
@@ -298,7 +313,10 @@ class _ManagementOption extends StatelessWidget {
           borderRadius: BorderRadius.circular(8),
           onTap: onTap,
           child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 22),
+            padding: EdgeInsets.symmetric(
+              horizontal: metrics.cardPadding,
+              vertical: metrics.cardPadding + 6,
+            ),
             child: Row(
               children: [
                 Container(
@@ -317,25 +335,25 @@ class _ManagementOption extends StatelessWidget {
                     children: [
                       Text(
                         title,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 16,
-                          color: _ink,
+                          color: context.appText,
                           fontWeight: FontWeight.w800,
                         ),
                       ),
                       const SizedBox(height: 8),
                       Text(
                         subtitle,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 14,
-                          color: _muted,
+                          color: context.appMuted,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],
                   ),
                 ),
-                const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
+                Icon(Icons.chevron_right, color: context.appMuted),
               ],
             ),
           ),

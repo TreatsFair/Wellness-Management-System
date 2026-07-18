@@ -41,20 +41,11 @@ declare
   v_rooms integer;
   v_public_remaining integer;
 begin
-  select * into v_cfg
-  from public.online_booking_services
-  where id = p_catalogue_id;
+  select * into v_cfg from public.online_booking_services where id = p_catalogue_id;
   if not found then return; end if;
-
-  select * into v_settings
-  from public.online_booking_outlet_settings
-  where outlet_id = v_cfg.outlet_id;
-  select * into v_business
-  from public.business_settings
-  where outlet_id = v_cfg.outlet_id;
-  select * into v_service
-  from public.services
-  where id = v_cfg.service_id and outlet_id = v_cfg.outlet_id;
+  select * into v_settings from public.online_booking_outlet_settings where outlet_id = v_cfg.outlet_id;
+  select * into v_business from public.business_settings where outlet_id = v_cfg.outlet_id;
+  select * into v_service from public.services where id = v_cfg.service_id and outlet_id = v_cfg.outlet_id;
 
   v_interval := greatest(coalesce(v_settings.slot_interval_minutes, 30), 5);
   v_maximum_days := greatest(coalesce(v_settings.maximum_booking_days, 7), 1);
@@ -64,18 +55,12 @@ begin
      or not coalesce(v_service.is_active, true)
      or p_date < v_today + 1
      or p_date > v_today + v_maximum_days
-     or v_pref not in ('none', 'female', 'male') then
-    return;
-  end if;
+     or v_pref not in ('none', 'female', 'male') then return; end if;
 
   if exists (
     select 1 from public.online_booking_closures c
-    where c.outlet_id = v_cfg.outlet_id
-      and c.closure_date = p_date
-      and c.is_full_day
-  ) then
-    return;
-  end if;
+    where c.outlet_id = v_cfg.outlet_id and c.closure_date = p_date and c.is_full_day
+  ) then return; end if;
 
   for v_window in
     select h.start_time, h.end_time
@@ -87,27 +72,13 @@ begin
     select v_settings.public_open_time, v_settings.public_close_time
     where not v_cfg.use_custom_hours
   loop
-    v_open := greatest(
-      v_window.start_time,
-      v_settings.public_open_time,
-      v_business.open_time
-    );
-    v_close := least(
-      v_window.end_time,
-      v_settings.public_close_time,
-      v_business.close_time
-    );
+    v_open := greatest(v_window.start_time, v_settings.public_open_time, v_business.open_time);
+    v_close := least(v_window.end_time, v_settings.public_close_time, v_business.close_time);
     if v_close <= v_open then continue; end if;
 
-    v_anchor := p_date + greatest(
-      v_settings.public_open_time,
-      v_business.open_time
-    );
+    v_anchor := p_date + greatest(v_settings.public_open_time, v_business.open_time);
     v_steps := greatest(
-      ceil(
-        extract(epoch from ((p_date + v_open) - v_anchor))
-          / 60.0 / v_interval
-      )::integer,
+      ceil(extract(epoch from ((p_date + v_open) - v_anchor)) / 60.0 / v_interval)::integer,
       0
     );
     v_slot_local := v_anchor + make_interval(mins => v_steps * v_interval);
@@ -115,15 +86,9 @@ begin
     while v_slot_local + make_interval(
       mins => greatest(v_service.duration, 1) + v_cfg.buffer_after_minutes
     ) <= p_date + v_close loop
-      v_end_local := v_slot_local + make_interval(
-        mins => greatest(v_service.duration, 1)
-      );
-      v_block_start_local := v_slot_local - make_interval(
-        mins => v_cfg.buffer_before_minutes
-      );
-      v_block_end_local := v_end_local + make_interval(
-        mins => v_cfg.buffer_after_minutes
-      );
+      v_end_local := v_slot_local + make_interval(mins => greatest(v_service.duration, 1));
+      v_block_start_local := v_slot_local - make_interval(mins => v_cfg.buffer_before_minutes);
+      v_block_end_local := v_end_local + make_interval(mins => v_cfg.buffer_after_minutes);
 
       if (v_slot_local at time zone 'Asia/Kuala_Lumpur')
           < now() + make_interval(mins => v_settings.minimum_advance_minutes)
@@ -145,8 +110,7 @@ begin
         - (
           select count(*) from public.booking_holds h
           where h.online_booking_service_id = v_cfg.id
-            and h.status = 'pending_payment'
-            and h.expires_at > now()
+            and h.status = 'pending_payment' and h.expires_at > now()
             and h.start_at - make_interval(mins => h.buffer_before_minutes)
               < (v_block_end_local at time zone 'Asia/Kuala_Lumpur')
             and h.end_at + make_interval(mins => h.buffer_after_minutes)
@@ -158,8 +122,7 @@ begin
             and public.csp_blocks_schedule(a.status::text)
             and public.csp_appointment_start_at(a) < v_block_end_local
             and public.csp_appointment_block_end_at(a) > v_block_start_local
-        ),
-        0
+        ), 0
       )::integer into v_public_remaining;
 
       select count(*)::integer into v_therapists
@@ -174,8 +137,7 @@ begin
         )
         and exists (
           select 1 from public.therapist_working_hours wh
-          where wh.therapist_id = t.id
-            and wh.outlet_id = v_cfg.outlet_id
+          where wh.therapist_id = t.id and wh.outlet_id = v_cfg.outlet_id
             and wh.day_of_week = extract(dow from p_date)::integer
             and p_date + wh.start_time <= v_block_start_local
             and p_date + wh.end_time >= v_block_end_local
@@ -196,8 +158,7 @@ begin
         and not exists (
           select 1 from public.booking_holds h
           where h.assigned_therapist_id = t.id
-            and h.status = 'pending_payment'
-            and h.expires_at > now()
+            and h.status = 'pending_payment' and h.expires_at > now()
             and h.start_at - make_interval(mins => h.buffer_before_minutes)
               < (v_block_end_local at time zone 'Asia/Kuala_Lumpur')
             and h.end_at + make_interval(mins => h.buffer_after_minutes)
@@ -216,14 +177,12 @@ begin
         - (
           select count(*) from public.booking_holds h
           where h.assigned_room_id = r.id
-            and h.status = 'pending_payment'
-            and h.expires_at > now()
+            and h.status = 'pending_payment' and h.expires_at > now()
             and h.start_at - make_interval(mins => h.buffer_before_minutes)
               < (v_block_end_local at time zone 'Asia/Kuala_Lumpur')
             and h.end_at + make_interval(mins => h.buffer_after_minutes)
               > (v_block_start_local at time zone 'Asia/Kuala_Lumpur')
-        ),
-        0
+        ), 0
       )), 0)::integer into v_rooms
       from public.rooms r
       join public.online_booking_service_rooms cr on cr.room_id = r.id
@@ -270,12 +229,10 @@ begin
     available := exists(
       select 1
       from public.get_public_booking_slots_v2(
-        p_catalogue_id,
-        v_date,
-        p_therapist_preference
+        p_catalogue_id, v_date, p_therapist_preference
       )
     );
     return next;
   end loop;
 end;
-$$;
+$$;;

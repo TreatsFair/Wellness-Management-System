@@ -140,6 +140,30 @@ function pathOf(request: Request): string {
 function uuid(value: unknown): string | null { const text = String(value ?? "").trim(); return UUID.test(text) ? text : null; }
 function preference(value: unknown): string { const text = String(value ?? "none").toLowerCase(); return PREFERENCES.has(text) ? text : "none"; }
 
+type GroupAllocation = {
+  catalogue_id: string;
+  therapist_preference: string;
+  therapist_request: string;
+  guest_name: string;
+};
+
+function groupAllocations(value: unknown): GroupAllocation[] | null {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 6) return null;
+  const rows: GroupAllocation[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const item = value[index] as Record<string, unknown> | null;
+    const catalogueId = uuid(item?.catalogue_id);
+    if (!catalogueId) return null;
+    rows.push({
+      catalogue_id: catalogueId,
+      therapist_preference: preference(item?.therapist_preference),
+      therapist_request: String(item?.therapist_request ?? "").trim().slice(0, 200),
+      guest_name: String(item?.guest_name ?? `Guest ${index + 1}`).trim().slice(0, 80) || `Guest ${index + 1}`,
+    });
+  }
+  return rows;
+}
+
 // Mirrors public.normalize_my_phone() in 040_past_time_slots_and_phone_normalization.sql.
 // Billplz's sandbox/live API expects a clean "60XXXXXXXXX" mobile number; the booking
 // form's free-typed phone (spaces, dashes, "+", leading 0 vs 60) was being sent through
@@ -165,6 +189,32 @@ async function rpc(name: string, args: Record<string, unknown> = {}) {
   return data ?? [];
 }
 
+async function publicBookingOutlets() {
+  const [publicRows, outletResult, hoursResult] = await Promise.all([
+    rpc("list_public_booking_outlets_v2") as Promise<
+      Array<Record<string, unknown>>
+    >,
+    supabase.from("outlets").select("id,code").eq("is_active", true),
+    supabase.from("business_settings").select("outlet_id,open_time,close_time"),
+  ]);
+  if (outletResult.error) throw outletResult.error;
+  if (hoursResult.error) throw hoursResult.error;
+
+  const codeByOutletId = new Map(
+    (outletResult.data ?? []).map((row) => [String(row.id), String(row.code)]),
+  );
+  const hoursByCode = new Map(
+    (hoursResult.data ?? []).map((row) => [
+      codeByOutletId.get(String(row.outlet_id)),
+      { open_time: row.open_time, close_time: row.close_time },
+    ]),
+  );
+  return publicRows.map((row) => ({
+    ...row,
+    ...(hoursByCode.get(String(row.code)) ?? {}),
+  }));
+}
+
 // For RPCs that return a single scalar (not `returns table`), where a real
 // `null` result (e.g. "no matching row") must stay distinguishable from [].
 async function rpcScalar(name: string, args: Record<string, unknown> = {}) {
@@ -178,7 +228,7 @@ async function route(request: Request): Promise<Response> {
   const path = pathOf(request);
   if (request.method === "GET" && path === "/health") return json(request, { ok: true, payment_enabled: BILLPLZ_CONFIGURED, auto_confirm: AUTO_CONFIRM });
   if (request.method === "GET" && path === "/outlets") {
-    return json(request, { outlets: await rpc("list_public_booking_outlets") });
+    return json(request, { outlets: await publicBookingOutlets() });
   }
   if (request.method === "GET" && path === "/catalogue") {
     const outlet = String(url.searchParams.get("outlet") ?? "").trim().toLowerCase();
@@ -210,6 +260,68 @@ async function route(request: Request): Promise<Response> {
       p_catalogue_id: catalogueId, p_date: date,
       p_therapist_preference: preference(url.searchParams.get("therapist_preference")),
     }) });
+  }
+  if (request.method === "POST" && path === "/availability/group-dates") {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const allocations = groupAllocations(body?.allocations);
+    if (!allocations) return fail(request, "Choose one valid treatment for every guest");
+    const dateRange = await rpc("get_public_booking_group_date_range_v1", {
+      p_allocations: allocations,
+    }) as Array<Record<string, unknown>>;
+    // Exact combined availability is checked when a date is selected. The
+    // hold RPC validates it again before reserving resources.
+    const dates = dateRange.map((row) => ({
+      booking_date: String(row.booking_date ?? ""),
+      available: true,
+    }));
+    return json(request, { dates });
+  }
+  if (request.method === "POST" && path === "/availability/group-times") {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const allocations = groupAllocations(body?.allocations);
+    const date = String(body?.date ?? "");
+    if (!allocations || !DATE.test(date)) return fail(request, "Treatments and date are required");
+    const slots = await rpc("get_public_booking_group_slots_v1", {
+      p_allocations: allocations,
+      p_date: date,
+    }) as Array<Record<string, unknown>>;
+    return json(request, { slots: slots.map((row) => ({
+      start_at: row.start_at,
+      end_at: row.end_at,
+    })) });
+  }
+  if (request.method === "POST" && path === "/booking-groups") {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    if (!body || String(body.website ?? "").trim()) return fail(request, "Invalid booking request");
+    const allocations = groupAllocations(body.allocations);
+    const startAt = String(body.start_at ?? "").trim();
+    if (!allocations || !startAt) return fail(request, "Treatments and time are required");
+    try {
+      const rows = await rpc("create_public_booking_group_hold_v1", {
+        p_allocations: allocations,
+        p_start_at: startAt,
+        p_customer_name: String(body.customer_name ?? ""),
+        p_customer_phone: String(body.customer_phone ?? ""),
+        p_customer_email: String(body.customer_email ?? ""),
+        p_notes: String(body.notes ?? ""),
+        p_request_fingerprint: await fingerprint(request),
+      }) as Array<Record<string, unknown>>;
+      const hold = rows[0];
+      if (!hold) return fail(request, "Unable to reserve this group time", 500);
+      return json(request, { hold: {
+        token: hold.group_token,
+        expires_at: hold.hold_expires_at,
+        total_price: Number(hold.total_price),
+        guest_count: Number(hold.guest_count),
+        status: "pending_payment",
+      } }, 201);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/no longer available|already booked|capacity/i.test(message)) {
+        return fail(request, "That time can no longer fit the whole group — there may not be enough masseurs matching everyone's preference. Please pick another time.", 409);
+      }
+      throw error;
+    }
   }
   if (request.method === "POST" && path === "/booking-holds") {
     const body = await request.json().catch(() => null) as Record<string, unknown> | null;
@@ -244,7 +356,12 @@ async function route(request: Request): Promise<Response> {
     const token = uuid(body?.token);
     if (!token) return fail(request, "A valid booking reference is required");
     try {
-      const rows = await rpc("get_booking_hold_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
+      let groupPayment = true;
+      let rows = await rpc("get_booking_group_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
+      if (!rows[0]) {
+        groupPayment = false;
+        rows = await rpc("get_booking_hold_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
+      }
       const hold = rows[0];
       if (!hold) return fail(request, "Booking reference not found", 404);
       if (hold.status !== "pending_payment" || new Date(String(hold.expires_at)) <= new Date()) {
@@ -271,7 +388,9 @@ async function route(request: Request): Promise<Response> {
       const billUrl = String(bill.url ?? "");
       if (!billId || !billUrl) return fail(request, "Unable to start payment. Please try again.", 502);
 
-      await rpc("record_billplz_bill", { p_token: token, p_bill_id: billId });
+      await rpc(groupPayment ? "record_billplz_group_bill" : "record_billplz_bill", {
+        p_token: token, p_bill_id: billId,
+      });
       return json(request, { url: billUrl }, 201);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -302,7 +421,12 @@ async function route(request: Request): Promise<Response> {
       return fail(request, "Invalid signature", 400);
     }
 
-    const token = await rpcScalar("get_booking_hold_token_by_bill", { p_bill_id: billId });
+    let groupPayment = true;
+    let token = await rpcScalar("get_booking_group_token_by_bill", { p_bill_id: billId });
+    if (!token) {
+      groupPayment = false;
+      token = await rpcScalar("get_booking_hold_token_by_bill", { p_bill_id: billId });
+    }
     if (!token) {
       // Unknown bill id — nothing to do, but acknowledge so Billplz doesn't retry forever.
       return json(request, { ok: true });
@@ -311,10 +435,10 @@ async function route(request: Request): Promise<Response> {
     const paid = get("paid") === "true";
     try {
       if (paid) {
-        await rpc("confirm_public_booking_hold", { p_token: token });
-        await rpc("record_online_booking_payment", { p_token: token });
+        await rpc(groupPayment ? "confirm_public_booking_group_v1" : "confirm_public_booking_hold", { p_token: token });
+        await rpc(groupPayment ? "record_online_booking_group_payment" : "record_online_booking_payment", { p_token: token });
       } else {
-        await rpc("mark_booking_hold_payment_failed", { p_token: token });
+        await rpc(groupPayment ? "mark_booking_group_payment_failed" : "mark_booking_hold_payment_failed", { p_token: token });
       }
     } catch (error) {
       console.error("Billplz callback processing failed", error);
@@ -330,11 +454,16 @@ async function route(request: Request): Promise<Response> {
     const token = uuid(body?.token);
     if (!token) return fail(request, "A valid booking reference is required");
     try {
-      const rows = await rpc("confirm_public_booking_hold", { p_token: token }) as Array<Record<string, unknown>>;
+      const groupStatus = await rpc("get_public_booking_group_status_v1", { p_token: token }) as Array<Record<string, unknown>>;
+      const groupBooking = Boolean(groupStatus[0]);
+      const rows = await rpc(groupBooking ? "confirm_public_booking_group_v1" : "confirm_public_booking_hold", {
+        p_token: token,
+      }) as Array<Record<string, unknown>>;
       const appointment = rows[0];
       if (!appointment) return fail(request, "Unable to confirm this booking", 500);
       return json(request, { appointment: {
-        id: appointment.appointment_id,
+        id: groupBooking ? appointment.appointment_group_id : appointment.appointment_id,
+        appointment_ids: groupBooking ? appointment.appointment_ids : [appointment.appointment_id],
         status: appointment.status,
         start_at: appointment.start_at,
         end_at: appointment.end_at,
@@ -350,7 +479,8 @@ async function route(request: Request): Promise<Response> {
     const token = uuid(url.searchParams.get("token"));
     if (!token) return fail(request, "A valid booking reference is required");
     await rpc("expire_stale_booking_holds");
-    const rows = await rpc("get_public_booking_hold_status_v2", { p_token: token }) as Array<Record<string, unknown>>;
+    let rows = await rpc("get_public_booking_group_status_v1", { p_token: token }) as Array<Record<string, unknown>>;
+    if (!rows[0]) rows = await rpc("get_public_booking_hold_status_v2", { p_token: token }) as Array<Record<string, unknown>>;
     if (!rows[0]) return fail(request, "Booking reference not found", 404);
     const hold = rows[0];
     return json(request, { hold: {
@@ -360,6 +490,7 @@ async function route(request: Request): Promise<Response> {
       total_price: Number(hold.total_price),
       start_at: hold.start_at,
       end_at: hold.end_at,
+      guest_count: Number(hold.guest_count ?? 1),
     } });
   }
   return fail(request, "Not found", 404);

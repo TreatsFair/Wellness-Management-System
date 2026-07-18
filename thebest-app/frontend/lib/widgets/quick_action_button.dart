@@ -26,13 +26,14 @@ class QuickActionButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fg = emphasized ? Colors.white : AppColors.text;
-    final iconBg = emphasized ? Colors.white24 : AppColors.primarySoft;
-    final iconFg = emphasized ? Colors.white : AppColors.primary;
+    final scheme = Theme.of(context).colorScheme;
+    final fg = emphasized ? Colors.white : scheme.onSurface;
+    final iconBg = emphasized ? Colors.white24 : scheme.primaryContainer;
+    final iconFg = emphasized ? Colors.white : scheme.onPrimaryContainer;
     return AppCard(
       onTap: onTap,
-      color: emphasized ? AppColors.primary : AppColors.surface,
-      borderColor: emphasized ? AppColors.primary : AppColors.border,
+      color: emphasized ? AppColors.primary : null,
+      borderColor: emphasized ? AppColors.primary : null,
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.lg,
         vertical: AppSpacing.lg,
@@ -71,7 +72,7 @@ class QuickActionButton extends StatelessWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 12,
-                      color: emphasized ? Colors.white70 : AppColors.muted,
+                      color: emphasized ? Colors.white70 : scheme.onSurfaceVariant,
                     ),
                   ),
               ],
@@ -79,7 +80,7 @@ class QuickActionButton extends StatelessWidget {
           ),
           Icon(
             Icons.chevron_right,
-            color: emphasized ? Colors.white70 : AppColors.subtle,
+            color: emphasized ? Colors.white70 : scheme.onSurfaceVariant,
           ),
         ],
       ),

@@ -331,7 +331,6 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       body: SafeArea(
         child: _loading
             ? const Center(
@@ -831,11 +830,9 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       appBar: AppBar(
-        backgroundColor: Colors.white,
         elevation: 0,
-        leading: const BackButton(color: Color(0xFF1A1A2E)),
+        leading: const BackButton(),
         centerTitle: true,
         title: const Text(
           'Staff Details',

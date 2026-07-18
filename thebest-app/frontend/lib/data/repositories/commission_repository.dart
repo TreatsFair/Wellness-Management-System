@@ -28,15 +28,23 @@ class CommissionRepository {
     required Map<String, dynamic>? staff,
     required String role,
   }) {
-    final serviceId = asString(service['id'], asString(service['serviceId']));
+    final serviceId = asString(
+      service['id'],
+      asString(service['serviceId'], asString(service['service_id'])),
+    );
     final overrides = _commissionMap(staff?['serviceCommissions']);
     if (serviceId.isNotEmpty && overrides.containsKey(serviceId)) {
       return overrides[serviceId]!;
     }
 
     return _normalizeRole(role) == 'Counter'
-        ? asDouble(service['counterCommission'])
-        : asDouble(service['therapistCommission']);
+        ? asDouble(
+            service['counterCommission'] ?? service['counter_commission'],
+          )
+        : asDouble(
+            service['therapistCommission'] ??
+                service['therapist_commission'],
+          );
   }
 }
 

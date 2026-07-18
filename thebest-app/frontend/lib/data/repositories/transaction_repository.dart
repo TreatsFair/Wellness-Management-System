@@ -41,6 +41,38 @@ class TransactionRepository {
 
   Future<Map<String, dynamic>?> getTransaction(String id) => _table.getById(id);
 
+  Future<Map<String, dynamic>?> getTransactionByReceiptNumber(
+    String receiptNumber,
+  ) async {
+    final rows = await _table.findBy(
+      'receipt_number',
+      receiptNumber,
+      limit: 1,
+    );
+    return rows.isEmpty ? null : rows.first;
+  }
+
+  Future<List<Map<String, dynamic>>> getLinkedAppointmentTransactions({
+    String appointmentId = '',
+    String appointmentGroupId = '',
+  }) {
+    if (appointmentGroupId.trim().isNotEmpty) {
+      return _table.findBy(
+        'appointment_group_id',
+        appointmentGroupId,
+        orderBy: 'created_at',
+      );
+    }
+    if (appointmentId.trim().isNotEmpty) {
+      return _table.findBy(
+        'appointment_id',
+        appointmentId,
+        orderBy: 'created_at',
+      );
+    }
+    return Future.value(const <Map<String, dynamic>>[]);
+  }
+
   Future<Map<String, dynamic>> createTransaction(Map<String, dynamic> values) {
     return _table.create({
       ...values,

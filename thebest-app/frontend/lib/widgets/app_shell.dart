@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../core/accessibility/accessibility_settings.dart';
 import '../core/outlets/outlet_context.dart';
 import '../core/theme/app_theme.dart';
 import '../core/utils/responsive.dart';
@@ -12,35 +13,9 @@ import '../screens/management/management_screen.dart';
 import '../screens/orders/order_screen.dart';
 import '../screens/reports/reports_screen.dart';
 import '../screens/timetable/timetable_screen.dart';
+import 'app_shell_scope.dart';
 import 'quick_action_button.dart';
 import 'section_header.dart';
-
-/// Tab indexes for [AppShell], used with [AppShellScope.selectTab].
-abstract final class AppShellTabs {
-  static const int home = 0;
-  static const int appointments = 1;
-  static const int timetable = 2;
-  static const int walkIn = 3;
-  static const int more = 4;
-}
-
-/// Lets screens inside the shell switch tabs (e.g. dashboard quick actions
-/// jumping to Timetable) without pushing duplicate routes.
-class AppShellScope extends InheritedWidget {
-  final void Function(int index) selectTab;
-
-  const AppShellScope({
-    super.key,
-    required this.selectTab,
-    required super.child,
-  });
-
-  static AppShellScope? of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<AppShellScope>();
-
-  @override
-  bool updateShouldNotify(AppShellScope oldWidget) => false;
-}
 
 /// Persistent navigation wrapper for the whole app: bottom navigation bar
 /// on phones, navigation rail on tablets. The five daily destinations are
@@ -56,6 +31,7 @@ class _AppShellState extends State<AppShell> {
   final _profileRepository = ProfileRepository();
   int _selectedIndex = 0;
   String _userRole = 'staff';
+  bool _fullscreen = false;
 
   @override
   void initState() {
@@ -101,9 +77,9 @@ class _AppShellState extends State<AppShell> {
       label: 'Timetable',
     ),
     (
-      icon: Icons.point_of_sale_outlined,
-      selectedIcon: Icons.point_of_sale,
-      label: 'Walk-in',
+      icon: Icons.history_outlined,
+      selectedIcon: Icons.history,
+      label: 'History',
     ),
     (
       icon: Icons.grid_view_outlined,
@@ -126,7 +102,7 @@ class _AppShellState extends State<AppShell> {
       case 2:
         return TimetableScreen(key: key, userRole: _userRole);
       case 3:
-        return WalkInPosScreen(key: key);
+        return SalesHistoryScreen(key: key, userRole: _userRole);
       default:
         return _MoreScreen(key: key, userRole: _userRole);
     }
@@ -134,12 +110,21 @@ class _AppShellState extends State<AppShell> {
 
   void _selectTab(int index) {
     if (index == _selectedIndex) return;
-    setState(() => _selectedIndex = index);
+    setState(() {
+      _selectedIndex = index;
+      _fullscreen = false;
+    });
+  }
+
+  void _setFullscreen(bool fullscreen) {
+    if (_fullscreen == fullscreen) return;
+    setState(() => _fullscreen = fullscreen);
   }
 
   @override
   Widget build(BuildContext context) {
     final isTablet = Responsive.isTablet(context);
+    final metrics = context.uiScale;
 
     // Tablet keeps the dashboard-as-hub layout: the dashboard's own cards
     // navigate to every screen, so no rail is shown.
@@ -147,27 +132,40 @@ class _AppShellState extends State<AppShell> {
       return const DashboardScreen();
     }
 
-    final body = AppShellScope(selectTab: _selectTab, child: _buildScreen());
+    final body = AppShellScope(
+      selectTab: _selectTab,
+      fullscreen: _fullscreen,
+      setFullscreen: _setFullscreen,
+      child: _buildScreen(),
+    );
     return Scaffold(
       body: SafeArea(child: body),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _selectedIndex,
-        onDestinationSelected: (index) =>
-            setState(() => _selectedIndex = index),
-        destinations: [
-          for (final destination in _destinations)
-            NavigationDestination(
-              icon: Icon(destination.icon),
-              selectedIcon: Icon(destination.selectedIcon),
-              label: destination.label,
+      bottomNavigationBar: _fullscreen
+          ? null
+          : NavigationBar(
+              height: metrics.navigationHeight,
+              labelBehavior:
+                  (metrics.preset == UiScalePreset.large ||
+                          MediaQuery.textScalerOf(context).scale(1) > 1.15) &&
+                      MediaQuery.sizeOf(context).width < 520
+                  ? NavigationDestinationLabelBehavior.onlyShowSelected
+                  : NavigationDestinationLabelBehavior.alwaysShow,
+              selectedIndex: _selectedIndex,
+              onDestinationSelected: _selectTab,
+              destinations: [
+                for (final destination in _destinations)
+                  NavigationDestination(
+                    icon: Icon(destination.icon),
+                    selectedIcon: Icon(destination.selectedIcon),
+                    label: destination.label,
+                  ),
+              ],
             ),
-        ],
-      ),
     );
   }
 }
 
-/// Occasional destinations: history, members, management, reports.
+/// Occasional destinations: walk-ins, members, management, reports.
 class _MoreScreen extends StatelessWidget {
   final String userRole;
 
@@ -177,7 +175,6 @@ class _MoreScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final isAdmin = userRole == 'admin';
     return Scaffold(
-      backgroundColor: AppColors.canvas,
       body: ListView(
         padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
@@ -191,14 +188,12 @@ class _MoreScreen extends StatelessWidget {
           const SectionHeader('Daily reference'),
           const SizedBox(height: AppSpacing.md),
           QuickActionButton(
-            icon: Icons.history_outlined,
-            label: 'Sales history',
-            sublabel: 'Past orders and payments',
+            icon: Icons.point_of_sale_outlined,
+            label: 'Walk-in order',
+            sublabel: 'Create a walk-in service order',
             onTap: () => Navigator.push(
               context,
-              MaterialPageRoute(
-                builder: (_) => SalesHistoryScreen(userRole: userRole),
-              ),
+              MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
             ),
           ),
           const SizedBox(height: AppSpacing.md),

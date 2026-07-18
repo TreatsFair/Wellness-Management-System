@@ -15,15 +15,16 @@ class PaymentResult {
     final ids = row['appointment_ids'] ?? row['appointmentIds'];
     return PaymentResult(
       success: row['success'] == true,
-      appointmentId: row['appointment_id']?.toString() ??
-          row['appointmentId']?.toString(),
-      appointmentGroupId: row['appointment_group_id']?.toString() ??
+      appointmentId:
+          row['appointment_id']?.toString() ?? row['appointmentId']?.toString(),
+      appointmentGroupId:
+          row['appointment_group_id']?.toString() ??
           row['appointmentGroupId']?.toString(),
       appointmentIds: ids is Iterable
           ? ids.map((id) => id.toString()).toList()
           : const [],
-      transactionId: row['transaction_id']?.toString() ??
-          row['transactionId']?.toString(),
+      transactionId:
+          row['transaction_id']?.toString() ?? row['transactionId']?.toString(),
       errorCode: row['error_code']?.toString() ?? row['errorCode']?.toString(),
       errorMessage:
           row['error_message']?.toString() ?? row['errorMessage']?.toString(),
@@ -235,6 +236,130 @@ class PaymentService {
         'p_payment_method': paymentMethod,
         'p_receipt_number': receiptNumber,
         'p_transaction_notes': transactionNotes,
+      },
+    );
+    return PaymentResult.fromMap(_firstMap(rows));
+  }
+
+  static Future<PaymentResult> checkInPaidAppointmentWithAddOn({
+    required String appointmentId,
+    required List<Map<String, dynamic>> addOnServiceItems,
+    String? endTime,
+    String? endAt,
+    bool allowLateExtensionOverlap = false,
+    String? counterStaffId,
+    String? counterStaffName,
+    required double servicePrice,
+    required double sstAmount,
+    required double totalAmount,
+    required String paymentMethod,
+    required String receiptNumber,
+  }) async {
+    final rows = await _client.rpc(
+      'check_in_paid_appointment_with_addon',
+      params: {
+        'p_appointment_id': appointmentId,
+        'p_addon_service_items': addOnServiceItems,
+        'p_end_time': endTime,
+        'p_end_at': endAt,
+        'p_allow_late_extension_overlap': allowLateExtensionOverlap,
+        'p_counter_staff_id': _nullIfBlank(counterStaffId),
+        'p_counter_staff_name': counterStaffName,
+        'p_service_price': servicePrice,
+        'p_sst_amount': sstAmount,
+        'p_total_amount': totalAmount,
+        'p_payment_method': paymentMethod,
+        'p_receipt_number': receiptNumber,
+      },
+    );
+    return PaymentResult.fromMap(_firstMap(rows));
+  }
+
+  static Future<PaymentResult> payAppointmentAddOns({
+    required String appointmentId,
+    required List<Map<String, dynamic>> addOnServiceItems,
+    String? counterStaffId,
+    String? counterStaffName,
+    required double servicePrice,
+    required double sstAmount,
+    required double totalAmount,
+    required String paymentMethod,
+    required String receiptNumber,
+  }) async {
+    final rows = await _client.rpc(
+      'pay_appointment_addons',
+      params: {
+        'p_appointment_id': appointmentId,
+        'p_addon_service_items': addOnServiceItems,
+        'p_counter_staff_id': _nullIfBlank(counterStaffId),
+        'p_counter_staff_name': counterStaffName,
+        'p_service_price': servicePrice,
+        'p_sst_amount': sstAmount,
+        'p_total_amount': totalAmount,
+        'p_payment_method': paymentMethod,
+        'p_receipt_number': receiptNumber,
+      },
+    );
+    return PaymentResult.fromMap(_firstMap(rows));
+  }
+
+  static Future<PaymentResult> checkInPaidAppointmentGroupWithAddOn({
+    required String appointmentGroupId,
+    required List<String> appointmentIds,
+    required Map<String, List<Map<String, dynamic>>> addOnItemsByAppointment,
+    Map<String, Map<String, dynamic>> perAppointmentUpdates = const {},
+    String? counterStaffId,
+    String? counterStaffName,
+    required double servicePrice,
+    required double sstAmount,
+    required double totalAmount,
+    required String paymentMethod,
+    required String receiptNumber,
+  }) async {
+    final rows = await _client.rpc(
+      'check_in_paid_appointment_group_with_addon',
+      params: {
+        'p_appointment_group_id': appointmentGroupId,
+        'p_appointment_ids': appointmentIds,
+        'p_addon_items_by_appointment': addOnItemsByAppointment,
+        'p_per_appointment_updates': perAppointmentUpdates,
+        'p_counter_staff_id': _nullIfBlank(counterStaffId),
+        'p_counter_staff_name': counterStaffName,
+        'p_service_price': servicePrice,
+        'p_sst_amount': sstAmount,
+        'p_total_amount': totalAmount,
+        'p_payment_method': paymentMethod,
+        'p_receipt_number': receiptNumber,
+      },
+    );
+    return PaymentResult.fromMap(_firstMap(rows));
+  }
+
+  static Future<PaymentResult> payAppointmentGroupAddOns({
+    required String appointmentGroupId,
+    required List<String> appointmentIds,
+    required Map<String, List<Map<String, dynamic>>> addOnItemsByAppointment,
+    String? counterStaffId,
+    String? counterStaffName,
+    required double servicePrice,
+    required double sstAmount,
+    required double totalAmount,
+    required String paymentMethod,
+    required String receiptNumber,
+  }) async {
+    final rows = await _client.rpc(
+      'pay_appointment_group_addons',
+      params: {
+        'p_appointment_group_id': appointmentGroupId,
+        'p_appointment_ids': appointmentIds,
+        'p_addon_items_by_appointment': addOnItemsByAppointment,
+        'p_counter_staff_id': _nullIfBlank(counterStaffId),
+        'p_counter_staff_name': counterStaffName,
+        'p_service_price': servicePrice,
+        'p_sst_amount': sstAmount,
+        'p_total_amount': totalAmount,
+        'p_payment_method': paymentMethod,
+        'p_receipt_number': receiptNumber,
       },
     );
     return PaymentResult.fromMap(_firstMap(rows));

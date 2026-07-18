@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/repository_utils.dart';
+import '../../data/repositories/transaction_repository.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -129,6 +130,9 @@ class _CustomerOrder {
   final String customerName;
   final String customerPhone;
   final String paymentMethod;
+  final String source;
+  final String appointmentId;
+  final String appointmentGroupId;
   final String serviceName;
   final String therapistName;
   final String roomName;
@@ -145,6 +149,9 @@ class _CustomerOrder {
     required this.customerName,
     required this.customerPhone,
     required this.paymentMethod,
+    required this.source,
+    required this.appointmentId,
+    required this.appointmentGroupId,
     required this.serviceName,
     required this.therapistName,
     required this.roomName,
@@ -188,6 +195,11 @@ class _CustomerOrder {
       tx['servicePrice'],
       asDouble(appointment['totalPrice']),
     );
+    final sstAmount = asDouble(tx['sstAmount']);
+    final totalAmount = asDouble(tx['totalAmount'], servicePrice + sstAmount);
+    final resolvedServicePrice = servicePrice == 0 && totalAmount > 0
+        ? totalAmount - sstAmount
+        : servicePrice;
     final itemCount = rawItems.isNotEmpty
         ? rawItems.length
         : asInt(tx['itemCount'], 1);
@@ -198,27 +210,50 @@ class _CustomerOrder {
       customerName: customerName,
       customerPhone: customerPhone,
       paymentMethod: asString(tx['paymentMethod'], 'unknown'),
+      source: asString(tx['source'], 'walkin').toLowerCase(),
+      appointmentId: asString(tx['appointmentId']),
+      appointmentGroupId: asString(tx['appointmentGroupId']),
       serviceName: serviceName,
       therapistName: therapistName,
       roomName: roomName,
       itemCount: itemCount <= 0 ? 1 : itemCount,
-      servicePrice: servicePrice,
-      sstAmount: asDouble(tx['sstAmount']),
-      totalAmount: asDouble(tx['totalAmount'], servicePrice),
-      createdAt: asDateTime(tx['createdAt']) ?? DateTime.now(),
+      servicePrice: resolvedServicePrice,
+      sstAmount: sstAmount,
+      totalAmount: totalAmount,
+      createdAt:
+          asDateTime(tx['paidAt']) ??
+          asDateTime(tx['createdAt']) ??
+          DateTime.now(),
       serviceGroups: _CustomerOrderServiceGroup.fromItems(
         rawItems,
         fallbackCustomerName: customerName,
         fallbackServiceName: serviceName,
         fallbackTherapistName: therapistName,
         fallbackRoomName: roomName,
-        fallbackAmount: servicePrice,
+        fallbackAmount: resolvedServicePrice,
       ),
     );
   }
 
   String get serviceSummary =>
       '$itemCount item${itemCount == 1 ? '' : 's'}';
+
+  bool get isOnlineBooking => source == 'online_booking' || source == 'online';
+  bool get isAddOnReceipt => source == 'appointment_addon';
+
+  String get appointmentLinkKey {
+    if (appointmentGroupId.isNotEmpty) return 'group:$appointmentGroupId';
+    if (appointmentId.isNotEmpty) return 'appointment:$appointmentId';
+    return 'receipt:$id';
+  }
+
+  String get sourceLabel {
+    if (source == 'appointment_addon') return 'Appointment add-on';
+    if (isOnlineBooking) return 'Online Booking';
+    if (source == 'appointment') return 'Appointment booking';
+    if (source == 'walkin' || source == 'walk_in') return 'Walk-in';
+    return source.isEmpty ? 'Walk-in' : source;
+  }
 
   String get paymentLabel {
     switch (paymentMethod) {
@@ -231,6 +266,9 @@ class _CustomerOrder {
         return 'Credit Card';
       case 'debit_card':
         return 'Debit Card';
+      case 'billplz':
+      case 'online':
+        return 'Online';
       default:
         return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
     }
@@ -251,6 +289,63 @@ class _CustomerOrder {
         return Icons.receipt_long_outlined;
     }
   }
+}
+
+class _CustomerOrderBundle {
+  final _CustomerOrder primary;
+  final List<_CustomerOrder> linkedReceipts;
+
+  const _CustomerOrderBundle({
+    required this.primary,
+    required this.linkedReceipts,
+  });
+
+  List<_CustomerOrder> get receipts => [primary, ...linkedReceipts];
+
+  DateTime get latestAt => receipts
+      .map((receipt) => receipt.createdAt)
+      .reduce((left, right) => left.isAfter(right) ? left : right);
+
+  double get appointmentTotal => receipts.fold<double>(
+    0,
+    (total, receipt) => total + receipt.totalAmount,
+  );
+
+  bool get isLinked => linkedReceipts.isNotEmpty;
+}
+
+List<_CustomerOrderBundle> _bundleCustomerOrders(
+  Iterable<_CustomerOrder> orders,
+) {
+  final grouped = <String, List<_CustomerOrder>>{};
+  for (final order in orders) {
+    grouped.putIfAbsent(order.appointmentLinkKey, () => []).add(order);
+  }
+
+  final bundles = grouped.values.map((receipts) {
+    receipts.sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final originalIndex = receipts.indexWhere(
+      (receipt) => receipt.isOnlineBooking && !receipt.isAddOnReceipt,
+    );
+    final nonAddOnIndex = receipts.indexWhere(
+      (receipt) => !receipt.isAddOnReceipt,
+    );
+    final primaryIndex = originalIndex >= 0
+        ? originalIndex
+        : nonAddOnIndex >= 0
+        ? nonAddOnIndex
+        : 0;
+    final primary = receipts[primaryIndex];
+    return _CustomerOrderBundle(
+      primary: primary,
+      linkedReceipts: [
+        for (var index = 0; index < receipts.length; index++)
+          if (index != primaryIndex) receipts[index],
+      ],
+    );
+  }).toList()..sort((a, b) => b.latestAt.compareTo(a.latestAt));
+
+  return bundles;
 }
 
 class _CustomerOrderServiceGroup {
@@ -494,7 +589,6 @@ class _CustomerScreenState extends State<CustomerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       body: SafeArea(
         child: _loading
             ? const Center(
@@ -947,11 +1041,9 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       appBar: AppBar(
-        backgroundColor: Colors.white,
         elevation: 0,
-        leading: const BackButton(color: Color(0xFF1A1A2E)),
+        leading: const BackButton(),
         centerTitle: true,
         title: const Text(
           'Member Details',
@@ -1001,12 +1093,7 @@ class _DetailPanel extends StatelessWidget {
   });
 
   void _openOrderHistory(BuildContext context) {
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (_) => _CustomerOrdersSheet(customer: customer),
-    );
+    showCustomerOrdersSheet(context, customer: customer);
   }
 
   @override
@@ -1932,10 +2019,238 @@ class _StatCard extends StatelessWidget {
   }
 }
 
+Future<void> showCustomerOrdersSheet(
+  BuildContext context, {
+  required CustomerModel customer,
+  bool groupLatestBill = false,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _CustomerOrdersSheet(
+      customer: customer,
+      groupLatestBill: groupLatestBill,
+    ),
+  );
+}
+
+Future<void> showTransactionOrderDetailSheet(
+  BuildContext context, {
+  required String receiptNumber,
+}) {
+  return showModalBottomSheet<void>(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: Colors.transparent,
+    builder: (_) => _TransactionOrderDetailLoader(
+      receiptNumber: receiptNumber,
+    ),
+  );
+}
+
+class _TransactionOrderDetailLoader extends StatefulWidget {
+  final String receiptNumber;
+
+  const _TransactionOrderDetailLoader({required this.receiptNumber});
+
+  @override
+  State<_TransactionOrderDetailLoader> createState() =>
+      _TransactionOrderDetailLoaderState();
+}
+
+class _TransactionOrderDetailLoaderState
+    extends State<_TransactionOrderDetailLoader> {
+  final _transactionRepository = TransactionRepository();
+  final _dashboardRepository = DashboardRepository();
+  late final Future<(_CustomerOrder, List<_CustomerOrder>)> _orderFuture;
+
+  @override
+  void initState() {
+    super.initState();
+    _orderFuture = _loadOrder();
+  }
+
+  Future<(_CustomerOrder, List<_CustomerOrder>)> _loadOrder() async {
+    final transaction = await _transactionRepository
+        .getTransactionByReceiptNumber(widget.receiptNumber);
+    if (transaction == null) {
+      throw StateError('Bill ${widget.receiptNumber} could not be found.');
+    }
+
+    final linkedRows = await _transactionRepository
+        .getLinkedAppointmentTransactions(
+          appointmentId: asString(transaction['appointmentId']),
+          appointmentGroupId: asString(transaction['appointmentGroupId']),
+        );
+    final rowsById = <String, Map<String, dynamic>>{};
+    for (final row in [transaction, ...linkedRows]) {
+      rowsById[asString(row['id'], asString(row['receiptNumber']))] = row;
+    }
+    final rows = rowsById.values.toList();
+    final appointmentIds = rows
+        .map((row) => asString(row['appointmentId']))
+        .where((id) => id.isNotEmpty);
+    final customerIds = rows
+        .map((row) => asString(row['customerId']))
+        .where((id) => id.isNotEmpty && id != 'walk_in_guest');
+    final appointments = await _dashboardRepository.loadByIds(
+      'appointments',
+      appointmentIds,
+    );
+    final appointmentRows = appointments.values;
+    final customers = await _dashboardRepository.loadByIds(
+      'customers',
+      [
+        ...customerIds,
+        ...appointmentRows.map((row) => asString(row['customerId'])),
+      ],
+    );
+    final services = await _dashboardRepository.loadByIds('services', [
+      ...rows.map((row) => asString(row['serviceId'])),
+      ...appointmentRows.map((row) => asString(row['serviceId'])),
+    ]);
+    final therapists = await _dashboardRepository.loadByIds('therapists', [
+      ...rows.map((row) => asString(row['therapistId'])),
+      ...appointmentRows.map((row) => asString(row['therapistId'])),
+    ]);
+    final rooms = await _dashboardRepository.loadByIds('rooms', [
+      ...rows.map((row) => asString(row['roomId'])),
+      ...appointmentRows.map((row) => asString(row['roomId'])),
+    ]);
+
+    final orders = rows.map((row) {
+      final appointmentId = asString(row['appointmentId']);
+      final appointment = appointments[appointmentId] ?? {};
+      final customerId = asString(row['customerId']).isNotEmpty
+          ? asString(row['customerId'])
+          : asString(appointment['customerId']);
+      final serviceId = asString(row['serviceId']).isNotEmpty
+          ? asString(row['serviceId'])
+          : asString(appointment['serviceId']);
+      final therapistId = asString(row['therapistId']).isNotEmpty
+          ? asString(row['therapistId'])
+          : asString(appointment['therapistId']);
+      final roomId = asString(row['roomId']).isNotEmpty
+          ? asString(row['roomId'])
+          : asString(appointment['roomId']);
+      return _CustomerOrder.fromTransaction(
+        row,
+        customer: customers[customerId] ?? {},
+        appointment: appointment,
+        service: services[serviceId] ?? {},
+        therapist: therapists[therapistId] ?? {},
+        room: rooms[roomId] ?? {},
+      );
+    }).toList()..sort((a, b) => a.createdAt.compareTo(b.createdAt));
+    final selectedId = asString(transaction['id']);
+    final selected = orders.firstWhere(
+      (order) => order.id == selectedId,
+      orElse: () => orders.first,
+    );
+    final related = orders
+        .where((order) => order.id != selected.id)
+        .toList();
+    return (selected, related);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FutureBuilder<(_CustomerOrder, List<_CustomerOrder>)>(
+      future: _orderFuture,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return _OrderDetailLoadState(
+            icon: Icons.error_outline_rounded,
+            message: snapshot.error.toString().replaceFirst(
+              'Bad state: ',
+              '',
+            ),
+          );
+        }
+        if (!snapshot.hasData) {
+          return const _OrderDetailLoadState(
+            icon: Icons.receipt_long_outlined,
+            message: 'Loading bill details...',
+            loading: true,
+          );
+        }
+        final result = snapshot.data!;
+        return _CustomerOrderDetailSheet(
+          order: result.$1,
+          relatedOrders: result.$2,
+        );
+      },
+    );
+  }
+}
+
+class _OrderDetailLoadState extends StatelessWidget {
+  final IconData icon;
+  final String message;
+  final bool loading;
+
+  const _OrderDetailLoadState({
+    required this.icon,
+    required this.message,
+    this.loading = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: Container(
+          width: double.infinity,
+          constraints: const BoxConstraints(maxWidth: 520),
+          padding: const EdgeInsets.all(28),
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(8)),
+          ),
+          child: Row(
+            children: [
+              if (loading)
+                const SizedBox(
+                  width: 22,
+                  height: 22,
+                  child: CircularProgressIndicator(strokeWidth: 2.5),
+                )
+              else
+                Icon(icon, color: const Color(0xFFB42318)),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(
+                    color: Color(0xFF374151),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+              if (!loading)
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.close_rounded),
+                  tooltip: 'Close',
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _CustomerOrdersSheet extends StatefulWidget {
   final CustomerModel customer;
+  final bool groupLatestBill;
 
-  const _CustomerOrdersSheet({required this.customer});
+  const _CustomerOrdersSheet({
+    required this.customer,
+    this.groupLatestBill = false,
+  });
 
   @override
   State<_CustomerOrdersSheet> createState() => _CustomerOrdersSheetState();
@@ -2013,12 +2328,17 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
     return orders;
   }
 
-  void _openOrder(_CustomerOrder order) {
+  void _openOrder(_CustomerOrder order, _CustomerOrderBundle bundle) {
     showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => _CustomerOrderDetailSheet(order: order),
+      builder: (_) => _CustomerOrderDetailSheet(
+        order: order,
+        relatedOrders: bundle.receipts
+            .where((receipt) => receipt.id != order.id)
+            .toList(),
+      ),
     );
   }
 
@@ -2039,6 +2359,7 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
             future: _ordersFuture,
             builder: (context, snapshot) {
               final orders = snapshot.data ?? const <_CustomerOrder>[];
+              final bundles = _bundleCustomerOrders(orders);
               final total = orders.fold<double>(
                 0,
                 (sum, order) => sum + order.totalAmount,
@@ -2065,7 +2386,9 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              '${widget.customer.name} Orders',
+                              widget.groupLatestBill
+                                  ? '${widget.customer.name} Bills'
+                                  : '${widget.customer.name} Orders',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                               style: const TextStyle(
@@ -2076,7 +2399,9 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
                             ),
                             const SizedBox(height: 4),
                             Text(
-                              '${orders.length} previous order${orders.length == 1 ? '' : 's'} · ${_money(total)}',
+                              widget.groupLatestBill
+                                  ? '${orders.length} bill${orders.length == 1 ? '' : 's'} · ${_money(total)}'
+                                  : '${orders.length} previous order${orders.length == 1 ? '' : 's'} · ${_money(total)}',
                               style: const TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.w700,
@@ -2102,16 +2427,40 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
                       message: snapshot.error.toString(),
                     )
                   else if (orders.isEmpty)
-                    const _OrdersEmptyCard(
+                    _OrdersEmptyCard(
                       icon: Icons.receipt_long_outlined,
-                      title: 'No previous orders',
-                      message: 'Paid orders for this member will appear here.',
+                      title: widget.groupLatestBill
+                          ? 'No bills yet'
+                          : 'No previous orders',
+                      message: widget.groupLatestBill
+                          ? 'Paid bills for this customer will appear here.'
+                          : 'Paid orders for this member will appear here.',
                     )
+                  else if (widget.groupLatestBill) ...[
+                    const _OrderListSectionTitle('Latest Bill'),
+                    const SizedBox(height: 10),
+                    _CustomerOrderBundleView(
+                      bundle: bundles.first,
+                      onOpen: (order) => _openOrder(order, bundles.first),
+                    ),
+                    if (bundles.length > 1) ...[
+                      const SizedBox(height: 22),
+                      const _OrderListSectionTitle('Previous Bills'),
+                      const SizedBox(height: 10),
+                      for (final bundle in bundles.skip(1)) ...[
+                        _CustomerOrderBundleView(
+                          bundle: bundle,
+                          onOpen: (order) => _openOrder(order, bundle),
+                        ),
+                        const SizedBox(height: 10),
+                      ],
+                    ],
+                  ]
                   else
-                    for (final order in orders) ...[
-                      _CustomerOrderCard(
-                        order: order,
-                        onTap: () => _openOrder(order),
+                    for (final bundle in bundles) ...[
+                      _CustomerOrderBundleView(
+                        bundle: bundle,
+                        onOpen: (order) => _openOrder(order, bundle),
                       ),
                       const SizedBox(height: 10),
                     ],
@@ -2125,32 +2474,64 @@ class _CustomerOrdersSheetState extends State<_CustomerOrdersSheet> {
   }
 }
 
+class _OrderListSectionTitle extends StatelessWidget {
+  final String label;
+
+  const _OrderListSectionTitle(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        fontSize: 14,
+        fontWeight: FontWeight.w900,
+        color: Color(0xFF1A1A2E),
+      ),
+    );
+  }
+}
+
 class _CustomerOrderCard extends StatelessWidget {
   final _CustomerOrder order;
   final VoidCallback onTap;
+  final String? label;
+  final bool grouped;
 
-  const _CustomerOrderCard({required this.order, required this.onTap});
+  const _CustomerOrderCard({
+    required this.order,
+    required this.onTap,
+    this.label,
+    this.grouped = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Material(
-      color: Colors.white,
-      borderRadius: BorderRadius.circular(14),
+      color: grouped ? Colors.transparent : Colors.white,
+      borderRadius: BorderRadius.circular(grouped ? 8 : 14),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(grouped ? 8 : 14),
         child: Container(
           padding: const EdgeInsets.all(14),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: const Color(0xFFE5E7EB)),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.035),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
+            color: grouped ? const Color(0xFFF8FAFC) : null,
+            borderRadius: BorderRadius.circular(grouped ? 8 : 14),
+            border: Border.all(
+              color: grouped
+                  ? const Color(0xFFEDF1F4)
+                  : const Color(0xFFE5E7EB),
+            ),
+            boxShadow: grouped
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.035),
+                      blurRadius: 10,
+                      offset: const Offset(0, 3),
+                    ),
+                  ],
           ),
           child: Row(
             children: [
@@ -2172,6 +2553,17 @@ class _CustomerOrderCard extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (label != null) ...[
+                      Text(
+                        label!,
+                        style: const TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.w900,
+                          color: Color(0xFF1B6B72),
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                    ],
                     Text(
                       order.receiptNumber,
                       maxLines: 1,
@@ -2206,8 +2598,8 @@ class _CustomerOrderCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 12),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+              Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
                   Text(
                     _money(order.totalAmount),
@@ -2217,10 +2609,11 @@ class _CustomerOrderCard extends StatelessWidget {
                       color: Color(0xFF2563EB),
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(width: 4),
                   const Icon(
                     Icons.chevron_right_rounded,
                     color: Color(0xFFCBD5E1),
+                    size: 24,
                   ),
                 ],
               ),
@@ -2232,15 +2625,194 @@ class _CustomerOrderCard extends StatelessWidget {
   }
 }
 
+class _CustomerOrderBundleView extends StatelessWidget {
+  final _CustomerOrderBundle bundle;
+  final ValueChanged<_CustomerOrder> onOpen;
+
+  const _CustomerOrderBundleView({
+    required this.bundle,
+    required this.onOpen,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!bundle.isLinked) {
+      return _CustomerOrderCard(
+        order: bundle.primary,
+        onTap: () => onOpen(bundle.primary),
+      );
+    }
+
+    final receiptCount = 1 + bundle.linkedReceipts.length;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFDDE5E7)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.035),
+            blurRadius: 12,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 2, 4, 10),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.link_rounded,
+                  size: 18,
+                  color: Color(0xFF1B6B72),
+                ),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text(
+                    'Appointment receipts',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                ),
+                Text(
+                  '$receiptCount receipts',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFF6B7280),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          _CustomerOrderCard(
+            order: bundle.primary,
+            grouped: true,
+            label: bundle.primary.isOnlineBooking
+                ? 'ORIGINAL BOOKING RECEIPT'
+                : 'MAIN RECEIPT',
+            onTap: () => onOpen(bundle.primary),
+          ),
+          for (final receipt in bundle.linkedReceipts) ...[
+            const _LinkedReceiptConnector(),
+            _CustomerOrderCard(
+              order: receipt,
+              grouped: true,
+              label: receipt.isAddOnReceipt
+                  ? 'ADD-ON RECEIPT'
+                  : 'RELATED RECEIPT',
+              onTap: () => onOpen(receipt),
+            ),
+          ],
+          const SizedBox(height: 10),
+          const Divider(height: 1, color: Color(0xFFE5E7EB)),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(4, 12, 4, 2),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Total paid across $receiptCount receipts',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF4B5563),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Text(
+                  _money(bundle.appointmentTotal),
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF11875D),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LinkedReceiptConnector extends StatelessWidget {
+  const _LinkedReceiptConnector();
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Row(
+        children: [
+          const SizedBox(width: 17),
+          Container(
+            width: 28,
+            height: 28,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE8F5F5),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(
+              Icons.arrow_downward_rounded,
+              size: 17,
+              color: Color(0xFF1B6B72),
+            ),
+          ),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Add-on to this booking',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w800,
+                color: Color(0xFF64748B),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _CustomerOrderDetailSheet extends StatelessWidget {
   final _CustomerOrder order;
+  final List<_CustomerOrder> relatedOrders;
 
-  const _CustomerOrderDetailSheet({required this.order});
+  const _CustomerOrderDetailSheet({
+    required this.order,
+    this.relatedOrders = const [],
+  });
+
+  void _openRelated(BuildContext context, _CustomerOrder target) {
+    final allReceipts = [order, ...relatedOrders];
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) => _CustomerOrderDetailSheet(
+        order: target,
+        relatedOrders: allReceipts
+            .where((receipt) => receipt.id != target.id)
+            .toList(),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
     return DraggableScrollableSheet(
-      initialChildSize: 0.78,
+      initialChildSize: 0.82,
       minChildSize: 0.42,
       maxChildSize: 0.94,
       builder: (context, controller) {
@@ -2264,64 +2836,248 @@ class _CustomerOrderDetailSheet extends StatelessWidget {
                 ),
               ),
               const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      order.receiptNumber,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w900,
-                        color: Color(0xFF1A1A2E),
+              _CustomerBillReceiptHeader(order: order),
+              if (relatedOrders.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                const _OrderSectionTitle(
+                  'Linked Receipts',
+                  icon: Icons.link_rounded,
+                ),
+                const SizedBox(height: 10),
+                _CustomerOrderInfoCard(
+                  children: [
+                    for (final related in relatedOrders)
+                      _LinkedReceiptRow(
+                        order: related,
+                        onTap: () => _openRelated(context, related),
                       ),
-                    ),
+                  ],
+                ),
+              ],
+              const SizedBox(height: 18),
+              const _OrderSectionTitle(
+                'Source & Customer',
+                icon: Icons.person_outline,
+              ),
+              const SizedBox(height: 10),
+              _CustomerOrderInfoCard(
+                children: [
+                  _OrderDetailRow('Source', order.sourceLabel),
+                  _OrderDetailRow('Customer', order.customerName),
+                  _OrderDetailRow('Phone', order.customerPhone),
+                ],
+              ),
+              if (!order.isOnlineBooking) ...[
+                const SizedBox(height: 18),
+                const _OrderSectionTitle(
+                  'Service Details',
+                  icon: Icons.spa_outlined,
+                ),
+                const SizedBox(height: 10),
+                for (var i = 0; i < order.serviceGroups.length; i++) ...[
+                  _OrderServiceGroupCard(
+                    group: order.serviceGroups[i],
+                    expanded: order.serviceGroups.length == 1,
                   ),
-                  Text(
+                  if (i != order.serviceGroups.length - 1)
+                    const SizedBox(height: 8),
+                ],
+              ],
+              const SizedBox(height: 18),
+              const _OrderSectionTitle(
+                'Payment Details',
+                icon: Icons.payments_outlined,
+              ),
+              const SizedBox(height: 10),
+              _CustomerOrderInfoCard(
+                children: [
+                  _OrderDetailRow('Payment', order.paymentLabel),
+                  _OrderDetailRow(
+                    'Service Net',
+                    _money(order.servicePrice),
+                  ),
+                  _OrderDetailRow('SST', _money(order.sstAmount)),
+                  _OrderDetailRow(
+                    'Total',
                     _money(order.totalAmount),
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1B6B72),
-                    ),
+                    strong: true,
                   ),
                 ],
               ),
-              const SizedBox(height: 4),
-              Text(
-                DateFormat('EEEE, d MMM yyyy · h:mm a').format(order.createdAt),
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF6B7280),
-                ),
-              ),
-              const SizedBox(height: 18),
-              _OrderDetailRow('Customer', order.customerName),
-              _OrderDetailRow('Phone', order.customerPhone),
-              _OrderDetailRow('Payment', order.paymentLabel),
-              _OrderDetailRow('Staff', order.therapistName),
-              _OrderDetailRow('Room / Zone', order.roomName),
-              const Divider(height: 28, color: Color(0xFFE5E7EB)),
-              const _OrderSectionTitle('Service Details'),
-              const SizedBox(height: 10),
-              for (var i = 0; i < order.serviceGroups.length; i++) ...[
-                _OrderServiceGroupCard(
-                  group: order.serviceGroups[i],
-                  expanded: order.serviceGroups.length == 1,
-                ),
-                if (i != order.serviceGroups.length - 1)
-                  const SizedBox(height: 8),
-              ],
-              const Divider(height: 28, color: Color(0xFFE5E7EB)),
-              _OrderDetailRow('Service Net', _money(order.servicePrice)),
-              _OrderDetailRow('SST', _money(order.sstAmount)),
-              _OrderDetailRow('Total', _money(order.totalAmount), strong: true),
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _LinkedReceiptRow extends StatelessWidget {
+  final _CustomerOrder order;
+  final VoidCallback onTap;
+
+  const _LinkedReceiptRow({required this.order, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        child: Row(
+          children: [
+            Icon(order.paymentIcon, size: 18, color: const Color(0xFF1B6B72)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    order.isAddOnReceipt
+                        ? 'Add-on receipt'
+                        : 'Original booking receipt',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF6B7280),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    order.receiptNumber,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              _money(order.totalAmount),
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w900,
+                color: Color(0xFF1B6B72),
+              ),
+            ),
+            const SizedBox(width: 4),
+            const Icon(
+              Icons.chevron_right_rounded,
+              size: 20,
+              color: Color(0xFFCBD5E1),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CustomerBillReceiptHeader extends StatelessWidget {
+  final _CustomerOrder order;
+
+  const _CustomerBillReceiptHeader({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF8F7),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFBFE2DE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.receipt_long_outlined,
+                size: 17,
+                color: Color(0xFF1B6B72),
+              ),
+              SizedBox(width: 7),
+              Text(
+                'BILL RECEIPT',
+                style: TextStyle(
+                  color: Color(0xFF1B6B72),
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Text(
+                  order.receiptNumber,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF1A1A2E),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                _money(order.totalAmount),
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            'Paid ${DateFormat('EEEE, d MMM yyyy · h:mm a').format(order.createdAt)}',
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: Color(0xFF6B7280),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _CustomerOrderInfoCard extends StatelessWidget {
+  final List<Widget> children;
+
+  const _CustomerOrderInfoCard({required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+      ),
+      child: Column(
+        children: [
+          for (var index = 0; index < children.length; index++) ...[
+            children[index],
+            if (index != children.length - 1)
+              const Divider(height: 1, color: Color(0xFFE5E7EB)),
+          ],
+        ],
+      ),
     );
   }
 }
@@ -2502,18 +3258,27 @@ class _OrderDetailRow extends StatelessWidget {
 
 class _OrderSectionTitle extends StatelessWidget {
   final String label;
+  final IconData? icon;
 
-  const _OrderSectionTitle(this.label);
+  const _OrderSectionTitle(this.label, {this.icon});
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      label,
-      style: const TextStyle(
-        fontSize: 14,
-        fontWeight: FontWeight.w900,
-        color: Color(0xFF1A1A2E),
-      ),
+    return Row(
+      children: [
+        if (icon != null) ...[
+          Icon(icon, size: 18, color: const Color(0xFF1B6B72)),
+          const SizedBox(width: 8),
+        ],
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF1A1A2E),
+          ),
+        ),
+      ],
     );
   }
 }

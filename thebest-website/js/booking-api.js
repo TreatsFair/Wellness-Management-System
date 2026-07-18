@@ -49,6 +49,18 @@
       });
       return request(`/availability/times?${params}`);
     },
+    getGroupDates: ({ allocations }) => request("/availability/group-dates", {
+      method: "POST",
+      body: JSON.stringify({ allocations }),
+    }),
+    getGroupTimes: ({ date, allocations }) => request("/availability/group-times", {
+      method: "POST",
+      body: JSON.stringify({ date, allocations }),
+    }),
+    createGroupHold: (body) => request("/booking-groups", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
     createHold: (body) => request("/booking-holds", {
       method: "POST",
       body: JSON.stringify(body),

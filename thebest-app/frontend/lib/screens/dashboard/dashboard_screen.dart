@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
+import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/repositories/appointment_repository.dart';
@@ -19,6 +23,33 @@ import '../orders/order_screen.dart';
 import '../management/management_screen.dart';
 import '../reports/reports_screen.dart';
 import '../timetable/timetable_screen.dart';
+
+enum _DashboardMainCard { quickBook, orders, appointments, members }
+
+enum _DashboardOtherCard { history, members, management, reports, timetable }
+
+typedef _DashboardReorder = void Function(String draggedId, String targetId);
+
+const _defaultTabletMainOrder = <_DashboardMainCard>[
+  _DashboardMainCard.quickBook,
+  _DashboardMainCard.orders,
+  _DashboardMainCard.appointments,
+];
+
+const _defaultPhoneMainOrder = <_DashboardMainCard>[
+  _DashboardMainCard.appointments,
+  _DashboardMainCard.quickBook,
+  _DashboardMainCard.orders,
+  _DashboardMainCard.members,
+];
+
+const _defaultOtherOrder = <_DashboardOtherCard>[
+  _DashboardOtherCard.history,
+  _DashboardOtherCard.members,
+  _DashboardOtherCard.management,
+  _DashboardOtherCard.reports,
+  _DashboardOtherCard.timetable,
+];
 
 class _DashboardStats {
   final int todayAppointments;
@@ -276,16 +307,146 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isLoadingBusinessSettings = true;
   bool _isLoadingDashboardData = true;
   String? _dashboardError;
+  SharedPreferences? _dashboardPreferences;
+  List<_DashboardMainCard> _tabletMainOrder = [
+    ..._defaultTabletMainOrder,
+  ];
+  List<_DashboardMainCard> _phoneMainOrder = [..._defaultPhoneMainOrder];
+  List<_DashboardOtherCard> _tabletOtherOrder = [..._defaultOtherOrder];
+  List<_DashboardOtherCard> _phoneOtherOrder = [..._defaultOtherOrder];
 
   @override
   void initState() {
     super.initState();
     _loadBusinessSettings();
     _loadDashboardData();
+    unawaited(_loadDashboardOrders());
   }
 
   bool _isTablet(BuildContext context) =>
       MediaQuery.of(context).size.width >= 900;
+
+  String _dashboardOrderKey(String layout) {
+    final owner = _authRepository.currentUser?.id ?? 'device';
+    return 'dashboard_card_order:$owner:$layout';
+  }
+
+  List<T> _restoreDashboardOrder<T extends Enum>(
+    List<String>? saved,
+    List<T> defaults,
+  ) {
+    final byName = {for (final item in defaults) item.name: item};
+    final restored = <T>[];
+    for (final name in saved ?? const <String>[]) {
+      final item = byName[name];
+      if (item != null && !restored.contains(item)) restored.add(item);
+    }
+    for (final item in defaults) {
+      if (!restored.contains(item)) restored.add(item);
+    }
+    return restored;
+  }
+
+  Future<void> _loadDashboardOrders() async {
+    final preferences = await SharedPreferences.getInstance();
+    final tabletMain = _restoreDashboardOrder(
+      preferences.getStringList(_dashboardOrderKey('tablet_main')),
+      _defaultTabletMainOrder,
+    );
+    final phoneMain = _restoreDashboardOrder(
+      preferences.getStringList(_dashboardOrderKey('phone_main')),
+      _defaultPhoneMainOrder,
+    );
+    final tabletOther = _restoreDashboardOrder(
+      preferences.getStringList(_dashboardOrderKey('tablet_other')),
+      _defaultOtherOrder,
+    );
+    final phoneOther = _restoreDashboardOrder(
+      preferences.getStringList(_dashboardOrderKey('phone_other')),
+      _defaultOtherOrder,
+    );
+    if (!mounted) return;
+    setState(() {
+      _dashboardPreferences = preferences;
+      _tabletMainOrder = tabletMain;
+      _phoneMainOrder = phoneMain;
+      _tabletOtherOrder = tabletOther;
+      _phoneOtherOrder = phoneOther;
+    });
+  }
+
+  List<T> _moveDashboardCard<T extends Enum>(
+    List<T> current,
+    String draggedId,
+    String targetId,
+  ) {
+    final oldIndex = current.indexWhere((item) => item.name == draggedId);
+    final targetIndex = current.indexWhere((item) => item.name == targetId);
+    if (oldIndex < 0 || targetIndex < 0 || oldIndex == targetIndex) {
+      return current;
+    }
+    final next = [...current];
+    final moved = next.removeAt(oldIndex);
+    next.insert(targetIndex.clamp(0, next.length), moved);
+    return next;
+  }
+
+  Future<void> _saveDashboardOrder(
+    String layout,
+    Iterable<Enum> order,
+  ) async {
+    final preferences =
+        _dashboardPreferences ?? await SharedPreferences.getInstance();
+    _dashboardPreferences = preferences;
+    await preferences.setStringList(
+      _dashboardOrderKey(layout),
+      order.map((item) => item.name).toList(),
+    );
+  }
+
+  void _reorderTabletMain(String draggedId, String targetId) {
+    final next = _moveDashboardCard(
+      _tabletMainOrder,
+      draggedId,
+      targetId,
+    );
+    if (identical(next, _tabletMainOrder)) return;
+    setState(() => _tabletMainOrder = next);
+    unawaited(_saveDashboardOrder('tablet_main', next));
+  }
+
+  void _reorderPhoneMain(String draggedId, String targetId) {
+    final next = _moveDashboardCard(
+      _phoneMainOrder,
+      draggedId,
+      targetId,
+    );
+    if (identical(next, _phoneMainOrder)) return;
+    setState(() => _phoneMainOrder = next);
+    unawaited(_saveDashboardOrder('phone_main', next));
+  }
+
+  void _reorderTabletOther(String draggedId, String targetId) {
+    final next = _moveDashboardCard(
+      _tabletOtherOrder,
+      draggedId,
+      targetId,
+    );
+    if (identical(next, _tabletOtherOrder)) return;
+    setState(() => _tabletOtherOrder = next);
+    unawaited(_saveDashboardOrder('tablet_other', next));
+  }
+
+  void _reorderPhoneOther(String draggedId, String targetId) {
+    final next = _moveDashboardCard(
+      _phoneOtherOrder,
+      draggedId,
+      targetId,
+    );
+    if (identical(next, _phoneOtherOrder)) return;
+    setState(() => _phoneOtherOrder = next);
+    unawaited(_saveDashboardOrder('phone_other', next));
+  }
 
   Future<Map<String, Map<String, dynamic>>> _loadDocMap(
     String collection,
@@ -756,7 +917,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     final isTablet = _isTablet(context);
     return Scaffold(
-      backgroundColor: const Color(0xFFF0F0F0),
       body: SafeArea(
         child: isTablet
             ? _TabletLayout(
@@ -770,6 +930,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
+                mainOrder: _tabletMainOrder,
+                otherOrder: _tabletOtherOrder,
+                onReorderMain: _reorderTabletMain,
+                onReorderOther: _reorderTabletOther,
               )
             : _PhoneLayout(
                 profile: _businessProfile,
@@ -782,6 +946,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
+                mainOrder: _phoneMainOrder,
+                otherOrder: _phoneOtherOrder,
+                onReorderMain: _reorderPhoneMain,
+                onReorderOther: _reorderPhoneOther,
               ),
       ),
     );
@@ -802,6 +970,10 @@ class _TabletLayout extends StatelessWidget {
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
+  final List<_DashboardMainCard> mainOrder;
+  final List<_DashboardOtherCard> otherOrder;
+  final _DashboardReorder onReorderMain;
+  final _DashboardReorder onReorderOther;
 
   const _TabletLayout({
     required this.profile,
@@ -814,10 +986,127 @@ class _TabletLayout extends StatelessWidget {
     required this.onRefreshDashboard,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
+    required this.mainOrder,
+    required this.otherOrder,
+    required this.onReorderMain,
+    required this.onReorderOther,
   });
+
+  Widget _buildMainCard(
+    BuildContext context,
+    _DashboardMainCard card,
+  ) {
+    final child = switch (card) {
+      _DashboardMainCard.quickBook => _TabletQuickBookCard(
+        role: role,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.orders => _TabletOrdersCard(
+        stats: dashboardData.stats,
+        isLoading: isLoadingDashboard,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.appointments => _TabletAppointmentCard(
+        role: role,
+        stats: dashboardData.stats,
+        isLoading: isLoadingDashboard,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.members => _TabletOtherCard(
+        icon: Icons.people_outline,
+        label: 'Members',
+        iconBg: const Color(0xFFE3F2FD),
+        iconColor: const Color(0xFF1B6B72),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CustomerScreen()),
+        ),
+      ),
+    };
+    return _ReorderableDashboardCard(
+      group: 'tablet-main',
+      id: card.name,
+      onReorder: onReorderMain,
+      child: child,
+    );
+  }
+
+  Widget _buildOtherCard(
+    BuildContext context,
+    _DashboardOtherCard card,
+  ) {
+    final child = switch (card) {
+      _DashboardOtherCard.history => _TabletOtherCard(
+        icon: Icons.history_outlined,
+        label: 'History',
+        iconBg: const Color(0xFFE8F4F8),
+        iconColor: const Color(0xFF5BA4B5),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => SalesHistoryScreen(userRole: role),
+          ),
+        ),
+      ),
+      _DashboardOtherCard.members => _TabletOtherCard(
+        icon: Icons.people_outline,
+        label: 'Members',
+        iconBg: const Color(0xFFE3F2FD),
+        iconColor: const Color(0xFF1B6B72),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CustomerScreen()),
+        ),
+      ),
+      _DashboardOtherCard.management => _TabletOtherCard(
+        icon: Icons.tune_outlined,
+        label: 'Management',
+        iconBg: const Color(0xFFE8F5E9),
+        iconColor: const Color(0xFF4CAF50),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ManagementScreen(userRole: role),
+          ),
+        ),
+      ),
+      _DashboardOtherCard.reports => _TabletOtherCard(
+        icon: Icons.bar_chart_outlined,
+        label: 'Reports',
+        iconBg: const Color(0xFFEDE7F6),
+        iconColor: const Color(0xFF7C3AED),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => ReportsScreen(userRole: role)),
+        ),
+      ),
+      _DashboardOtherCard.timetable => _TabletOtherCard(
+        icon: Icons.view_timeline_outlined,
+        label: 'Timetable',
+        iconBg: const Color(0xFFFFF7ED),
+        iconColor: const Color(0xFFEA580C),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
+        ),
+      ),
+    };
+    return _ReorderableDashboardCard(
+      group: 'tablet-other',
+      id: card.name,
+      onReorder: onReorderOther,
+      child: child,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
+    final visibleOtherOrder = otherOrder
+        .where(
+          (card) =>
+              role == 'admin' || card != _DashboardOtherCard.reports,
+        )
+        .toList();
     return Column(
       children: [
         // ── Top bar ────────────────────────────────────────────
@@ -846,37 +1135,17 @@ class _TabletLayout extends StatelessWidget {
                 const _SectionLabel('Main'),
                 const SizedBox(height: 12),
 
-                // 4-column main cards row
-                IntrinsicHeight(
+                SizedBox(
+                  height: 210 * context.uiScale.dashboardScale,
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // Quick Book card
-                      Expanded(
-                        child: _TabletQuickBookCard(
-                          role: role,
-                          onRefreshDashboard: onRefreshDashboard,
+                      for (var index = 0; index < mainOrder.length; index++) ...[
+                        if (index > 0) const SizedBox(width: 16),
+                        Expanded(
+                          child: _buildMainCard(context, mainOrder[index]),
                         ),
-                      ),
-                      const SizedBox(width: 16),
-                      // Orders card
-                      Expanded(
-                        child: _TabletOrdersCard(
-                          stats: dashboardData.stats,
-                          isLoading: isLoadingDashboard,
-                          onRefreshDashboard: onRefreshDashboard,
-                        ),
-                      ),
-                      const SizedBox(width: 16),
-                      // Appointment card
-                      Expanded(
-                        child: _TabletAppointmentCard(
-                          role: role,
-                          stats: dashboardData.stats,
-                          isLoading: isLoadingDashboard,
-                          onRefreshDashboard: onRefreshDashboard,
-                        ),
-                      ),
+                      ],
                     ],
                   ),
                 ),
@@ -898,83 +1167,22 @@ class _TabletLayout extends StatelessWidget {
                 const _SectionLabel('Others'),
                 const SizedBox(height: 12),
 
-                // 4-column others row
+                // Long-press an action card to rearrange this row.
                 Row(
                   children: [
-                    Expanded(
-                      child: _TabletOtherCard(
-                        icon: Icons.history_outlined,
-                        label: 'History',
-                        iconBg: const Color(0xFFE8F4F8),
-                        iconColor: const Color(0xFF5BA4B5),
-                        onTap: () => Navigator.push(
+                    for (
+                      var index = 0;
+                      index < visibleOtherOrder.length;
+                      index++
+                    ) ...[
+                      if (index > 0) const SizedBox(width: 16),
+                      Expanded(
+                        child: _buildOtherCard(
                           context,
-                          MaterialPageRoute(
-                            builder: (_) => SalesHistoryScreen(userRole: role),
-                          ),
+                          visibleOtherOrder[index],
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _TabletOtherCard(
-                        icon: Icons.people_outline,
-                        label: 'Members',
-                        iconBg: const Color(0xFFE3F2FD),
-                        iconColor: const Color(0xFF1B6B72),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const CustomerScreen(),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _TabletOtherCard(
-                        icon: Icons.tune_outlined,
-                        label: 'Management',
-                        iconBg: const Color(0xFFE8F5E9),
-                        iconColor: const Color(0xFF4CAF50),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ManagementScreen(userRole: role),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _TabletOtherCard(
-                        icon: Icons.bar_chart_outlined,
-                        label: 'Reports',
-                        iconBg: const Color(0xFFEDE7F6),
-                        iconColor: const Color(0xFF7C3AED),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ReportsScreen(userRole: role),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 16),
-                    Expanded(
-                      child: _TabletOtherCard(
-                        icon: Icons.view_timeline_outlined,
-                        label: 'Timetable',
-                        iconBg: const Color(0xFFFFF7ED),
-                        iconColor: const Color(0xFFEA580C),
-                        onTap: () => Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => TimetableScreen(userRole: role),
-                          ),
-                        ),
-                      ),
-                    ),
+                    ],
                   ],
                 ),
               ],
@@ -1094,9 +1302,9 @@ class _DashboardTopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      decoration: const BoxDecoration(
-        color: AppColors.surface,
-        border: Border(bottom: BorderSide(color: AppColors.border)),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        border: Border(bottom: BorderSide(color: context.appBorder)),
       ),
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.lg,
@@ -1149,7 +1357,7 @@ class _DashboardTopBar extends StatelessWidget {
             onPressed: () => _openNotifications(context),
             tooltip: 'Recent sales',
             style: IconButton.styleFrom(
-              side: const BorderSide(color: AppColors.border),
+              side: BorderSide(color: context.appBorder),
               shape: RoundedRectangleBorder(
                 borderRadius: BorderRadius.circular(AppRadius.control),
               ),
@@ -1300,28 +1508,28 @@ class _TabletOrdersCard extends StatelessWidget {
                   color: const Color(0xFFF59E0B),
                 ),
                 const SizedBox(width: 12),
-                const Text(
+                Text(
                   'Order',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                    color: context.appText,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               'Today Sales',
-              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 12, color: context.appMuted),
             ),
             const SizedBox(height: 6),
             Text(
               isLoading ? '-' : 'RM ${stats.todaySales.toStringAsFixed(0)}',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A2E),
+                color: context.appText,
               ),
             ),
             const SizedBox(height: 6),
@@ -1329,7 +1537,7 @@ class _TabletOrdersCard extends StatelessWidget {
               isLoading
                   ? 'Loading transactions'
                   : '${stats.totalTransactions} paid transactions',
-              style: const TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 12, color: context.appMuted),
             ),
           ],
         ),
@@ -1373,20 +1581,20 @@ class _TabletAppointmentCard extends StatelessWidget {
                   color: const Color(0xFF1B6B72),
                 ),
                 const SizedBox(width: 12),
-                const Text(
+                Text(
                   'Appointment',
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                    color: context.appText,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 16),
-            const Text(
+            Text(
               'Total',
-              style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 12, color: context.appMuted),
             ),
             const SizedBox(height: 10),
             _AppointmentRow(
@@ -1441,12 +1649,12 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                     color: const Color(0xFF7C3AED),
                   ),
                   const SizedBox(width: 12),
-                  const Text(
+                  Text(
                     'Staff Availability',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
-                      color: Color(0xFF1A1A2E),
+                      color: context.appText,
                     ),
                   ),
                   const Spacer(),
@@ -1538,10 +1746,10 @@ class _TabletOtherCard extends StatelessWidget {
               const SizedBox(width: 12),
               Text(
                 label,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w500,
-                  color: Color(0xFF1A1A2E),
+                  color: context.appText,
                 ),
               ),
             ],
@@ -1566,6 +1774,10 @@ class _PhoneLayout extends StatelessWidget {
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
+  final List<_DashboardMainCard> mainOrder;
+  final List<_DashboardOtherCard> otherOrder;
+  final _DashboardReorder onReorderMain;
+  final _DashboardReorder onReorderOther;
 
   const _PhoneLayout({
     required this.profile,
@@ -1578,7 +1790,113 @@ class _PhoneLayout extends StatelessWidget {
     required this.onRefreshDashboard,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
+    required this.mainOrder,
+    required this.otherOrder,
+    required this.onReorderMain,
+    required this.onReorderOther,
   });
+
+  Widget _buildMainCard(
+    BuildContext context,
+    _DashboardMainCard card,
+  ) {
+    final child = switch (card) {
+      _DashboardMainCard.appointments => _PhoneAppointmentCard(
+        role: role,
+        stats: dashboardData.stats,
+        isLoading: isLoadingDashboard,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.quickBook => _PhoneQuickBookCard(
+        role: role,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.orders => _PhonePosCard(
+        stats: dashboardData.stats,
+        isLoading: isLoadingDashboard,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+      _DashboardMainCard.members => _PhoneCustomersCard(
+        stats: dashboardData.stats,
+        isLoading: isLoadingDashboard,
+        onRefreshDashboard: onRefreshDashboard,
+      ),
+    };
+    return _ReorderableDashboardCard(
+      group: 'phone-main',
+      id: card.name,
+      onReorder: onReorderMain,
+      child: child,
+    );
+  }
+
+  Widget _buildOtherCard(
+    BuildContext context,
+    _DashboardOtherCard card,
+  ) {
+    final child = switch (card) {
+      _DashboardOtherCard.history => _PhoneOtherCard(
+        icon: Icons.history_outlined,
+        label: 'History',
+        iconBg: const Color(0xFFE8F4F8),
+        iconColor: const Color(0xFF5BA4B5),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => SalesHistoryScreen(userRole: role),
+          ),
+        ),
+      ),
+      _DashboardOtherCard.members => _PhoneOtherCard(
+        icon: Icons.people_outline,
+        label: 'Members',
+        iconBg: const Color(0xFFE3F2FD),
+        iconColor: const Color(0xFF1B6B72),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const CustomerScreen()),
+        ),
+      ),
+      _DashboardOtherCard.management => _PhoneOtherCard(
+        icon: Icons.tune_outlined,
+        label: 'Management',
+        iconBg: const Color(0xFFE8F5E9),
+        iconColor: const Color(0xFF4CAF50),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => ManagementScreen(userRole: role),
+          ),
+        ),
+      ),
+      _DashboardOtherCard.reports => _PhoneOtherCard(
+        icon: Icons.bar_chart_outlined,
+        label: 'Reports',
+        iconBg: const Color(0xFFEDE7F6),
+        iconColor: const Color(0xFF7C3AED),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => ReportsScreen(userRole: role)),
+        ),
+      ),
+      _DashboardOtherCard.timetable => _PhoneOtherCard(
+        icon: Icons.view_timeline_outlined,
+        label: 'Timetable',
+        iconBg: const Color(0xFFFFF7ED),
+        iconColor: const Color(0xFFEA580C),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
+        ),
+      ),
+    };
+    return _ReorderableDashboardCard(
+      group: 'phone-other',
+      id: card.name,
+      onReorder: onReorderOther,
+      child: child,
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1611,46 +1929,10 @@ class _PhoneLayout extends StatelessWidget {
                 const _SectionLabel('Main'),
                 const SizedBox(height: 12),
 
-                // Row 1: Appointments + Quick Book
-                Row(
+                _DashboardCardGrid(
                   children: [
-                    Expanded(
-                      child: _PhoneAppointmentCard(
-                        role: role,
-                        stats: dashboardData.stats,
-                        isLoading: isLoadingDashboard,
-                        onRefreshDashboard: onRefreshDashboard,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _PhoneQuickBookCard(
-                        role: role,
-                        onRefreshDashboard: onRefreshDashboard,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 12),
-
-                // Row 2: Order + Members
-                Row(
-                  children: [
-                    Expanded(
-                      child: _PhonePosCard(
-                        stats: dashboardData.stats,
-                        isLoading: isLoadingDashboard,
-                        onRefreshDashboard: onRefreshDashboard,
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: _PhoneCustomersCard(
-                        stats: dashboardData.stats,
-                        isLoading: isLoadingDashboard,
-                        onRefreshDashboard: onRefreshDashboard,
-                      ),
-                    ),
+                    for (final card in mainOrder)
+                      _buildMainCard(context, card),
                   ],
                 ),
 
@@ -1680,75 +1962,27 @@ class _PhoneLayout extends StatelessWidget {
                 // ── Others section ────────────────────────────
                 const _SectionLabel('Others'),
                 const SizedBox(height: 12),
-                GridView.count(
-                  crossAxisCount: 2,
-                  shrinkWrap: true,
-                  physics: const NeverScrollableScrollPhysics(),
-                  crossAxisSpacing: 12,
-                  mainAxisSpacing: 12,
-                  childAspectRatio: 2.2,
-                  children: [
-                    _PhoneOtherCard(
-                      icon: Icons.history_outlined,
-                      label: 'History',
-                      iconBg: const Color(0xFFE8F4F8),
-                      iconColor: const Color(0xFF5BA4B5),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => SalesHistoryScreen(userRole: role),
-                        ),
-                      ),
-                    ),
-                    _PhoneOtherCard(
-                      icon: Icons.people_outline,
-                      label: 'Members',
-                      iconBg: const Color(0xFFE3F2FD),
-                      iconColor: const Color(0xFF1B6B72),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => const CustomerScreen(),
-                        ),
-                      ),
-                    ),
-                    _PhoneOtherCard(
-                      icon: Icons.tune_outlined,
-                      label: 'Management',
-                      iconBg: const Color(0xFFE8F5E9),
-                      iconColor: const Color(0xFF4CAF50),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ManagementScreen(userRole: role),
-                        ),
-                      ),
-                    ),
-                    _PhoneOtherCard(
-                      icon: Icons.bar_chart_outlined,
-                      label: 'Reports',
-                      iconBg: const Color(0xFFEDE7F6),
-                      iconColor: const Color(0xFF7C3AED),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ReportsScreen(userRole: role),
-                        ),
-                      ),
-                    ),
-                    _PhoneOtherCard(
-                      icon: Icons.view_timeline_outlined,
-                      label: 'Timetable',
-                      iconBg: const Color(0xFFFFF7ED),
-                      iconColor: const Color(0xFFEA580C),
-                      onTap: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => TimetableScreen(userRole: role),
-                        ),
-                      ),
-                    ),
-                  ],
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final singleColumn =
+                        (context.uiScale.preset == UiScalePreset.large ||
+                            MediaQuery.textScalerOf(context).scale(1) > 1.15) &&
+                        constraints.maxWidth < 520;
+                    return GridView.count(
+                      crossAxisCount: singleColumn ? 1 : 2,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      crossAxisSpacing: 12,
+                      mainAxisSpacing: 12,
+                      childAspectRatio: singleColumn ? 4.2 : 2.2,
+                      children: [
+                        for (final card in otherOrder)
+                          if (role == 'admin' ||
+                              card != _DashboardOtherCard.reports)
+                            _buildOtherCard(context, card),
+                      ],
+                    );
+                  },
                 ),
 
                 const SizedBox(height: 24),
@@ -1757,6 +1991,125 @@ class _PhoneLayout extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ReorderableDashboardCard extends StatelessWidget {
+  final String group;
+  final String id;
+  final Widget child;
+  final _DashboardReorder onReorder;
+
+  const _ReorderableDashboardCard({
+    required this.group,
+    required this.id,
+    required this.child,
+    required this.onReorder,
+  });
+
+  String get _dragData => '$group:$id';
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return DragTarget<String>(
+          onWillAcceptWithDetails: (details) =>
+              details.data.startsWith('$group:') &&
+              details.data != _dragData,
+          onAcceptWithDetails: (details) {
+            onReorder(details.data.substring(group.length + 1), id);
+          },
+          builder: (context, candidates, rejected) {
+            final highlighted = candidates.isNotEmpty;
+            return Stack(
+              fit: StackFit.passthrough,
+              children: [
+                LongPressDraggable<String>(
+                  data: _dragData,
+                  delay: const Duration(milliseconds: 450),
+                  hapticFeedbackOnStart: true,
+                  feedback: Material(
+                    color: Colors.transparent,
+                    child: SizedBox(
+                      width: constraints.maxWidth,
+                      child: Opacity(opacity: 0.92, child: child),
+                    ),
+                  ),
+                  childWhenDragging: Opacity(opacity: 0.25, child: child),
+                  child: child,
+                ),
+                if (highlighted)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.primary.withValues(alpha: 0.06),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: Theme.of(context).colorScheme.primary,
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _DashboardCardGrid extends StatelessWidget {
+  final List<Widget> children;
+
+  const _DashboardCardGrid({required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final stack =
+            (context.uiScale.preset == UiScalePreset.large ||
+                MediaQuery.textScalerOf(context).scale(1) > 1.15) &&
+            constraints.maxWidth < 520;
+        if (stack) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              for (var index = 0; index < children.length; index++) ...[
+                if (index > 0) const SizedBox(height: 12),
+                children[index],
+              ],
+            ],
+          );
+        }
+        return Column(
+          children: [
+            for (var index = 0; index < children.length; index += 2) ...[
+              if (index > 0) const SizedBox(height: 12),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: children[index]),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: index + 1 < children.length
+                        ? children[index + 1]
+                        : const SizedBox.shrink(),
+                  ),
+                ],
+              ),
+            ],
+          ],
+        );
+      },
     );
   }
 }
@@ -1797,28 +2150,28 @@ class _PhoneAppointmentCard extends StatelessWidget {
                   size: 32,
                 ),
                 const SizedBox(width: 8),
-                const Text(
+                Text(
                   'Appointments',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                    color: context.appText,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 10),
-            const Text(
+            Text(
               'Total Today',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 11, color: context.appMuted),
             ),
             const SizedBox(height: 4),
             Text(
               isLoading ? '-' : '${stats.todayAppointments}',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A2E),
+                color: context.appText,
               ),
             ),
             const SizedBox(height: 4),
@@ -1948,34 +2301,34 @@ class _PhonePosCard extends StatelessWidget {
                   size: 32,
                 ),
                 const SizedBox(width: 8),
-                const Text(
+                Text(
                   'Order',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                    color: context.appText,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 10),
-            const Text(
+            Text(
               'Today Sales',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 11, color: context.appMuted),
             ),
             const SizedBox(height: 4),
             Text(
               isLoading ? '-' : 'RM ${stats.todaySales.toStringAsFixed(0)}',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A2E),
+                color: context.appText,
               ),
             ),
             const SizedBox(height: 4),
             Text(
               isLoading ? 'Loading' : '${stats.totalTransactions} transactions',
-              style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 11, color: context.appMuted),
             ),
           ],
         ),
@@ -2018,28 +2371,28 @@ class _PhoneCustomersCard extends StatelessWidget {
                   size: 32,
                 ),
                 const SizedBox(width: 8),
-                const Text(
+                Text(
                   'Members',
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
+                    color: context.appText,
                   ),
                 ),
               ],
             ),
             const SizedBox(height: 10),
-            const Text(
+            Text(
               'Total',
-              style: TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+              style: TextStyle(fontSize: 11, color: context.appMuted),
             ),
             const SizedBox(height: 4),
             Text(
               isLoading ? '-' : '${stats.totalCustomers}',
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 28,
                 fontWeight: FontWeight.bold,
-                color: Color(0xFF1A1A2E),
+                color: context.appText,
               ),
             ),
             const SizedBox(height: 4),
@@ -2081,12 +2434,12 @@ class _PhoneAnalyticsCard extends StatelessWidget {
                 size: 32,
               ),
               const SizedBox(width: 10),
-              const Text(
+              Text(
                 'Revenue Summary',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
+                  color: context.appText,
                 ),
               ),
             ],
@@ -2139,12 +2492,12 @@ class _PhoneStaffStatusCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
+              Text(
                 'Staff Today',
                 style: TextStyle(
                   fontSize: 14,
                   fontWeight: FontWeight.w600,
-                  color: Color(0xFF1A1A2E),
+                  color: context.appText,
                 ),
               ),
               GestureDetector(
@@ -2224,10 +2577,10 @@ class _PhoneOtherCard extends StatelessWidget {
               const SizedBox(width: 10),
               Text(
                 label,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
-                  color: Color(0xFF1A1A2E),
+                  color: context.appText,
                 ),
               ),
             ],
@@ -2469,8 +2822,9 @@ class _BusinessProfileRow extends StatelessWidget {
         vertical: 12,
       ),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: context.appBorder),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.04),
@@ -2493,10 +2847,10 @@ class _BusinessProfileRow extends StatelessWidget {
           SizedBox(width: compact ? 10 : 14),
           Text(
             label,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w600,
-              color: Color(0xFF1A1A2E),
+              color: context.appText,
             ),
           ),
           const SizedBox(width: 8),
@@ -2506,16 +2860,16 @@ class _BusinessProfileRow extends StatelessWidget {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               textAlign: TextAlign.right,
-              style: const TextStyle(
+              style: TextStyle(
                 fontSize: 14,
-                color: Color(0xFF8A8F98),
+                color: context.appMuted,
                 fontWeight: FontWeight.w500,
               ),
             ),
           ),
           if (showChevron) ...[
             const SizedBox(width: 4),
-            const Icon(Icons.chevron_right, size: 18, color: Color(0xFFB0B5BD)),
+            Icon(Icons.chevron_right, size: 18, color: context.appMuted),
           ],
         ],
       ),
@@ -2659,16 +3013,16 @@ class _NotificationEmptyState extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: const Color(0xFFFAFBFC),
-        border: Border.all(color: const Color(0xFFE6E8EB)),
+        color: context.appSurfaceRaised,
+        border: Border.all(color: context.appBorder),
         borderRadius: BorderRadius.circular(16),
       ),
-      child: const Text(
+      child: Text(
         'Completed payments will appear here.',
         textAlign: TextAlign.center,
         style: TextStyle(
           fontSize: 13,
-          color: Color(0xFF5F6B7A),
+          color: context.appMuted,
           fontWeight: FontWeight.w600,
         ),
       ),
@@ -2686,8 +3040,8 @@ class _TransactionTile extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFFFAFBFC),
-        border: Border.all(color: const Color(0xFFE6E8EB)),
+        color: context.appSurfaceRaised,
+        border: Border.all(color: context.appBorder),
         borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
@@ -3241,10 +3595,10 @@ class _SectionLabel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Text(
       text,
-      style: const TextStyle(
+      style: TextStyle(
         fontSize: 16,
         fontWeight: FontWeight.w600,
-        color: Color(0xFF1A1A2E),
+        color: context.appText,
       ),
     );
   }
@@ -3256,11 +3610,13 @@ class _TabletCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: EdgeInsets.all(metrics.cardPadding + 4),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appBorder),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.04),
@@ -3280,12 +3636,14 @@ class _PhoneCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.all(metrics.cardPadding),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appBorder),
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.04),
@@ -3338,7 +3696,7 @@ class _AppointmentRow extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
+          style: TextStyle(fontSize: 14, color: context.appText),
         ),
         Text(
           count,
@@ -3383,10 +3741,10 @@ class _TherapistRow extends StatelessWidget {
             children: [
               Text(
                 name,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
-                  color: Color(0xFF1A1A2E),
+                  color: context.appText,
                 ),
               ),
               Text(
@@ -3403,14 +3761,14 @@ class _TherapistRow extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: const Color(0xFFF5F5F5),
+            color: context.appSurfaceRaised,
             borderRadius: BorderRadius.circular(8),
           ),
           child: Text(
             done,
-            style: const TextStyle(
+            style: TextStyle(
               fontSize: 11,
-              color: Color(0xFF9E9E9E),
+              color: context.appMuted,
               fontWeight: FontWeight.w500,
             ),
           ),
@@ -3432,15 +3790,15 @@ class _AnalyticsStat extends StatelessWidget {
       children: [
         Text(
           label,
-          style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+          style: TextStyle(fontSize: 11, color: context.appMuted),
         ),
         const SizedBox(height: 4),
         Text(
           value,
-          style: const TextStyle(
+          style: TextStyle(
             fontSize: 15,
             fontWeight: FontWeight.bold,
-            color: Color(0xFF1A1A2E),
+            color: context.appText,
           ),
         ),
       ],

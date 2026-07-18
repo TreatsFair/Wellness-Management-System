@@ -142,8 +142,6 @@ begin
 end;
 $$;
 
--- Existing active services predate end_at becoming the authoritative live end.
--- Preserve their full booked duration before switching completion to that field.
 update public.appointments a
 set end_at = (
   a.actual_started_at + coalesce(
@@ -264,4 +262,4 @@ $$;
 revoke all on function public.start_appointment_service(uuid, timestamptz) from public;
 revoke all on function public.adjust_appointment_service_end(uuid, timestamptz) from public;
 grant execute on function public.start_appointment_service(uuid, timestamptz) to authenticated;
-grant execute on function public.adjust_appointment_service_end(uuid, timestamptz) to authenticated;
+grant execute on function public.adjust_appointment_service_end(uuid, timestamptz) to authenticated;;

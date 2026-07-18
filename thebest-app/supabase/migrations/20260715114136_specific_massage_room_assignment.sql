@@ -360,7 +360,7 @@ begin
 
   update public.booking_holds set status = 'expired', updated_at = now()
   where hold_kind = 'staff_walkin_draft' and status = 'pending_payment'
-    and booking_holds.expires_at <= now();
+    and expires_at <= now();
   update public.booking_holds set status = 'cancelled', updated_at = now()
   where hold_kind = 'staff_walkin_draft'
     and draft_session_id = p_draft_session_id and pax_index = p_pax_index
@@ -503,3 +503,5 @@ revoke all on function public.allocate_specific_room_unit(uuid, timestamp, times
 grant execute on function public.allocate_specific_room_unit(uuid, timestamp, timestamp, uuid, uuid, uuid) to authenticated, service_role;
 revoke all on function public.get_room_unit_availability(uuid, date, time, integer) from public, anon;
 grant execute on function public.get_room_unit_availability(uuid, date, time, integer) to authenticated, service_role;
+
+;

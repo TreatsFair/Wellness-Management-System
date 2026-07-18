@@ -6,6 +6,8 @@ import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/transaction_repository.dart';
+import '../customers/customer_screen.dart';
+import 'history_listing_logic.dart';
 
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF1A1A2E);
@@ -72,7 +74,9 @@ DateTime? _historyServiceCompletedAt({
   required List<Map<String, dynamic>> groupAppointments,
   required DateTime? fallback,
 }) {
-  if (appointment.isNotEmpty) return _tryDateTime(appointment['actualCompletedAt']);
+  if (appointment.isNotEmpty) {
+    return _tryDateTime(appointment['actualCompletedAt']);
+  }
   if (groupAppointments.isEmpty) return fallback;
 
   DateTime? latest;
@@ -88,6 +92,64 @@ DateTime? _historyServiceCompletedAt({
   return latest;
 }
 
+DateTime? _appointmentServiceAt(Map<String, dynamic> appointment) {
+  if (appointment.isEmpty) return null;
+  final timestamp = _tryDateTime(
+    appointment['bookedStartAt'] ?? appointment['startAt'],
+  );
+  if (timestamp != null) return timestamp;
+
+  final dateValue = _asString(
+    appointment['date'],
+    _asString(appointment['appointmentDate']),
+  );
+  if (dateValue.isEmpty) return null;
+  final date = DateTime.tryParse(dateValue);
+  if (date == null) return null;
+  final timeParts = _asString(
+    appointment['bookedStartTime'],
+    _asString(appointment['startTime']),
+  ).split(':');
+  final hour = timeParts.isEmpty ? 0 : int.tryParse(timeParts[0]) ?? 0;
+  final minute = timeParts.length < 2 ? 0 : int.tryParse(timeParts[1]) ?? 0;
+  return DateTime(date.year, date.month, date.day, hour, minute);
+}
+
+DateTime _historyServiceAt({
+  required Map<String, dynamic> appointment,
+  required List<Map<String, dynamic>> groupAppointments,
+  required DateTime fallback,
+}) {
+  final serviceTimes = <DateTime>[
+    ?_appointmentServiceAt(appointment),
+    for (final item in groupAppointments) ?_appointmentServiceAt(item),
+  ]..sort();
+  return serviceTimes.isEmpty ? fallback : serviceTimes.first;
+}
+
+String _historyAppointmentStatus({
+  required Map<String, dynamic> appointment,
+  required List<Map<String, dynamic>> groupAppointments,
+  required bool isCompleted,
+}) {
+  final statuses = <String>[
+    if (appointment.isNotEmpty) _asString(appointment['status']),
+    ...groupAppointments.map((item) => _asString(item['status'])),
+  ].map((status) => status.toLowerCase()).where((status) => status.isNotEmpty);
+  if (isCompleted ||
+      statuses.isNotEmpty && statuses.every((s) => s == 'completed')) {
+    return 'completed';
+  }
+  if (statuses.any((s) => s == 'in_progress')) return 'in_progress';
+  if (statuses.any((s) => s == 'no_show')) return 'no_show';
+  if (statuses.isNotEmpty &&
+      statuses.every((s) => s == 'cancelled' || s == 'canceled')) {
+    return 'cancelled';
+  }
+  if (statuses.any((s) => s == 'confirmed')) return 'confirmed';
+  return statuses.isEmpty ? 'completed' : statuses.first;
+}
+
 String _normalizeOrderSource({
   required Object? txSource,
   required Object? appointmentType,
@@ -95,6 +157,7 @@ String _normalizeOrderSource({
   required String appointmentGroupId,
 }) {
   final source = _asString(txSource).trim().toLowerCase();
+  if (source == 'appointment_addon') return 'appointment_addon';
   if (source == 'walkin' || source == 'walk-in') return 'walkin';
   if (source == 'appointment' || source == 'booking') return 'appointment';
   if (source == 'online' || source == 'online_booking') return 'online';
@@ -109,7 +172,114 @@ String _normalizeOrderSource({
   return 'walkin';
 }
 
-enum _HistoryPane { bill, services, customers, staff }
+Map<String, dynamic> _syntheticAppointmentTransaction(
+  List<Map<String, dynamic>> appointments,
+) {
+  final sorted = List<Map<String, dynamic>>.from(appointments)
+    ..sort(
+      (left, right) =>
+          _asString(left['startTime']).compareTo(_asString(right['startTime'])),
+    );
+  final first = sorted.first;
+  final groupId = _asString(first['appointmentGroupId']);
+  final serviceItems = <Map<String, dynamic>>[];
+  for (final appointment in sorted) {
+    final items = _asMapList(appointment['serviceItems']);
+    if (items.isNotEmpty) {
+      serviceItems.addAll(items);
+      continue;
+    }
+    serviceItems.add({
+      'id': _asString(appointment['serviceId']),
+      'name': _asString(appointment['serviceName'], 'Service'),
+      'price': _asDouble(appointment['totalPrice']),
+      'assignedTherapistId': _asString(appointment['therapistId']),
+      'assignedRoomId': _asString(appointment['roomId']),
+      'startTime': _asString(
+        appointment['bookedStartTime'],
+        _asString(appointment['startTime']),
+      ),
+      'endTime': _asString(
+        appointment['bookedEndTime'],
+        _asString(appointment['endTime']),
+      ),
+    });
+  }
+  final servicePrice = sorted.fold<double>(
+    0,
+    (total, appointment) => total + _asDouble(appointment['totalPrice']),
+  );
+  final allPaid = sorted.every(
+    (appointment) =>
+        _asString(appointment['paymentStatus']).toLowerCase() == 'paid',
+  );
+  final type = _asString(first['type']).toLowerCase();
+  final isOnline = _asString(first['onlineBookingServiceId']).isNotEmpty;
+  final referenceId = groupId.isNotEmpty ? groupId : _asString(first['id']);
+  return {
+    'id': 'appointment:$referenceId',
+    'appointmentId': groupId.isEmpty ? _asString(first['id']) : '',
+    'appointmentGroupId': groupId,
+    'customerId': _asString(first['customerId']),
+    if (_asString(first['customerName']).isNotEmpty)
+      'customerName': _asString(first['customerName']),
+    if (_asString(first['customerPhone']).isNotEmpty)
+      'customerPhone': _asString(first['customerPhone']),
+    'serviceId': _asString(first['serviceId']),
+    'therapistId': _asString(first['therapistId']),
+    'roomId': _asString(first['roomId']),
+    'serviceName': sorted.length == 1
+        ? _asString(first['serviceName'], 'Service')
+        : '${serviceItems.length} services',
+    'serviceItems': serviceItems,
+    'itemCount': serviceItems.length,
+    'servicePrice': servicePrice,
+    'totalAmount': servicePrice,
+    'paymentMethod': 'unknown',
+    'paymentStatus': allPaid ? 'paid' : 'unpaid',
+    'receiptNumber': '-',
+    'source': isOnline || type == 'online' ? 'online_booking' : 'appointment',
+    'createdAt': first['createdAt'] ?? first['startAt'],
+    'updatedAt': first['updatedAt'] ?? first['createdAt'],
+  };
+}
+
+enum _HistoryPane { bill, appointment, services, customers, staff }
+
+enum _OrderDetailMode { bill, appointment }
+
+List<_HistoryOrder> _historyVisitorOrders({
+  required List<_HistoryOrder> transactions,
+  required List<_HistoryOrder> appointments,
+  required DateTime selectedDate,
+}) {
+  final transactionVisitors = transactions
+      .where(
+        (order) =>
+            !order.isVoided &&
+            isHistoryVisitor(
+              actualStartedAt: order.actualStartedAt,
+              selectedDate: selectedDate,
+            ),
+      )
+      .toList();
+  final representedAppointments = <String>{
+    for (final order in transactionVisitors) ...order.linkedAppointmentIds,
+  };
+  return [
+    ...transactionVisitors,
+    ...appointments.where(
+      (order) =>
+          isHistoryVisitor(
+            actualStartedAt: order.actualStartedAt,
+            selectedDate: selectedDate,
+          ) &&
+          order.linkedAppointmentIds.every(
+            (id) => !representedAppointments.contains(id),
+          ),
+    ),
+  ];
+}
 
 class SalesHistoryScreen extends StatefulWidget {
   final String userRole;
@@ -126,6 +296,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
   final _appointmentRepository = AppointmentRepository();
   DateTime _selectedDate = _stripDate(DateTime.now());
   List<_HistoryOrder> _orders = [];
+  List<_HistoryOrder> _appointmentRecords = [];
   _HistorySummary _summary = _HistorySummary.empty;
   Map<String, Map<String, dynamic>> _therapists = {};
   _HistoryPane _activePane = _HistoryPane.bill;
@@ -135,6 +306,25 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
   bool get _isAdmin => widget.userRole.toLowerCase().trim() == 'admin';
   bool get _canGoNextDay => _selectedDate.isBefore(_stripDate(DateTime.now()));
+  List<_HistoryOrder> get _billOrders => filterSalesHistoryListing(
+    records: _orders,
+    selectedDate: _selectedDate,
+    listing: SalesHistoryListing.bills,
+    paidAt: (order) => order.paidAt,
+    serviceAt: (order) => order.serviceAt,
+  );
+  List<_HistoryOrder> get _appointmentOrders => filterSalesHistoryListing(
+    records: _appointmentRecords,
+    selectedDate: _selectedDate,
+    listing: SalesHistoryListing.appointments,
+    paidAt: (order) => order.paidAt,
+    serviceAt: (order) => order.serviceAt,
+  );
+  List<_HistoryOrder> get _visitorOrders => _historyVisitorOrders(
+    transactions: _orders,
+    appointments: _appointmentOrders,
+    selectedDate: _selectedDate,
+  );
 
   @override
   void initState() {
@@ -159,6 +349,13 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     try {
       await _appointmentRepository.completeDueAppointments();
       final transactionRows = await _transactionRepository.listTransactions();
+      final appointmentRowsForDate = await _appointmentRepository
+          .getAppointmentsByDate(
+            DateFormat('yyyy-MM-dd').format(_selectedDate),
+          );
+      final scheduledAppointmentRows = appointmentRowsForDate.where((row) {
+        return isScheduledHistoryAppointmentType(_asString(row['type']));
+      }).toList();
 
       final transactionDocs = transactionRows.where((row) {
         final status = _asString(row['paymentStatus']).toLowerCase();
@@ -166,18 +363,31 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       }).toList();
 
       final transactionData = transactionDocs;
-      final appointmentIds = transactionData
-          .map((d) => _asString(d['appointmentId']))
-          .where((id) => id.isNotEmpty);
-      final appointmentGroupIds = transactionData
-          .map((d) => _asString(d['appointmentGroupId']))
-          .where((id) => id.isNotEmpty)
-          .toSet();
+      final appointmentIds = {
+        ...transactionData
+            .map((d) => _asString(d['appointmentId']))
+            .where((id) => id.isNotEmpty),
+        ...scheduledAppointmentRows
+            .map((d) => _asString(d['id']))
+            .where((id) => id.isNotEmpty),
+      };
+      final appointmentGroupIds = {
+        ...transactionData
+            .map((d) => _asString(d['appointmentGroupId']))
+            .where((id) => id.isNotEmpty),
+        ...scheduledAppointmentRows
+            .map((d) => _asString(d['appointmentGroupId']))
+            .where((id) => id.isNotEmpty),
+      };
       final customerIds = transactionData
           .map((d) => _asString(d['customerId']))
           .where((id) => id.isNotEmpty);
 
       final appointments = await _loadDocMap('appointments', appointmentIds);
+      for (final appointment in scheduledAppointmentRows) {
+        final id = _asString(appointment['id']);
+        if (id.isNotEmpty) appointments[id] = appointment;
+      }
       final groupAppointmentRows = await _dashboardRepository.loadWhereIn(
         'appointments',
         'appointment_group_id',
@@ -194,8 +404,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
             ...appointments.keys,
             ...groupAppointmentRows.map((row) => _asString(row['id'])),
           ]);
-      final allocationsByAppointment =
-          <String, List<Map<String, dynamic>>>{};
+      final allocationsByAppointment = <String, List<Map<String, dynamic>>>{};
       for (final allocation in allocationRows) {
         final appointmentId = _asString(
           allocation['appointmentId'] ?? allocation['appointment_id'],
@@ -218,7 +427,12 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         ...transactionData.expand(
           (d) => _asMapList(
             d['serviceItems'] ?? d['service_items'] ?? d['items'],
-          ).map((item) => _asString(item['id'], _asString(item['serviceId']))),
+          ).map(
+            (item) => _asString(
+              item['id'],
+              _asString(item['serviceId'], _asString(item['service_id'])),
+            ),
+          ),
         ),
       ].where((id) => id.isNotEmpty);
       final roomIds = [
@@ -240,32 +454,112 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       }..remove('');
       final rooms = await _loadDocMap('rooms', roomIds);
 
-      final orders = transactionDocs
-          .map(
-            (transaction) => _HistoryOrder.fromTransaction(
-              transaction,
-              appointments: appointments,
-              appointmentsByGroup: appointmentsByGroup,
-              customers: customers,
-              services: services,
-              therapists: therapists,
-              rooms: rooms,
-              allocationsByAppointment: allocationsByAppointment,
-            ),
-          )
-          .where(
-            (order) =>
-                _sameDay(order.paidAt, _selectedDate) ||
-                (order.serviceCompletedAt != null &&
-                    _sameDay(order.serviceCompletedAt!, _selectedDate)),
-          )
-          .toList()
-        ..sort((a, b) => b.displayAt.compareTo(a.displayAt));
+      final transactionsByAppointment = <String, Map<String, dynamic>>{};
+      final transactionsByGroup = <String, Map<String, dynamic>>{};
+      for (final transaction in transactionDocs) {
+        if (_asString(transaction['source']).toLowerCase() ==
+            'appointment_addon') {
+          continue;
+        }
+        final appointmentId = _asString(transaction['appointmentId']);
+        final groupId = _asString(transaction['appointmentGroupId']);
+        if (appointmentId.isNotEmpty) {
+          transactionsByAppointment[appointmentId] = transaction;
+        }
+        if (groupId.isNotEmpty) transactionsByGroup[groupId] = transaction;
+      }
+
+      final orders =
+          transactionDocs
+              .map(
+                (transaction) => _HistoryOrder.fromTransaction(
+                  transaction,
+                  appointments: appointments,
+                  appointmentsByGroup: appointmentsByGroup,
+                  customers: customers,
+                  services: services,
+                  therapists: therapists,
+                  rooms: rooms,
+                  allocationsByAppointment: allocationsByAppointment,
+                ),
+              )
+              .where(
+                (order) =>
+                    _sameDay(order.paidAt, _selectedDate) ||
+                    _sameDay(order.serviceAt, _selectedDate),
+              )
+              .toList()
+            ..sort((a, b) => b.displayAt.compareTo(a.displayAt));
+
+      final appointmentBuckets = <String, List<Map<String, dynamic>>>{};
+      for (final appointment in scheduledAppointmentRows) {
+        final groupId = _asString(appointment['appointmentGroupId']);
+        final id = _asString(appointment['id']);
+        if (id.isEmpty) continue;
+        final key = groupId.isEmpty ? 'appointment:$id' : 'group:$groupId';
+        appointmentBuckets.putIfAbsent(key, () => []).add(appointment);
+      }
+      final appointmentRecords = appointmentBuckets.values.map((rows) {
+        final first = rows.first;
+        final groupId = _asString(first['appointmentGroupId']);
+        final appointmentId = _asString(first['id']);
+        final transaction = groupId.isNotEmpty
+            ? transactionsByGroup[groupId]
+            : transactionsByAppointment[appointmentId];
+        final presentationTransaction = Map<String, dynamic>.from(
+          transaction ?? _syntheticAppointmentTransaction(rows),
+        );
+        final currentServiceItems = rows.expand((row) {
+          final ownerId = _asString(row['id']);
+          return _asMapList(row['serviceItems']).map(
+            (item) => {
+              ...item,
+              'appointmentId': _asString(
+                item['appointmentId'] ?? item['appointment_id'],
+                ownerId,
+              ),
+            },
+          );
+        }).toList();
+        if (currentServiceItems.isNotEmpty) {
+          presentationTransaction['serviceItems'] = currentServiceItems;
+          presentationTransaction['itemCount'] = currentServiceItems.length;
+          presentationTransaction['serviceName'] = currentServiceItems
+              .map((item) => _asString(item['name']))
+              .where((name) => name.isNotEmpty)
+              .join(', ');
+          presentationTransaction['servicePrice'] = rows.fold<double>(
+            0,
+            (total, row) => total + _asDouble(row['totalPrice']),
+          );
+        }
+        return _HistoryOrder.fromTransaction(
+          presentationTransaction,
+          appointments: appointments,
+          appointmentsByGroup: appointmentsByGroup,
+          customers: customers,
+          services: services,
+          therapists: therapists,
+          rooms: rooms,
+          allocationsByAppointment: allocationsByAppointment,
+        );
+      }).toList()..sort((a, b) => b.serviceAt.compareTo(a.serviceAt));
+
+      final visitorOrders = _historyVisitorOrders(
+        transactions: orders,
+        appointments: appointmentRecords,
+        selectedDate: _selectedDate,
+      );
 
       if (!mounted) return;
       setState(() {
         _orders = orders;
-        _summary = _HistorySummary.fromOrders(orders, _selectedDate);
+        _appointmentRecords = appointmentRecords;
+        _summary = _HistorySummary.fromOrders(
+          orders,
+          _selectedDate,
+          visitorOrders: visitorOrders,
+        );
         _therapists = therapists;
         _loading = false;
       });
@@ -273,6 +567,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       if (!mounted) return;
       setState(() {
         _orders = [];
+        _appointmentRecords = [];
         _summary = _HistorySummary.empty;
         _therapists = {};
         _loading = false;
@@ -330,7 +625,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       MaterialPageRoute<void>(
         builder: (context) => _CustomerBreakdownScreen(
           selectedDate: _selectedDate,
-          orders: _orders,
+          orders: _visitorOrders,
         ),
       ),
     );
@@ -361,12 +656,42 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
     setState(() => _showOrdersOnPhone = true);
   }
 
+  void _openAppointmentList() {
+    if (MediaQuery.of(context).size.width >= 900) {
+      setState(() => _activePane = _HistoryPane.appointment);
+      return;
+    }
+    Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (context) => _HistoryAppointmentPane(
+          selectedDate: _selectedDate,
+          orders: _appointmentOrders,
+          loading: _loading,
+          error: _error,
+          onRefresh: _loadHistory,
+          onTapOrder: _openAppointmentDetail,
+        ),
+      ),
+    );
+  }
+
   void _openOrderDetail(_HistoryOrder order) {
+    _openDetail(order, mode: _OrderDetailMode.bill);
+  }
+
+  void _openAppointmentDetail(_HistoryOrder order) {
+    _openDetail(order, mode: _OrderDetailMode.appointment);
+  }
+
+  void _openDetail(_HistoryOrder order, {required _OrderDetailMode mode}) {
     _showDetailDrawer(
       context: context,
-      title: 'Bill Details',
+      title: mode == _OrderDetailMode.bill
+          ? 'Bill Details'
+          : 'Appointment Details',
       child: _OrderDetailSheet(
         order: order,
+        mode: mode,
         isAdmin: _isAdmin,
         onVoid: () => _voidOrder(order),
         onEditTherapists: () => _editTherapistAllocations(order),
@@ -456,7 +781,9 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         'paymentStatus': 'voided',
         'updatedAt': DateTime.now().toUtc().toIso8601String(),
       });
-      if (order.appointmentGroupId.isNotEmpty) {
+      if (order.source == 'appointment_addon') {
+        // The add-on receipt is supplementary to the visit.
+      } else if (order.appointmentGroupId.isNotEmpty) {
         await _appointmentRepository.voidAppointmentGroup(
           order.appointmentGroupId,
         );
@@ -506,9 +833,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
             ElevatedButton(
               onPressed: () => Navigator.pop(context, true),
               style: ElevatedButton.styleFrom(
-                backgroundColor: destructive
-                    ? const Color(0xFFE53935)
-                    : _teal,
+                backgroundColor: destructive ? const Color(0xFFE53935) : _teal,
                 foregroundColor: Colors.white,
               ),
               child: Text(actionLabel),
@@ -523,7 +848,6 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
   Widget build(BuildContext context) {
     final isTablet = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
-      backgroundColor: _page,
       body: SafeArea(
         child: isTablet
             ? _buildTablet()
@@ -545,12 +869,14 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
             loading: _loading,
             isAdmin: _isAdmin,
             selectedPane: _activePane,
+            appointmentCount: _appointmentOrders.length,
             onBack: () => Navigator.pop(context),
             onPickDate: _openDatePicker,
             onPreviousDate: () => _moveDate(-1),
             onNextDate: () => _moveDate(1),
             canGoNextDate: _canGoNextDay,
             onOpenOrders: _openBillList,
+            onOpenAppointments: _openAppointmentList,
             onOpenServices: _openServicesBreakdown,
             onOpenCustomers: _openCustomerBreakdown,
             onOpenStaff: _openStaffCommission,
@@ -564,6 +890,16 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
 
   Widget _buildActivePane() {
     switch (_activePane) {
+      case _HistoryPane.appointment:
+        return _HistoryAppointmentPane(
+          selectedDate: _selectedDate,
+          orders: _appointmentOrders,
+          loading: _loading,
+          error: _error,
+          onRefresh: _loadHistory,
+          onTapOrder: _openAppointmentDetail,
+          embedded: true,
+        );
       case _HistoryPane.services:
         return _ServicesBreakdownScreen(
           selectedDate: _selectedDate,
@@ -573,7 +909,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       case _HistoryPane.customers:
         return _CustomerBreakdownScreen(
           selectedDate: _selectedDate,
-          orders: _orders,
+          orders: _visitorOrders,
           embedded: true,
         );
       case _HistoryPane.staff:
@@ -587,7 +923,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       case _HistoryPane.bill:
         return _HistoryOrderPane(
           selectedDate: _selectedDate,
-          orders: _orders,
+          orders: _billOrders,
           summary: _summary,
           loading: _loading,
           error: _error,
@@ -604,12 +940,14 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
       loading: _loading,
       isAdmin: _isAdmin,
       selectedPane: _HistoryPane.bill,
+      appointmentCount: _appointmentOrders.length,
       onBack: () => Navigator.pop(context),
       onPickDate: _openDatePicker,
       onPreviousDate: () => _moveDate(-1),
       onNextDate: () => _moveDate(1),
       canGoNextDate: _canGoNextDay,
       onOpenOrders: _openBillList,
+      onOpenAppointments: _openAppointmentList,
       onOpenServices: _openServicesBreakdown,
       onOpenCustomers: _openCustomerBreakdown,
       onOpenStaff: _openStaffCommission,
@@ -663,7 +1001,7 @@ class _SalesHistoryScreenState extends State<SalesHistoryScreen> {
         Expanded(
           child: _HistoryOrderPane(
             selectedDate: _selectedDate,
-            orders: _orders,
+            orders: _billOrders,
             summary: _summary,
             loading: _loading,
             error: _error,
@@ -703,7 +1041,10 @@ class _HistoryOrder {
   final double therapistCommissionAmount;
   final double counterCommissionAmount;
   final DateTime paidAt;
+  final DateTime serviceAt;
+  final DateTime? actualStartedAt;
   final DateTime? serviceCompletedAt;
+  final String appointmentStatus;
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -733,7 +1074,10 @@ class _HistoryOrder {
     required this.therapistCommissionAmount,
     required this.counterCommissionAmount,
     required this.paidAt,
+    required this.serviceAt,
+    required this.actualStartedAt,
     required this.serviceCompletedAt,
+    required this.appointmentStatus,
     required this.createdAt,
     required this.updatedAt,
   });
@@ -746,13 +1090,13 @@ class _HistoryOrder {
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
-    required Map<String, List<Map<String, dynamic>>>
-        allocationsByAppointment,
+    required Map<String, List<Map<String, dynamic>>> allocationsByAppointment,
   }) {
     final appointmentId = _asString(tx['appointmentId']);
     final appointmentGroupId = _asString(tx['appointmentGroupId']);
     final appointment = appointments[appointmentId] ?? {};
-    final groupAppointments = appointmentsByGroup[appointmentGroupId] ?? const [];
+    final groupAppointments =
+        appointmentsByGroup[appointmentGroupId] ?? const [];
     final hasLinkedAppointment =
         appointment.isNotEmpty || groupAppointments.isNotEmpty;
     final paidAt = _tryDateTime(tx['paidAt']) ?? _asDateTime(tx['createdAt']);
@@ -760,6 +1104,25 @@ class _HistoryOrder {
       appointment: appointment,
       groupAppointments: groupAppointments,
       fallback: hasLinkedAppointment ? null : paidAt,
+    );
+    final serviceAt = _historyServiceAt(
+      appointment: appointment,
+      groupAppointments: groupAppointments,
+      fallback: paidAt,
+    );
+    final groupActualStarts =
+        groupAppointments
+            .map((item) => _tryDateTime(item['actualStartedAt']))
+            .whereType<DateTime>()
+            .toList()
+          ..sort();
+    final actualStartedAt =
+        _tryDateTime(appointment['actualStartedAt']) ??
+        (groupActualStarts.isEmpty ? null : groupActualStarts.first);
+    final appointmentStatus = _historyAppointmentStatus(
+      appointment: appointment,
+      groupAppointments: groupAppointments,
+      isCompleted: serviceCompletedAt != null,
     );
     final source = _normalizeOrderSource(
       txSource: tx['source'],
@@ -783,61 +1146,6 @@ class _HistoryOrder {
     final service = services[serviceId] ?? {};
     final therapist = therapists[therapistId] ?? {};
     final room = rooms[roomId] ?? {};
-    final rawItems =
-        _asMapList(tx['serviceItems'] ?? tx['service_items'] ?? tx['items'])
-            .map((item) {
-              final itemId = _asString(
-                item['id'],
-                _asString(item['serviceId']),
-              );
-              final linkedService = services[itemId] ?? {};
-              return {
-                ...linkedService,
-                ...item,
-                'id': itemId.isEmpty
-                    ? _asString(item['name'], _asString(linkedService['id']))
-                    : itemId,
-                'name': _asString(
-                  item['name'],
-                  _asString(linkedService['name'], 'Service'),
-                ),
-                'category': _asString(
-                  item['category'],
-                  _asString(linkedService['category'], 'Services'),
-                ),
-                'imageUrl': _asString(
-                  item['imageUrl'],
-                  _asString(
-                    item['image'],
-                    _asString(
-                      linkedService['imageUrl'],
-                      _asString(linkedService['image']),
-                    ),
-                  ),
-                ),
-                'assignedTherapistId': _asString(
-                  item['assignedTherapistId'],
-                  therapistId,
-                ),
-                'assignedTherapistName': _asString(
-                  item['assignedTherapistName'],
-                  _asString(therapist['name'], _asString(tx['therapistName'])),
-                ),
-                'assignedRoomId': _asString(item['assignedRoomId'], roomId),
-                'assignedRoomName': _asString(
-                  item['assignedRoomName'],
-                  _asString(room['name'], _asString(tx['roomName'])),
-                ),
-              };
-            })
-            .toList();
-    final itemCount = rawItems.isNotEmpty
-        ? rawItems.length
-        : _asInt(tx['itemCount'], 1);
-    final servicePrice = _asDouble(
-      tx['servicePrice'],
-      _asDouble(appointment['totalPrice']),
-    );
     final customerName = _asString(
       tx['customerName'],
       _asString(customer['name'], 'Guest'),
@@ -845,6 +1153,125 @@ class _HistoryOrder {
     final customerPhone = _asString(
       tx['customerPhone'],
       _asString(customer['phone'], '-'),
+    );
+    final linkedAppointmentRows =
+        appointmentId.isNotEmpty
+              ? [appointment]
+              : List<Map<String, dynamic>>.from(groupAppointments)
+          ..sort((left, right) {
+            final leftCreated = _tryDateTime(
+              left['createdAt'] ?? left['created_at'],
+            );
+            final rightCreated = _tryDateTime(
+              right['createdAt'] ?? right['created_at'],
+            );
+            return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
+                .compareTo(
+                  rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0),
+                );
+          });
+    final rawItems =
+        _asMapList(
+          tx['serviceItems'] ?? tx['service_items'] ?? tx['items'],
+        ).map((item) {
+          final ownerAppointmentId = _asString(
+            item['appointmentId'] ?? item['appointment_id'],
+            appointmentId,
+          );
+          final ownerIndex = linkedAppointmentRows.indexWhere(
+            (row) => _asString(row['id']) == ownerAppointmentId,
+          );
+          final ownerAppointment = ownerIndex < 0
+              ? const <String, dynamic>{}
+              : linkedAppointmentRows[ownerIndex];
+          final ownerTherapistId = _asString(
+            ownerAppointment['therapistId'],
+            therapistId,
+          );
+          final ownerRoomId = _asString(ownerAppointment['roomId'], roomId);
+          final itemId = _asString(
+            item['id'],
+            _asString(item['serviceId'], _asString(item['service_id'])),
+          );
+          final linkedService = services[itemId] ?? {};
+          return {
+            ...linkedService,
+            ...item,
+            'id': itemId.isEmpty
+                ? _asString(item['name'], _asString(linkedService['id']))
+                : itemId,
+            'name': _asString(
+              item['name'],
+              _asString(
+                item['public_name'],
+                _asString(linkedService['name'], 'Service'),
+              ),
+            ),
+            'category': _asString(
+              item['category'],
+              _asString(linkedService['category'], 'Services'),
+            ),
+            'imageUrl': _asString(
+              item['imageUrl'],
+              _asString(
+                item['image'],
+                _asString(
+                  linkedService['imageUrl'],
+                  _asString(linkedService['image']),
+                ),
+              ),
+            ),
+            'assignedTherapistId': _asString(
+              item['assignedTherapistId'] ?? item['assigned_therapist_id'],
+              ownerTherapistId,
+            ),
+            'assignedTherapistName': _asString(
+              item['assignedTherapistName'],
+              _asString(
+                therapists[ownerTherapistId]?['name'],
+                _asString(therapist['name'], _asString(tx['therapistName'])),
+              ),
+            ),
+            'assignedRoomId': _asString(item['assignedRoomId'], ownerRoomId),
+            'assignedRoomName': _asString(
+              item['assignedRoomName'],
+              _asString(
+                rooms[ownerRoomId]?['name'],
+                _asString(room['name'], _asString(tx['roomName'])),
+              ),
+            ),
+            'appointmentId': ownerAppointmentId,
+            'paxNumber': ownerIndex < 0 ? 0 : ownerIndex + 1,
+            'paxCustomerName': ownerIndex <= 0
+                ? customerName
+                : 'Guest',
+            'startTime': _asString(
+              item['startTime'],
+              _asString(
+                ownerAppointment['bookedStartTime'],
+                _asString(ownerAppointment['startTime']),
+              ),
+            ),
+            'endTime': _asString(
+              item['endTime'],
+              _asString(
+                ownerAppointment['bookedEndTime'],
+                _asString(ownerAppointment['endTime']),
+              ),
+            ),
+            if (_asString(item['lineType']) == 'add_on')
+              'paymentStatus': _asString(
+                item['paymentStatus'],
+                _asString(tx['paymentStatus'], 'unpaid'),
+              ),
+          };
+        }).toList();
+    final itemCount = rawItems.isNotEmpty
+        ? rawItems.length
+        : _asInt(tx['itemCount'], 1);
+    final servicePrice = _asDouble(
+      tx['servicePrice'],
+      _asDouble(appointment['totalPrice']),
     );
     final serviceName = _asString(
       tx['serviceName'],
@@ -863,42 +1290,36 @@ class _HistoryOrder {
       fallbackRoomName: roomName,
       fallbackAmount: servicePrice,
     );
-    final linkedAppointmentRows = appointmentId.isNotEmpty
-        ? [appointment]
-        : List<Map<String, dynamic>>.from(groupAppointments)
-      ..sort((left, right) {
-        final leftCreated = _tryDateTime(
-          left['createdAt'] ?? left['created_at'],
-        );
-        final rightCreated = _tryDateTime(
-          right['createdAt'] ?? right['created_at'],
-        );
-        return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
-            .compareTo(rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0));
-      });
     final serviceGroups = <_HistoryServiceGroup>[];
     for (var index = 0; index < baseServiceGroups.length; index++) {
       final baseGroup = baseServiceGroups[index];
-      if (index >= linkedAppointmentRows.length) {
+      final linkedAppointmentIndex = baseGroup.appointmentId.isEmpty
+          ? index
+          : linkedAppointmentRows.indexWhere(
+              (row) => _asString(row['id']) == baseGroup.appointmentId,
+            );
+      if (linkedAppointmentIndex < 0 ||
+          linkedAppointmentIndex >= linkedAppointmentRows.length) {
         serviceGroups.add(baseGroup);
         continue;
       }
-      final linkedAppointment = linkedAppointmentRows[index];
+      final linkedAppointment = linkedAppointmentRows[linkedAppointmentIndex];
       final linkedId = _asString(linkedAppointment['id']);
-      final allocationRows = List<Map<String, dynamic>>.from(
-        allocationsByAppointment[linkedId] ?? const [],
-      )..sort((left, right) {
-          final leftCreated = _tryDateTime(
-            left['createdAt'] ?? left['created_at'],
-          );
-          final rightCreated = _tryDateTime(
-            right['createdAt'] ?? right['created_at'],
-          );
-          return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
-              .compareTo(
-                rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0),
-              );
-        });
+      final allocationRows =
+          List<Map<String, dynamic>>.from(
+            allocationsByAppointment[linkedId] ?? const [],
+          )..sort((left, right) {
+            final leftCreated = _tryDateTime(
+              left['createdAt'] ?? left['created_at'],
+            );
+            final rightCreated = _tryDateTime(
+              right['createdAt'] ?? right['created_at'],
+            );
+            return (leftCreated ?? DateTime.fromMillisecondsSinceEpoch(0))
+                .compareTo(
+                  rightCreated ?? DateTime.fromMillisecondsSinceEpoch(0),
+                );
+          });
       final allocationNames = <String>[];
       for (final allocation in allocationRows) {
         final share = _asDouble(
@@ -914,18 +1335,14 @@ class _HistoryOrder {
         }
       }
       if (allocationNames.isEmpty) {
-        final currentTherapistId = _asString(
-          linkedAppointment['therapistId'],
-        );
+        final currentTherapistId = _asString(linkedAppointment['therapistId']);
         final currentName = _asString(
           therapists[currentTherapistId]?['name'],
           baseGroup.therapistName,
         );
         if (currentName.isNotEmpty) allocationNames.add(currentName);
       }
-      serviceGroups.add(
-        baseGroup.copyWithTherapistNames(allocationNames),
-      );
+      serviceGroups.add(baseGroup.copyWithTherapistNames(allocationNames));
     }
 
     return _HistoryOrder(
@@ -936,9 +1353,9 @@ class _HistoryOrder {
       linkedAppointmentIds: appointmentId.isNotEmpty
           ? [appointmentId]
           : groupAppointments
-              .map((item) => _asString(item['id']))
-              .where((id) => id.isNotEmpty)
-              .toList(),
+                .map((item) => _asString(item['id']))
+                .where((id) => id.isNotEmpty)
+                .toList(),
       source: source,
       customerId: customerId,
       customerName: customerName,
@@ -967,25 +1384,61 @@ class _HistoryOrder {
       therapistCommissionAmount: _asDouble(tx['therapistCommissionAmount']),
       counterCommissionAmount: _asDouble(tx['counterCommissionAmount']),
       paidAt: paidAt,
+      serviceAt: serviceAt,
+      actualStartedAt: actualStartedAt,
       serviceCompletedAt: serviceCompletedAt,
+      appointmentStatus: appointmentStatus,
       createdAt: paidAt,
       updatedAt: _asDateTime(tx['updatedAt'] ?? tx['createdAt']),
     );
   }
 
-  bool get isAppointmentBooking => source == 'appointment' || source == 'online';
+  bool get isAppointmentBooking =>
+      source == 'appointment' ||
+      source == 'online' ||
+      source == 'appointment_addon';
+  bool get isOnlineBooking => source == 'online';
+  bool get hasTransactionRecord => !id.startsWith('appointment:');
   bool get isWalkIn => source == 'walkin';
   bool get isVoided => paymentStatus == 'voided';
   bool get isServiceCompleted => serviceCompletedAt != null;
-  DateTime get displayAt => serviceCompletedAt ?? paidAt;
-  String get serviceStateLabel =>
-      isServiceCompleted ? 'Service Completed' : 'Service Pending';
+  DateTime get displayAt => paidAt;
+  bool get hasCheckedIn => actualStartedAt != null;
+  String get appointmentReference {
+    final raw =
+        (appointmentGroupId.isNotEmpty ? appointmentGroupId : appointmentId)
+            .replaceAll('-', '')
+            .toUpperCase();
+    if (raw.isEmpty) return 'Appointment';
+    return 'APT-${raw.substring(0, raw.length < 8 ? raw.length : 8)}';
+  }
+
+  String get serviceStateLabel {
+    switch (appointmentStatus) {
+      case 'completed':
+        return 'Completed';
+      case 'in_progress':
+        return 'In Progress';
+      case 'confirmed':
+        return hasCheckedIn ? 'Checked In' : 'Ready to Start';
+      case 'no_show':
+        return 'No Show';
+      case 'cancelled':
+      case 'canceled':
+        return 'Cancelled';
+      default:
+        return hasCheckedIn ? 'Checked In' : 'Scheduled';
+    }
+  }
+
   String get sourceLabel {
+    if (source == 'appointment_addon') return 'Appointment add-on';
     if (source == 'online') return 'Online Booking';
     if (isAppointmentBooking) return 'Appointment booking';
     if (isWalkIn) return 'Walk-in';
     return source.isEmpty ? 'Walk-in' : source;
   }
+
   String get paymentLabel {
     switch (paymentMethod) {
       case 'cash':
@@ -1023,9 +1476,11 @@ class _HistoryOrder {
 }
 
 class _HistoryServiceGroup {
+  final String appointmentId;
   final int paxNumber;
   final String customerName;
   final List<String> services;
+  final List<_HistoryAddOnLine> addOns;
   final String therapistName;
   final List<String> therapistNames;
   final String roomName;
@@ -1034,9 +1489,11 @@ class _HistoryServiceGroup {
   final double amount;
 
   const _HistoryServiceGroup({
+    required this.appointmentId,
     required this.paxNumber,
     required this.customerName,
     required this.services,
+    required this.addOns,
     required this.therapistName,
     required this.therapistNames,
     required this.roomName,
@@ -1045,15 +1502,22 @@ class _HistoryServiceGroup {
     required this.amount,
   });
 
-  String get serviceLabel =>
-      services.isEmpty ? 'Service' : services.join(', ');
+  String get serviceLabel {
+    final labels = [
+      ...services,
+      if (services.isEmpty) ...addOns.map((item) => item.name),
+    ];
+    return labels.isEmpty ? 'Service' : labels.join(', ');
+  }
 
   _HistoryServiceGroup copyWithTherapistNames(List<String> names) {
     final resolved = names.where((name) => name.trim().isNotEmpty).toList();
     return _HistoryServiceGroup(
+      appointmentId: appointmentId,
       paxNumber: paxNumber,
       customerName: customerName,
       services: services,
+      addOns: addOns,
       therapistName: resolved.isEmpty ? therapistName : resolved.first,
       therapistNames: resolved.isEmpty ? [therapistName] : resolved,
       roomName: roomName,
@@ -1080,9 +1544,11 @@ class _HistoryServiceGroup {
     if (items.isEmpty) {
       return [
         _HistoryServiceGroup(
+          appointmentId: '',
           paxNumber: 1,
           customerName: fallbackCustomerName,
           services: [fallbackServiceName],
+          addOns: const [],
           therapistName: fallbackTherapistName,
           therapistNames: [fallbackTherapistName],
           roomName: fallbackRoomName,
@@ -1095,14 +1561,19 @@ class _HistoryServiceGroup {
 
     final grouped = <String, List<Map<String, dynamic>>>{};
     for (final item in items) {
-      final key = [
-        _asString(item['assignedTherapistId']),
-        _asString(item['assignedTherapistName']),
-        _asString(item['assignedRoomId']),
-        _asString(item['assignedRoomName']),
-        _asString(item['startTime']),
-        _asString(item['endTime']),
-      ].join('|');
+      final appointmentId = _asString(
+        item['appointmentId'] ?? item['appointment_id'],
+      );
+      final key = appointmentId.isNotEmpty
+          ? 'appointment:$appointmentId'
+          : [
+              _asString(item['assignedTherapistId']),
+              _asString(item['assignedTherapistName']),
+              _asString(item['assignedRoomId']),
+              _asString(item['assignedRoomName']),
+              _asString(item['startTime']),
+              _asString(item['endTime']),
+            ].join('|');
       grouped.putIfAbsent(key, () => []).add(item);
     }
 
@@ -1110,8 +1581,18 @@ class _HistoryServiceGroup {
     return grouped.values.map((groupItems) {
       paxNumber += 1;
       final first = groupItems.first;
-      final customerName = paxNumber == 1 ? fallbackCustomerName : 'Guest';
-      final services = groupItems
+      final resolvedPaxNumber = _asInt(first['paxNumber'], paxNumber);
+      final customerName = _asString(
+        first['paxCustomerName'],
+        resolvedPaxNumber == 1 ? fallbackCustomerName : 'Guest',
+      );
+      final bookedItems = groupItems
+          .where((item) => _asString(item['lineType'], 'booked') != 'add_on')
+          .toList();
+      final addOnItems = groupItems
+          .where((item) => _asString(item['lineType'], 'booked') == 'add_on')
+          .toList();
+      final services = bookedItems
           .map((item) => _asString(item['name'], 'Service'))
           .where((name) => name.trim().isNotEmpty)
           .toList();
@@ -1120,26 +1601,47 @@ class _HistoryServiceGroup {
         (total, item) => total + _asDouble(item['price']),
       );
       return _HistoryServiceGroup(
-        paxNumber: paxNumber,
+        appointmentId: _asString(
+          first['appointmentId'] ?? first['appointment_id'],
+        ),
+        paxNumber: resolvedPaxNumber,
         customerName: customerName,
-        services: services.isEmpty ? [fallbackServiceName] : services,
+        services: services,
+        addOns: addOnItems
+            .map(
+              (item) => _HistoryAddOnLine(
+                name: _asString(item['name'], 'Service add-on'),
+                amount: _asDouble(item['price']),
+                paymentStatus: _asString(item['paymentStatus'], 'unpaid'),
+              ),
+            )
+            .toList(),
         therapistName: _asString(
           first['assignedTherapistName'],
           fallbackTherapistName,
         ),
         therapistNames: [
-          _asString(
-            first['assignedTherapistName'],
-            fallbackTherapistName,
-          ),
+          _asString(first['assignedTherapistName'], fallbackTherapistName),
         ],
         roomName: _asString(first['assignedRoomName'], fallbackRoomName),
         startTime: _asString(first['startTime']),
         endTime: _asString(first['endTime']),
         amount: amount == 0 ? fallbackAmount : amount,
       );
-    }).toList();
+    }).toList()..sort((left, right) => left.paxNumber.compareTo(right.paxNumber));
   }
+}
+
+class _HistoryAddOnLine {
+  final String name;
+  final double amount;
+  final String paymentStatus;
+
+  const _HistoryAddOnLine({
+    required this.name,
+    required this.amount,
+    required this.paymentStatus,
+  });
 }
 
 class _HistorySummary {
@@ -1176,8 +1678,9 @@ class _HistorySummary {
 
   factory _HistorySummary.fromOrders(
     List<_HistoryOrder> orders,
-    DateTime selectedDate,
-  ) {
+    DateTime selectedDate, {
+    required List<_HistoryOrder> visitorOrders,
+  }) {
     final paidOrders = orders.where((order) => !order.isVoided).toList();
     final collectionOrders = paidOrders
         .where((order) => _sameDay(order.paidAt, selectedDate))
@@ -1197,21 +1700,31 @@ class _HistorySummary {
       'online': 0.0,
       'other': 0.0,
     };
-    final customers = <String>{};
+    final customers = visitorOrders
+        .where((order) => !order.isVoided && order.hasCheckedIn)
+        .map(
+          (order) => order.customerId.isNotEmpty
+              ? order.customerId
+              : order.customerName,
+        )
+        .where((id) => id.trim().isNotEmpty)
+        .toSet();
     var collection = 0.0;
     var serviceNet = 0.0;
     var sst = 0.0;
     var itemCount = 0;
     var totalTherapistCommission = 0.0;
 
+    serviceNet = sumSettlementServiceNet(
+      collectionOrders,
+      (order) => order.servicePrice,
+    );
+
     for (final order in collectionOrders) {
       collection += order.totalAmount;
       sst += order.sstAmount;
-      customers.add(
-        order.customerId.isNotEmpty ? order.customerId : order.customerName,
-      );
-      final method = (order.paymentMethod == 'billplz' ||
-              order.paymentMethod == 'online')
+      final method =
+          (order.paymentMethod == 'billplz' || order.paymentMethod == 'online')
           ? 'online'
           : order.paymentMethod;
       if (paymentTotals.containsKey(method)) {
@@ -1222,7 +1735,6 @@ class _HistorySummary {
     }
 
     for (final order in serviceOrders) {
-      serviceNet += order.servicePrice;
       itemCount += order.itemCount;
       totalTherapistCommission += order.therapistCommissionAmount;
     }
@@ -1233,7 +1745,7 @@ class _HistorySummary {
       sst: sst,
       orderCount: collectionOrders.length,
       itemCount: itemCount,
-      customerCount: customers.where((id) => id.trim().isNotEmpty).length,
+      customerCount: customers.length,
       paymentTotals: paymentTotals,
       totalTherapistCommission: totalTherapistCommission,
     );
@@ -1248,12 +1760,14 @@ class _HistorySidePanel extends StatelessWidget {
   final bool loading;
   final bool isAdmin;
   final _HistoryPane selectedPane;
+  final int appointmentCount;
   final VoidCallback onBack;
   final VoidCallback onPickDate;
   final VoidCallback onPreviousDate;
   final VoidCallback onNextDate;
   final bool canGoNextDate;
   final VoidCallback? onOpenOrders;
+  final VoidCallback onOpenAppointments;
   final VoidCallback onOpenServices;
   final VoidCallback onOpenCustomers;
   final VoidCallback onOpenStaff;
@@ -1264,11 +1778,13 @@ class _HistorySidePanel extends StatelessWidget {
     required this.loading,
     required this.isAdmin,
     required this.selectedPane,
+    required this.appointmentCount,
     required this.onBack,
     required this.onPickDate,
     required this.onPreviousDate,
     required this.onNextDate,
     required this.canGoNextDate,
+    required this.onOpenAppointments,
     required this.onOpenServices,
     required this.onOpenCustomers,
     required this.onOpenStaff,
@@ -1366,10 +1882,18 @@ class _HistorySidePanel extends StatelessWidget {
               _SideMetricRow(
                 icon: Icons.shopping_cart_outlined,
                 iconColor: const Color(0xFF2563EB),
-                label: 'Bill',
+                label: 'Bills',
                 value: '${summary.orderCount}',
                 selected: selectedPane == _HistoryPane.bill,
                 onTap: onOpenOrders,
+              ),
+              _SideMetricRow(
+                icon: Icons.event_available_outlined,
+                iconColor: const Color(0xFF0F766E),
+                label: 'Appointments',
+                value: '$appointmentCount',
+                selected: selectedPane == _HistoryPane.appointment,
+                onTap: onOpenAppointments,
               ),
               _SideMetricRow(
                 icon: Icons.spa_outlined,
@@ -1845,6 +2369,360 @@ class _HistoryOrderPane extends StatelessWidget {
   }
 }
 
+class _HistoryAppointmentPane extends StatelessWidget {
+  final DateTime selectedDate;
+  final List<_HistoryOrder> orders;
+  final bool loading;
+  final String? error;
+  final Future<void> Function() onRefresh;
+  final ValueChanged<_HistoryOrder> onTapOrder;
+  final bool embedded;
+
+  const _HistoryAppointmentPane({
+    required this.selectedDate,
+    required this.orders,
+    required this.loading,
+    required this.error,
+    required this.onRefresh,
+    required this.onTapOrder,
+    this.embedded = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final completed = orders.where((order) => order.isServiceCompleted).length;
+    final showHeaderStats = MediaQuery.of(context).size.width >= 700;
+    final content = Container(
+      color: _page,
+      child: Column(
+        children: [
+          _BreakdownHeader(
+            title: 'Daily Appointments',
+            date: selectedDate,
+            showBack: !embedded,
+            trailing: [
+              if (showHeaderStats) ...[
+                _HeaderStat(label: 'Appointments', value: '${orders.length}'),
+                const SizedBox(width: 10),
+                _HeaderStat(label: 'Completed', value: '$completed'),
+                const SizedBox(width: 10),
+              ],
+              _IconAction(
+                icon: Icons.refresh,
+                tooltip: 'Refresh appointments',
+                onTap: onRefresh,
+              ),
+            ],
+          ),
+          const Divider(height: 1, color: _line),
+          Expanded(
+            child: RefreshIndicator(
+              onRefresh: onRefresh,
+              color: _teal,
+              child: _buildBody(),
+            ),
+          ),
+        ],
+      ),
+    );
+    if (embedded) return content;
+    return Scaffold(
+      body: SafeArea(child: content),
+    );
+  }
+
+  Widget _buildBody() {
+    if (loading) {
+      return const Center(child: CircularProgressIndicator(color: _teal));
+    }
+    if (error != null) {
+      return ListView(
+        padding: const EdgeInsets.all(18),
+        children: [
+          _HistoryMessage(
+            icon: Icons.cloud_off_outlined,
+            title: 'Unable to load appointment history',
+            subtitle: error!,
+          ),
+        ],
+      );
+    }
+    if (orders.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.all(18),
+        children: const [
+          _HistoryMessage(
+            icon: Icons.event_available_outlined,
+            title: 'No appointments for this day',
+            subtitle: 'Scheduled counter and online bookings will appear here.',
+          ),
+        ],
+      );
+    }
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 680;
+        return ListView.builder(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 22),
+          itemCount: orders.length,
+          itemBuilder: (context, index) => _HistoryAppointmentCard(
+            order: orders[index],
+            compact: compact,
+            onTap: () => onTapOrder(orders[index]),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HistoryAppointmentCard extends StatelessWidget {
+  final _HistoryOrder order;
+  final bool compact;
+  final VoidCallback onTap;
+
+  const _HistoryAppointmentCard({
+    required this.order,
+    required this.compact,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFF1F5F9)),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: 0.03),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: compact ? _buildCompact() : _buildWide(),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildWide() {
+    return Column(
+      children: [
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(Icons.event_available_outlined, size: 18, color: _teal),
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 2,
+              child: _OrderTextBlock(
+                title: order.appointmentReference,
+                subtitle:
+                    'Booked ${DateFormat('hh:mm a, dd/MM/yyyy').format(order.serviceAt)}',
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: _OrderTextBlock(
+                title: order.customerName,
+                subtitle: order.customerPhone,
+              ),
+            ),
+            Expanded(
+              flex: 2,
+              child: _OrderTextBlock(
+                title: order.serviceName,
+                subtitle: order.therapistName == '-'
+                    ? order.roomName
+                    : '${order.therapistName} - ${order.roomName}',
+              ),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                _AppointmentStatusChip(order: order),
+                const SizedBox(height: 4),
+                Text(
+                  '${order.itemCount} service${order.itemCount == 1 ? '' : 's'}',
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        const Divider(height: 20, color: Color(0xFFF1F5F9)),
+        Row(
+          children: [
+            _AppointmentPaymentChip(order: order),
+            const Spacer(),
+            const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCompact() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.event_available_outlined, size: 18, color: _teal),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                order.appointmentReference,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+            _AppointmentStatusChip(order: order),
+          ],
+        ),
+        const SizedBox(height: 9),
+        Text(
+          'Booked ${DateFormat('hh:mm a, dd/MM/yyyy').format(order.serviceAt)} - ${order.customerName}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: _ink,
+            fontSize: 13,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+        const SizedBox(height: 3),
+        Text(
+          '${order.serviceName} - ${order.therapistName} - ${order.roomName}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: _muted,
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        const Divider(height: 20, color: Color(0xFFF1F5F9)),
+        Row(
+          children: [
+            _AppointmentPaymentChip(order: order),
+            const Spacer(),
+            const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1)),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+class _AppointmentPaymentChip extends StatelessWidget {
+  final _HistoryOrder order;
+
+  const _AppointmentPaymentChip({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    final isPaid = order.paymentStatus == 'paid';
+    final hasReceipt =
+        order.receiptNumber.isNotEmpty && order.receiptNumber != '-';
+    final label = isPaid
+        ? hasReceipt
+              ? '${order.receiptNumber} : ${_money(order.totalAmount)}'
+              : 'Paid : ${_money(order.totalAmount)}'
+        : 'Unpaid : ${_money(order.totalAmount)}';
+    final color = isPaid ? _teal : const Color(0xFFD97706);
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 230),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            isPaid ? Icons.receipt_long_outlined : Icons.schedule_outlined,
+            size: 14,
+            color: color,
+          ),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: color,
+                fontSize: 11,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AppointmentStatusChip extends StatelessWidget {
+  final _HistoryOrder order;
+
+  const _AppointmentStatusChip({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    final isCompleted = order.isServiceCompleted;
+    final isCancelled =
+        order.appointmentStatus == 'cancelled' ||
+        order.appointmentStatus == 'canceled' ||
+        order.appointmentStatus == 'no_show';
+    final color = isCancelled
+        ? const Color(0xFFB91C1C)
+        : isCompleted
+        ? const Color(0xFF047857)
+        : order.hasCheckedIn
+        ? const Color(0xFF0369A1)
+        : _teal;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        order.serviceStateLabel,
+        style: TextStyle(
+          color: color,
+          fontSize: 10,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
 class _HeaderStat extends StatelessWidget {
   final String label;
   final String value;
@@ -2237,12 +3115,14 @@ class _HistoryMessage extends StatelessWidget {
 
 class _OrderDetailSheet extends StatelessWidget {
   final _HistoryOrder order;
+  final _OrderDetailMode mode;
   final bool isAdmin;
   final VoidCallback onVoid;
   final VoidCallback onEditTherapists;
 
   const _OrderDetailSheet({
     required this.order,
+    required this.mode,
     required this.isAdmin,
     required this.onVoid,
     required this.onEditTherapists,
@@ -2250,6 +3130,8 @@ class _OrderDetailSheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final isAppointmentView = mode == _OrderDetailMode.appointment;
+    final showServiceDetails = isAppointmentView || !order.isOnlineBooking;
     return SafeArea(
       child: SingleChildScrollView(
         padding: EdgeInsets.fromLTRB(
@@ -2262,60 +3144,77 @@ class _OrderDetailSheet extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
+            if (isAppointmentView)
+              _AppointmentDetailHeader(order: order)
+            else
+              _BillReceiptHeader(order: order),
+            const SizedBox(height: 18),
+            const _DetailSectionTitle(
+              'Source & Customer',
+              icon: Icons.person_outline,
+            ),
+            const SizedBox(height: 10),
+            _DetailInfoCard(
               children: [
-                Expanded(
-                  child: Text(
-                    order.receiptNumber,
-                    style: const TextStyle(
-                      color: _ink,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-                Text(
-                  _money(order.totalAmount),
-                  style: TextStyle(
-                    color: order.isVoided ? const Color(0xFF9CA3AF) : _teal,
-                    fontSize: 20,
-                    fontWeight: FontWeight.w900,
-                    decoration: order.isVoided
-                        ? TextDecoration.lineThrough
-                        : TextDecoration.none,
-                  ),
-                ),
+                _DetailRow('Source', order.sourceLabel),
+                _DetailRow('Customer', order.customerName),
+                _DetailRow('Phone', order.customerPhone),
               ],
             ),
-            const SizedBox(height: 4),
-            Text(
-              DateFormat('EEEE, d MMM yyyy - hh:mm a').format(order.displayAt),
-              style: const TextStyle(
-                color: _muted,
-                fontSize: 13,
-                fontWeight: FontWeight.w700,
+            if (showServiceDetails) ...[
+              const SizedBox(height: 18),
+              const _DetailSectionTitle(
+                'Service Details',
+                icon: Icons.spa_outlined,
               ),
-            ),
-            const SizedBox(height: 18),
-            const _DetailSectionTitle('Service Details'),
-            const SizedBox(height: 10),
-            for (var i = 0; i < order.serviceGroups.length; i++) ...[
-              _ServiceGroupCard(group: order.serviceGroups[i]),
-              if (i != order.serviceGroups.length - 1)
+              const SizedBox(height: 10),
+              for (var i = 0; i < order.serviceGroups.length; i++) ...[
+                _ServiceGroupCard(group: order.serviceGroups[i]),
+                if (i != order.serviceGroups.length - 1)
+                  const SizedBox(height: 8),
+              ],
+              if (isAppointmentView) ...[
                 const SizedBox(height: 8),
+                _DetailInfoCard(
+                  children: [
+                    _DetailRow(
+                      'Booked',
+                      DateFormat(
+                        'EEE, d MMM yyyy - hh:mm a',
+                      ).format(order.serviceAt),
+                    ),
+                    _DetailRow(
+                      'Checked In',
+                      order.actualStartedAt == null
+                          ? 'Not checked in'
+                          : DateFormat(
+                              'EEE, d MMM yyyy - hh:mm a',
+                            ).format(order.actualStartedAt!),
+                    ),
+                    _DetailRow('Status', order.serviceStateLabel, strong: true),
+                  ],
+                ),
+              ],
             ],
-            const Divider(height: 28, color: _line),
-            _DetailRow('Source', order.sourceLabel),
-            _DetailRow('Customer', order.customerName),
-            _DetailRow('Phone', order.customerPhone),
-            _DetailRow(
-              'Payment',
-              order.isVoided ? '${order.paymentLabel} · Voided' : order.paymentLabel,
+            const SizedBox(height: 18),
+            const _DetailSectionTitle(
+              'Payment Details',
+              icon: Icons.payments_outlined,
             ),
-            const Divider(height: 28, color: _line),
-            _DetailRow('Service Net', _money(order.servicePrice)),
-            _DetailRow('SST', _money(order.sstAmount)),
-            _DetailRow('Total', _money(order.totalAmount), strong: true),
+            const SizedBox(height: 10),
+            _DetailInfoCard(
+              children: [
+                _DetailRow(
+                  'Payment',
+                  order.isVoided
+                      ? '${order.paymentLabel} - Voided'
+                      : order.paymentLabel,
+                ),
+                _DetailRow('Service Net', _money(order.servicePrice)),
+                _DetailRow('SST', _money(order.sstAmount)),
+                _DetailRow('Total', _money(order.totalAmount), strong: true),
+              ],
+            ),
             if (isAdmin && order.isServiceCompleted && !order.isVoided) ...[
               const SizedBox(height: 18),
               SizedBox(
@@ -2335,7 +3234,10 @@ class _OrderDetailSheet extends StatelessWidget {
                 ),
               ),
             ],
-            if (isAdmin && !order.isVoided) ...[
+            if (isAdmin &&
+                !isAppointmentView &&
+                order.hasTransactionRecord &&
+                !order.isVoided) ...[
               const SizedBox(height: 18),
               SizedBox(
                 width: double.infinity,
@@ -2360,6 +3262,174 @@ class _OrderDetailSheet extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _AppointmentDetailHeader extends StatelessWidget {
+  final _HistoryOrder order;
+
+  const _AppointmentDetailHeader({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFFEFF8F7),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFBFE2DE)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(Icons.event_available_outlined, size: 17, color: _teal),
+              SizedBox(width: 7),
+              Text(
+                'APPOINTMENT',
+                style: TextStyle(
+                  color: _teal,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            order.appointmentReference,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 20,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Text(
+            'Booked for ${DateFormat('EEEE, d MMM yyyy - hh:mm a').format(order.serviceAt)}',
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BillReceiptHeader extends StatelessWidget {
+  final _HistoryOrder order;
+
+  const _BillReceiptHeader({required this.order});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: order.isVoided
+            ? const Color(0xFFF9FAFB)
+            : const Color(0xFFEFF8F7),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: order.isVoided
+              ? const Color(0xFFE5E7EB)
+              : const Color(0xFFBFE2DE),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.receipt_long_outlined, size: 17, color: _teal),
+              const SizedBox(width: 7),
+              const Text(
+                'BILL RECEIPT',
+                style: TextStyle(
+                  color: _teal,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const Spacer(),
+              if (order.isVoided) const _VoidedChip(),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: Text(
+                  order.receiptNumber,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                _money(order.totalAmount),
+                style: TextStyle(
+                  color: order.isVoided ? const Color(0xFF9CA3AF) : _teal,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  decoration: order.isVoided
+                      ? TextDecoration.lineThrough
+                      : TextDecoration.none,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 5),
+          Text(
+            'Paid ${DateFormat('EEEE, d MMM yyyy - hh:mm a').format(order.paidAt)}',
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DetailInfoCard extends StatelessWidget {
+  final List<Widget> children;
+
+  const _DetailInfoCard({required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: _line),
+      ),
+      child: Column(
+        children: [
+          for (var index = 0; index < children.length; index++) ...[
+            children[index],
+            if (index != children.length - 1)
+              const Divider(height: 1, color: _line),
+          ],
+        ],
       ),
     );
   }
@@ -2400,25 +3470,17 @@ class _TherapistAllocationDialogState
     _shares = widget.existing
         .map(
           (row) => _EditableTherapistShare(
-            therapistId: _asString(
-              row['therapistId'] ?? row['therapist_id'],
-            ),
-            percent: (_asDouble(
-                      row['commissionShare'] ?? row['commission_share'],
-                    ) *
-                    100)
-                .round(),
+            therapistId: _asString(row['therapistId'] ?? row['therapist_id']),
+            percent:
+                (_asDouble(row['commissionShare'] ?? row['commission_share']) *
+                        100)
+                    .round(),
           ),
         )
         .where((share) => share.therapistId.isNotEmpty)
         .toList();
     if (_shares.isEmpty && widget.therapists.isNotEmpty) {
-      _shares.add(
-        _EditableTherapistShare(
-          therapistId: '',
-          percent: 100,
-        ),
-      );
+      _shares.add(_EditableTherapistShare(therapistId: '', percent: 100));
     }
   }
 
@@ -2448,12 +3510,7 @@ class _TherapistAllocationDialogState
     final available = widget.therapists.keys.where((id) => !used.contains(id));
     if (available.isEmpty) return;
     setState(() {
-      _shares.add(
-        _EditableTherapistShare(
-          therapistId: '',
-          percent: 0,
-        ),
-      );
+      _shares.add(_EditableTherapistShare(therapistId: '', percent: 0));
     });
   }
 
@@ -2563,11 +3620,14 @@ class _TherapistAllocationDialogState
                           border: OutlineInputBorder(),
                         ),
                         items: [
-                          for (final percent in (
-                            {0, 25, 50, 75, 100, _shares[index].percent}
-                                  .toList()
-                              ..sort()
-                          ))
+                          for (final percent in ({
+                            0,
+                            25,
+                            50,
+                            75,
+                            100,
+                            _shares[index].percent,
+                          }.toList()..sort()))
                             DropdownMenuItem(
                               value: percent,
                               child: Text('$percent%'),
@@ -2631,10 +3691,7 @@ class _TherapistAllocationDialogState
 }
 
 class _EditableTherapistShare {
-  _EditableTherapistShare({
-    required this.therapistId,
-    required this.percent,
-  });
+  _EditableTherapistShare({required this.therapistId, required this.percent});
 
   String therapistId;
   int percent;
@@ -2684,18 +3741,27 @@ class _DetailRow extends StatelessWidget {
 
 class _DetailSectionTitle extends StatelessWidget {
   final String label;
+  final IconData? icon;
 
-  const _DetailSectionTitle(this.label);
+  const _DetailSectionTitle(this.label, {this.icon});
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      label,
-      style: const TextStyle(
-        color: _ink,
-        fontSize: 14,
-        fontWeight: FontWeight.w900,
-      ),
+    return Row(
+      children: [
+        if (icon != null) ...[
+          Icon(icon, size: 17, color: _teal),
+          const SizedBox(width: 8),
+        ],
+        Text(
+          label,
+          style: const TextStyle(
+            color: _ink,
+            fontSize: 14,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -2740,11 +3806,12 @@ class _ServiceGroupCard extends StatelessWidget {
               fontWeight: FontWeight.w700,
             ),
           ),
-          _ServiceDetailLine(
-            icon: Icons.spa_outlined,
-            label: 'Service',
-            value: group.serviceLabel,
-          ),
+          if (group.services.isNotEmpty)
+            _ServiceDetailLine(
+              icon: Icons.spa_outlined,
+              label: 'Service',
+              value: group.services.join(', '),
+            ),
           for (var index = 0; index < group.therapistNames.length; index++)
             _ServiceDetailLine(
               icon: Icons.person_outline,
@@ -2764,6 +3831,51 @@ class _ServiceGroupCard extends StatelessWidget {
               label: 'Time',
               value: group.timeLabel,
             ),
+          if (group.addOns.isNotEmpty) ...[
+            const Divider(height: 18, color: _line),
+            const Text(
+              'Add-on Services',
+              style: TextStyle(
+                color: Color(0xFF92400E),
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            for (final addOn in group.addOns)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.add_circle_outline,
+                      size: 15,
+                      color: Color(0xFFB45309),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        addOn.name,
+                        style: const TextStyle(
+                          color: _ink,
+                          fontSize: 12,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    Text(
+                      '${_money(addOn.amount)}  ${addOn.paymentStatus == 'paid' ? 'Paid' : 'Due'}',
+                      style: TextStyle(
+                        color: addOn.paymentStatus == 'paid'
+                            ? const Color(0xFF15803D)
+                            : const Color(0xFFB45309),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
           _ServiceDetailLine(
             icon: Icons.payments_outlined,
             label: 'Amount',
@@ -3315,50 +4427,49 @@ class _ServicesBreakdownScreenState extends State<_ServicesBreakdownScreen> {
     final content = Container(
       color: _page,
       child: Column(
-          children: [
-            _BreakdownHeader(
-              title: 'Services',
-              date: widget.selectedDate,
-              showBack: !widget.embedded,
-              trailing: [
-                _HeaderStat(label: 'Items', value: '$totalCount'),
-                const SizedBox(width: 10),
-                _HeaderStat(label: 'Total', value: _money(totalAmount)),
-              ],
-            ),
-            _ServiceBreakdownTabs(
-              tabs: _tabs,
-              selected: _tab,
-              onSelected: (tab) => setState(() => _tab = tab),
-            ),
-            const Divider(height: 1, color: _line),
-            Expanded(
-              child: items.isEmpty
-                  ? ListView(
-                      padding: const EdgeInsets.all(18),
-                      children: const [
-                        _HistoryMessage(
-                          icon: Icons.spa_outlined,
-                          title: 'No services sold for this day',
-                          subtitle: 'Completed services will appear here.',
-                        ),
-                      ],
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 22),
-                      itemCount: items.length,
-                      itemBuilder: (context, index) => Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: _ServiceBreakdownCard(item: items[index]),
+        children: [
+          _BreakdownHeader(
+            title: 'Services',
+            date: widget.selectedDate,
+            showBack: !widget.embedded,
+            trailing: [
+              _HeaderStat(label: 'Items', value: '$totalCount'),
+              const SizedBox(width: 10),
+              _HeaderStat(label: 'Total', value: _money(totalAmount)),
+            ],
+          ),
+          _ServiceBreakdownTabs(
+            tabs: _tabs,
+            selected: _tab,
+            onSelected: (tab) => setState(() => _tab = tab),
+          ),
+          const Divider(height: 1, color: _line),
+          Expanded(
+            child: items.isEmpty
+                ? ListView(
+                    padding: const EdgeInsets.all(18),
+                    children: const [
+                      _HistoryMessage(
+                        icon: Icons.spa_outlined,
+                        title: 'No services sold for this day',
+                        subtitle: 'Completed services will appear here.',
                       ),
+                    ],
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(18, 16, 18, 22),
+                    itemCount: items.length,
+                    itemBuilder: (context, index) => Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: _ServiceBreakdownCard(item: items[index]),
                     ),
-            ),
-          ],
-        ),
+                  ),
+          ),
+        ],
+      ),
     );
     if (widget.embedded) return content;
     return Scaffold(
-      backgroundColor: _page,
       body: SafeArea(child: content),
     );
   }
@@ -3570,7 +4681,7 @@ class _CustomerBreakdownScreen extends StatelessWidget {
   Map<String, List<_HistoryOrder>> get _byCustomer {
     final map = <String, List<_HistoryOrder>>{};
     for (final order in orders.where(
-      (order) => !order.isVoided && order.isServiceCompleted,
+      (order) => !order.isVoided && order.hasCheckedIn,
     )) {
       final key = order.customerId.isNotEmpty
           ? order.customerId
@@ -3591,64 +4702,72 @@ class _CustomerBreakdownScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final grouped = _byCustomer;
     final entries = grouped.entries.toList()
-      ..sort((a, b) => _latestUpdateFor(b.value).compareTo(_latestUpdateFor(a.value)));
+      ..sort(
+        (a, b) =>
+            _latestUpdateFor(b.value).compareTo(_latestUpdateFor(a.value)),
+      );
     final totalRevenue = orders
-        .where((order) => !order.isVoided && order.isServiceCompleted)
+        .where((order) => !order.isVoided && order.hasCheckedIn)
         .fold<double>(0, (total, order) => total + order.totalAmount);
 
     final content = Container(
       color: _page,
       child: Column(
-          children: [
-            _BreakdownHeader(
-              title: 'Customers',
-              date: selectedDate,
-              showBack: !embedded,
-              trailing: [
-                _HeaderStat(label: 'Customers', value: '${entries.length}'),
-                const SizedBox(width: 10),
-                _HeaderStat(label: 'Total', value: _money(totalRevenue)),
-              ],
-            ),
-            Expanded(
-              child: entries.isEmpty
-                  ? ListView(
-                      padding: const EdgeInsets.all(18),
-                      children: const [
-                        _HistoryMessage(
-                          icon: Icons.people_outline,
-                          title: 'No customers for this day',
-                          subtitle: 'Customers who visit will appear here.',
-                        ),
-                      ],
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(18),
-                      itemCount: entries.length,
-                      itemBuilder: (context, index) {
-                        final customerOrders = entries[index].value;
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 12),
-                          child: _CustomerBreakdownCard(
-                            customerOrders: customerOrders,
-                            onTap: () => _showDetailDrawer(
-                              context: context,
-                              title: '${customerOrders.first.customerName} Bills',
-                              child: _CustomerDetailSheet(
-                                customerOrders: customerOrders,
-                              ),
+        children: [
+          _BreakdownHeader(
+            title: 'Customers',
+            date: selectedDate,
+            showBack: !embedded,
+            trailing: [
+              _HeaderStat(label: 'Customers', value: '${entries.length}'),
+              const SizedBox(width: 10),
+              _HeaderStat(label: 'Total', value: _money(totalRevenue)),
+            ],
+          ),
+          Expanded(
+            child: entries.isEmpty
+                ? ListView(
+                    padding: const EdgeInsets.all(18),
+                    children: const [
+                      _HistoryMessage(
+                        icon: Icons.people_outline,
+                        title: 'No customers for this day',
+                        subtitle: 'Customers who visit will appear here.',
+                      ),
+                    ],
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(18),
+                    itemCount: entries.length,
+                    itemBuilder: (context, index) {
+                      final customerOrders = entries[index].value;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 12),
+                        child: _CustomerBreakdownCard(
+                          customerOrders: customerOrders,
+                          onTap: () => showCustomerOrdersSheet(
+                            context,
+                            customer: CustomerModel(
+                              id: customerOrders.first.customerId,
+                              name: customerOrders.first.customerName,
+                              phone: customerOrders.first.customerPhone,
+                              gender: '',
+                              dateOfBirth: '',
+                              joinDate: '',
+                              notes: '',
                             ),
+                            groupLatestBill: true,
                           ),
-                        );
-                      },
-                    ),
-            ),
-          ],
-        ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
     if (embedded) return content;
     return Scaffold(
-      backgroundColor: _page,
       body: SafeArea(child: content),
     );
   }
@@ -3828,14 +4947,13 @@ class _CustomerDetailSheetState extends State<_CustomerDetailSheet> {
     try {
       final txs = await _customerRepository.getCustomerOrders(_customerId);
       final todayIds = widget.customerOrders.map((o) => o.id).toSet();
-      final previous = txs
-          .where((tx) => !todayIds.contains(_asString(tx['id'])))
-          .toList()
-        ..sort(
-          (a, b) => _asString(
-            b['createdAt'],
-          ).compareTo(_asString(a['createdAt'])),
-        );
+      final previous =
+          txs.where((tx) => !todayIds.contains(_asString(tx['id']))).toList()
+            ..sort(
+              (a, b) => _asString(
+                b['createdAt'],
+              ).compareTo(_asString(a['createdAt'])),
+            );
       if (!mounted) return;
       setState(() {
         _previousOrders = previous;
@@ -3890,9 +5008,7 @@ class _CustomerDetailSheetState extends State<_CustomerDetailSheet> {
               if (_loadingHistory)
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 24),
-                  child: Center(
-                    child: CircularProgressIndicator(color: _teal),
-                  ),
+                  child: Center(child: CircularProgressIndicator(color: _teal)),
                 )
               else ...[
                 if (_previousOrders.isEmpty)
@@ -3905,9 +5021,9 @@ class _CustomerDetailSheetState extends State<_CustomerDetailSheet> {
                         fontWeight: FontWeight.w700,
                       ),
                     )
-                else
-                  for (final tx in _previousOrders)
-                    _PreviousOrderLine(tx: tx),
+                  else
+                    for (final tx in _previousOrders)
+                      _PreviousOrderLine(tx: tx),
               ],
             ],
           ],
@@ -4103,36 +5219,6 @@ class _StaffCommissionScreen extends StatelessWidget {
     for (final order in orders.where(
       (order) => !order.isVoided && order.isServiceCompleted,
     )) {
-      if (order.therapistAllocations.isNotEmpty) {
-        for (final allocation in order.therapistAllocations) {
-          final therapistId = _asString(
-            allocation['therapistId'] ?? allocation['therapist_id'],
-          );
-          if (therapistId.isEmpty) continue;
-          final therapistName = _asString(
-            therapists[therapistId]?['name'],
-            'Therapist',
-          );
-          final commission = _asDouble(
-            allocation['commissionAmount'] ?? allocation['commission_amount'],
-          );
-          if (commission <= 0) continue;
-          final earning = earnings.putIfAbsent(
-            therapistId,
-            () => _StaffEarning(id: therapistId, name: therapistName),
-          );
-          earning.commission += commission;
-          earning.serviceCount += 1;
-          earning.lines.add(
-            _StaffOrderLine(
-              order: order,
-              items: order.rawServiceItems,
-              commission: commission,
-            ),
-          );
-        }
-        continue;
-      }
       final items = order.rawServiceItems.isNotEmpty
           ? order.rawServiceItems
           : [
@@ -4147,7 +5233,62 @@ class _StaffCommissionScreen extends StatelessWidget {
             ];
 
       final byTherapist = <String, List<Map<String, dynamic>>>{};
+      final commissionByTherapist = <String, double>{};
+
+      void creditItem(
+        Map<String, dynamic> item,
+        String therapistId,
+        double share,
+      ) {
+        if (therapistId.isEmpty || share <= 0) return;
+        final therapistDoc = therapists[therapistId];
+        final therapistName = _asString(
+          therapistDoc?['name'],
+          _asString(item['assignedTherapistName'], order.therapistName),
+        );
+        final commission = CommissionRepository.commissionForService(
+          item,
+          staff: therapistDoc,
+          role: 'Therapist',
+        ) * share;
+        if (commission <= 0) return;
+        byTherapist.putIfAbsent(therapistId, () => []).add({
+          ...item,
+          'assignedTherapistId': therapistId,
+          'assignedTherapistName': therapistName,
+        });
+        commissionByTherapist[therapistId] =
+            (commissionByTherapist[therapistId] ?? 0) + commission;
+      }
+
       for (final item in items) {
+        final itemAppointmentId = _asString(
+          item['appointmentId'] ?? item['appointment_id'],
+          order.appointmentId,
+        );
+        final matchingAllocations = order.therapistAllocations.where((row) {
+          final allocationAppointmentId = _asString(
+            row['appointmentId'] ?? row['appointment_id'],
+          );
+          return itemAppointmentId.isNotEmpty &&
+              allocationAppointmentId == itemAppointmentId;
+        }).toList();
+        if (matchingAllocations.isNotEmpty) {
+          for (final allocation in matchingAllocations) {
+            creditItem(
+              item,
+              _asString(
+                allocation['therapistId'] ?? allocation['therapist_id'],
+              ),
+              _asDouble(
+                allocation['commissionShare'] ??
+                    allocation['commission_share'],
+              ),
+            );
+          }
+          continue;
+        }
+
         final therapistName = _asString(
           item['assignedTherapistName'],
           order.therapistName,
@@ -4161,17 +5302,7 @@ class _StaffCommissionScreen extends StatelessWidget {
         if (therapistId.isEmpty) {
           therapistId = therapistName.isNotEmpty ? therapistName : 'unknown';
         }
-        final resolvedTherapistName = _asString(
-          therapists[therapistId]?['name'],
-          therapistName,
-        );
-        byTherapist
-            .putIfAbsent(therapistId, () => [])
-            .add({
-              ...item,
-              'assignedTherapistId': therapistId,
-              'assignedTherapistName': resolvedTherapistName,
-            });
+        creditItem(item, therapistId, 1);
       }
 
       for (final entry in byTherapist.entries) {
@@ -4181,17 +5312,7 @@ class _StaffCommissionScreen extends StatelessWidget {
           therapistItems.first['assignedTherapistName'],
           '-',
         );
-        final therapistDoc = therapists[therapistId];
-        final commission = therapistItems.fold<double>(
-          0,
-          (total, item) =>
-              total +
-              CommissionRepository.commissionForService(
-                item,
-                staff: therapistDoc,
-                role: 'Therapist',
-              ),
-        );
+        final commission = commissionByTherapist[therapistId] ?? 0;
 
         final earning = earnings.putIfAbsent(
           therapistId,
@@ -4216,19 +5337,17 @@ class _StaffCommissionScreen extends StatelessWidget {
     _showDetailDrawer(
       context: context,
       title: earning.name,
-      child: _StaffDetailContent(
-        earning: earning,
-        onTapOrder: onTapOrder,
-      ),
+      child: _StaffDetailContent(earning: earning, onTapOrder: onTapOrder),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final earnings = _computeEarnings().values
-        .where((earning) => earning.commission > 0)
-        .toList()
-      ..sort((a, b) => b.commission.compareTo(a.commission));
+    final earnings =
+        _computeEarnings().values
+            .where((earning) => earning.commission > 0)
+            .toList()
+          ..sort((a, b) => b.commission.compareTo(a.commission));
     final totalCommission = earnings.fold<double>(
       0,
       (total, earning) => total + earning.commission,
@@ -4237,51 +5356,46 @@ class _StaffCommissionScreen extends StatelessWidget {
     final content = Container(
       color: _page,
       child: Column(
-          children: [
-            _BreakdownHeader(
-              title: 'Staff',
-              date: selectedDate,
-              showBack: !embedded,
-              trailing: [
-                _HeaderStat(label: 'Staff', value: '${earnings.length}'),
-                const SizedBox(width: 10),
-                _HeaderStat(
-                  label: 'Commission',
-                  value: _money(totalCommission),
-                ),
-              ],
-            ),
-            Expanded(
-              child: earnings.isEmpty
-                  ? ListView(
-                      padding: const EdgeInsets.all(18),
-                      children: const [
-                        _HistoryMessage(
-                          icon: Icons.badge_outlined,
-                          title: 'No staff commission for this day',
-                          subtitle: 'Completed services will appear here.',
-                        ),
-                      ],
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.all(18),
-                      itemCount: earnings.length,
-                      itemBuilder: (context, index) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _StaffEarningCard(
-                          earning: earnings[index],
-                          onTap: () =>
-                              _openStaffDrawer(context, earnings[index]),
-                        ),
+        children: [
+          _BreakdownHeader(
+            title: 'Staff',
+            date: selectedDate,
+            showBack: !embedded,
+            trailing: [
+              _HeaderStat(label: 'Staff', value: '${earnings.length}'),
+              const SizedBox(width: 10),
+              _HeaderStat(label: 'Commission', value: _money(totalCommission)),
+            ],
+          ),
+          Expanded(
+            child: earnings.isEmpty
+                ? ListView(
+                    padding: const EdgeInsets.all(18),
+                    children: const [
+                      _HistoryMessage(
+                        icon: Icons.badge_outlined,
+                        title: 'No staff commission for this day',
+                        subtitle: 'Completed services will appear here.',
+                      ),
+                    ],
+                  )
+                : ListView.builder(
+                    padding: const EdgeInsets.all(18),
+                    itemCount: earnings.length,
+                    itemBuilder: (context, index) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: _StaffEarningCard(
+                        earning: earnings[index],
+                        onTap: () => _openStaffDrawer(context, earnings[index]),
                       ),
                     ),
-            ),
-          ],
-        ),
+                  ),
+          ),
+        ],
+      ),
     );
     if (embedded) return content;
     return Scaffold(
-      backgroundColor: _page,
       body: SafeArea(child: content),
     );
   }
@@ -4323,11 +5437,7 @@ class _StaffEarningCard extends StatelessWidget {
                   color: const Color(0xFFE8F5F5),
                   borderRadius: BorderRadius.circular(10),
                 ),
-                child: const Icon(
-                  Icons.badge_outlined,
-                  size: 19,
-                  color: _teal,
-                ),
+                child: const Icon(Icons.badge_outlined, size: 19, color: _teal),
               ),
               const SizedBox(width: 12),
               Expanded(
@@ -4378,10 +5488,7 @@ class _StaffDetailContent extends StatelessWidget {
   final _StaffEarning earning;
   final ValueChanged<_HistoryOrder> onTapOrder;
 
-  const _StaffDetailContent({
-    required this.earning,
-    required this.onTapOrder,
-  });
+  const _StaffDetailContent({required this.earning, required this.onTapOrder});
 
   @override
   Widget build(BuildContext context) {
@@ -4446,10 +5553,7 @@ class _StaffOrderLineTile extends StatelessWidget {
   final _StaffOrderLine line;
   final VoidCallback onTap;
 
-  const _StaffOrderLineTile({
-    required this.line,
-    required this.onTap,
-  });
+  const _StaffOrderLineTile({required this.line, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -4472,83 +5576,87 @@ class _StaffOrderLineTile extends StatelessWidget {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  line.order.receiptNumber,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: _ink,
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      line.order.receiptNumber,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
                   ),
-                ),
+                  Text(
+                    DateFormat('hh:mm a').format(line.order.displayAt),
+                    style: const TextStyle(
+                      color: _muted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
               ),
+              const SizedBox(height: 6),
               Text(
-                DateFormat('hh:mm a').format(line.order.displayAt),
+                services.isEmpty ? line.order.serviceName : services,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
                 style: const TextStyle(
                   color: _muted,
-                  fontSize: 11,
+                  fontSize: 12,
                   fontWeight: FontWeight.w700,
                 ),
               ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            services.isEmpty ? line.order.serviceName : services,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              color: _muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  line.order.customerName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: _ink,
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      line.order.customerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
                   ),
-                ),
+                  const Icon(
+                    Icons.chevron_right,
+                    color: Color(0xFFCBD5E1),
+                    size: 18,
+                  ),
+                ],
               ),
-              const Icon(Icons.chevron_right, color: Color(0xFFCBD5E1), size: 18),
+              const Divider(height: 16, color: _line),
+              Row(
+                children: [
+                  const Text(
+                    'Commission earned',
+                    style: TextStyle(
+                      color: _muted,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const Spacer(),
+                  Text(
+                    _money(line.commission),
+                    style: const TextStyle(
+                      color: _teal,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                ],
+              ),
+              _DetailRow('Bill Total', _money(line.order.totalAmount)),
             ],
-          ),
-          const Divider(height: 16, color: _line),
-          Row(
-            children: [
-              const Text(
-                'Commission earned',
-                style: TextStyle(
-                  color: _muted,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const Spacer(),
-              Text(
-                _money(line.commission),
-                style: const TextStyle(
-                  color: _teal,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
-          _DetailRow('Bill Total', _money(line.order.totalAmount)),
-        ],
           ),
         ),
       ),

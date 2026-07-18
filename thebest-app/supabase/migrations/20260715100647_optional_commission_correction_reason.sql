@@ -73,3 +73,5 @@ $$;
 
 revoke all on function public.set_completed_therapist_allocations(uuid, jsonb, text) from public, anon;
 grant execute on function public.set_completed_therapist_allocations(uuid, jsonb, text) to authenticated;
+
+;

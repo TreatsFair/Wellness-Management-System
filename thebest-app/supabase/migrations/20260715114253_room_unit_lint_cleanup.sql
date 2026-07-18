@@ -19,3 +19,5 @@ drop policy if exists room_units_admin_delete on public.room_units;
 create policy room_units_admin_delete on public.room_units
 for delete to authenticated
 using (public.is_admin());
+
+;

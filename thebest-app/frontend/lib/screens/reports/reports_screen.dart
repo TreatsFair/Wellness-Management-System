@@ -4,6 +4,7 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/accessibility/accessibility_settings.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -12,7 +13,6 @@ import '../../data/repositories/therapist_repository.dart';
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF111827);
 const _muted = Color(0xFF6B7280);
-const _page = Color(0xFFF4F6F8);
 const _line = Color(0xFFE5E7EB);
 const _blue = Color(0xFF2563EB);
 const _green = Color(0xFF15955A);
@@ -334,7 +334,11 @@ class _ReportsScreenState extends State<ReportsScreen> {
   @override
   void initState() {
     super.initState();
-    _loadReports();
+    if (widget.userRole.toLowerCase().trim() == 'admin') {
+      _loadReports();
+    } else {
+      _loading = false;
+    }
   }
 
   DateTime get _today => _stripDate(DateTime.now());
@@ -401,13 +405,17 @@ class _ReportsScreenState extends State<ReportsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (widget.userRole.toLowerCase().trim() != 'admin') {
+      return Scaffold(
+        appBar: AppBar(title: const Text('Reports')),
+        body: const Center(
+          child: Text('Reports are available to administrators only.'),
+        ),
+      );
+    }
     return Scaffold(
-      backgroundColor: _page,
       appBar: AppBar(
-        backgroundColor: _page,
-        surfaceTintColor: _page,
         elevation: 0,
-        foregroundColor: _ink,
         title: const Text(
           'Reports',
           style: TextStyle(fontWeight: FontWeight.w800),
@@ -1389,7 +1397,7 @@ String _paymentLabel(String value) {
       return 'QR Code';
     case 'credit_card':
     case 'card':
-      return 'Credit Card';
+      return 'Credit';
     case 'debit_card':
       return 'Debit Card';
     case 'billplz':
@@ -1606,6 +1614,9 @@ class _MetricGrid extends StatelessWidget {
                     ? 2
                     : 1;
         final mobile = width < 600;
+        final largeUi =
+            context.uiScale.preset == UiScalePreset.large ||
+            MediaQuery.textScalerOf(context).scale(1) > 1.15;
         return GridView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
@@ -1614,7 +1625,9 @@ class _MetricGrid extends StatelessWidget {
             crossAxisCount: columns,
             crossAxisSpacing: mobile ? 8 : 12,
             mainAxisSpacing: mobile ? 8 : 12,
-            mainAxisExtent: mobile ? 96 : 148,
+            mainAxisExtent: mobile
+                ? (largeUi ? 116 : 100)
+                : (largeUi ? 172 : 148),
           ),
           itemBuilder: (context, index) => cards[index],
         );
@@ -1645,59 +1658,51 @@ class _MetricCard extends StatelessWidget {
       backgroundColor: color,
       borderColor: color,
       padding: EdgeInsets.all(phone ? 10 : 16),
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          return FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.topLeft,
-            child: SizedBox(
-              width: constraints.maxWidth,
-              height: phone ? 72 : 112,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Container(
-                        width: phone ? 28 : 36,
-                        height: phone ? 28 : 36,
-                        decoration: BoxDecoration(
-                          color: Colors.white.withValues(alpha: 0.18),
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                        child: Icon(
-                          icon,
-                          color: Colors.white,
-                          size: phone ? 16 : 20,
-                        ),
-                      ),
-                    ],
-                  ),
-                  const Spacer(),
-                  Text(
-                    title,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: phone ? 10 : 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  SizedBox(height: phone ? 3 : 6),
-                  Text(
-                    value,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: phone ? 16 : 23,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ],
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: phone ? 28 : 36,
+            height: phone ? 28 : 36,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              icon,
+              color: Colors.white,
+              size: phone ? 16 : 20,
+            ),
+          ),
+          const Spacer(),
+          Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: phone ? 10 : 12,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          SizedBox(height: phone ? 3 : 6),
+          SizedBox(
+            width: double.infinity,
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                value,
+                maxLines: 1,
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: phone ? 16 : 23,
+                  fontWeight: FontWeight.w900,
+                ),
               ),
             ),
-          );
-        },
+          ),
+        ],
       ),
     );
   }
@@ -2490,11 +2495,7 @@ class _StaffCommissionReportScreenState
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: _page,
       appBar: AppBar(
-        backgroundColor: _page,
-        surfaceTintColor: _page,
-        foregroundColor: _ink,
         elevation: 0,
         title: const Text(
           'Staff Commission',
@@ -2957,11 +2958,7 @@ class _StaffOrderHistoryScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     final color = staff.role == 'Counter' ? _rose : _violet;
     return Scaffold(
-      backgroundColor: _page,
       appBar: AppBar(
-        backgroundColor: _page,
-        surfaceTintColor: _page,
-        foregroundColor: _ink,
         elevation: 0,
         title: Text(
           staff.name,
@@ -3410,11 +3407,7 @@ class _StaffOrderDetailScreen extends StatelessWidget {
     final order = record.order;
     final roleColor = record.role.contains('Counter') ? _rose : _violet;
     return Scaffold(
-      backgroundColor: _page,
       appBar: AppBar(
-        backgroundColor: _page,
-        surfaceTintColor: _page,
-        foregroundColor: _ink,
         elevation: 0,
         title: const Text(
           'Order Detail',

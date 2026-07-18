@@ -1,77 +1,37 @@
 const fallbackOutlets = {
-  "taman-wahyu": {
-    id: "00000000-0000-0000-0000-000000000002",
-    name: "Kepong · Taman Wahyu",
-    phone: "60125262551",
-    priceOffset: 0,
-  },
-  pv128: {
-    id: "00000000-0000-0000-0000-000000000128",
-    name: "Setapak · PV128",
-    phone: "60127449266",
-    priceOffset: 10,
-  },
+  "taman-wahyu": { id: "00000000-0000-0000-0000-000000000002", name: "Kepong - Taman Wahyu", phone: "60125262551", open_time: "11:00", close_time: "23:00" },
+  pv128: { id: "00000000-0000-0000-0000-000000000128", name: "Setapak - PV128", phone: "60127449266", open_time: "10:30", close_time: "00:00" },
 };
-
-const fallbackServices = [
-  {
-    id: "foot",
-    name: "Foot Reflexology",
-    description: "Herbal foot soak followed by focused reflexology to ease tired feet.",
-    duration: 60,
-    price: 88,
-    image: "./pics/best_footmassage2.jpg",
-    more: "A restorative lower-leg and foot treatment designed for tired feet and everyday tension.",
-    includes: ["Complimentary herbal foot soak", "Foot and lower-leg pressure massage", "Reflexology pressure points", "Relaxation and circulation support"],
-  },
-  {
-    id: "thai",
-    name: "Thai Body Massage",
-    description: "Traditional stretches and pressure work to restore movement and release tension.",
-    duration: 60,
-    price: 88,
-    image: "./pics/beauty-spa.jpg",
-    more: "An oil-free traditional treatment combining rhythmic pressure and assisted stretching.",
-    includes: ["Traditional Thai acupressure", "Gentle assisted stretches", "Back, shoulder and leg focus", "Flexibility and tension relief"],
-  },
-  {
-    id: "aroma",
-    name: "Aroma Oil Body Massage",
-    description: "A soothing full-body ritual with aromatic oils for deep relaxation.",
-    duration: 60,
-    price: 99,
-    image: "./pics/best_oilmassage.jpg",
-    more: "A calming full-body treatment using aromatic oil and flowing massage techniques.",
-    includes: ["Aromatic massage oil", "Full-body massage", "Custom pressure request", "Stress and muscle relaxation"],
-  },
-  {
-    id: "combo",
-    name: "Foot & Aroma Oil Combo",
-    description: "Our signature foot reflexology and aroma body treatment in one restorative visit.",
-    duration: 90,
-    price: 138,
-    image: "./pics/best_combo.jpg",
-    more: "A longer signature ritual that combines focused foot care with a relaxing aroma body massage.",
-    includes: ["Complimentary herbal foot soak", "Foot reflexology", "Aroma oil body massage", "Extended head-to-toe relaxation"],
-  },
-];
 
 const api = window.BookingApi;
 const outlets = JSON.parse(JSON.stringify(fallbackOutlets));
+const MAX_GUESTS = 6;
 let services = [];
 let serviceLoadError = "";
 let availabilityLoadError = "";
 
+function newGuest(index) {
+  return { label: `Guest ${index + 1}`, serviceId: null, therapist: "No preference", therapistRequest: "" };
+}
+
+function guestLabel(guest, index) {
+  return guest?.label.trim() || `Guest ${index + 1}`;
+}
+
+const sameForAll = { treatment: false };
+
 const state = {
   step: 1,
   outlet: null,
-  services: new Set(),
-  therapist: null,
+  guests: [newGuest(0)],
+  treatmentGuest: 0,
   date: null,
   time: null,
   slots: [],
   dates: [],
+  datesKey: "",
   loadingServices: false,
+  loadingDates: false,
   loadingTimes: false,
   hold: null,
   appointment: null,
@@ -86,52 +46,51 @@ const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
 const summaryOverlay = document.querySelector("#summary-overlay");
-const stepNames = ["Outlet", "Treatment", "Therapist", "Date & time", "Details"];
+const stepNames = ["Outlet", "Guests & Masseurs", "Treatments", "Date & time", "Billing"];
+let dateRequestSerial = 0;
 
 function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
-function money(value) {
-  return `RM ${Number(value || 0).toFixed(0)}`;
+function money(value) { return `RM ${Number(value || 0).toFixed(0)}`; }
+function clockTime(value) {
+  const [hourText, minuteText] = String(value || "").split(":");
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  if (!Number.isInteger(hour) || !Number.isInteger(minute)) return "";
+  const suffix = hour < 12 ? "AM" : "PM";
+  const displayHour = hour % 12 || 12;
+  return `${displayHour}:${String(minute).padStart(2, "0")} ${suffix}`;
 }
-
-function localDateKey(date) {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function renderOutletHours(button, outlet) {
+  const label = button.querySelector("[data-outlet-hours]");
+  const opening = clockTime(outlet?.open_time);
+  const closing = clockTime(outlet?.close_time);
+  if (label && opening && closing) label.textContent = `${opening} – ${closing}`;
 }
-
-function selectedOutlet() {
-  return state.outlet ? outlets[state.outlet] : null;
-}
-
-function therapistSelectionAllowed() {
-  return selectedOutlet()?.customer_therapist_selection_allowed !== false;
-}
-
-function selectedServices() {
-  return services.filter((service) => state.services.has(service.id));
-}
-
-function totalPrice() {
-  return selectedServices().reduce((sum, service) => sum + Number(service.price || 0), 0);
-}
-
-function totalDuration() {
-  return selectedServices().reduce((sum, service) => sum + service.duration, 0);
-}
-
-function preferenceCode() {
-  if (state.therapist === "Female therapist") return "female";
-  if (state.therapist === "Male therapist") return "male";
+function selectedOutlet() { return state.outlet ? outlets[state.outlet] : null; }
+function serviceById(id) { return services.find((service) => service.id === id) || null; }
+function selectedServices() { return state.guests.map((guest) => serviceById(guest.serviceId)).filter(Boolean); }
+function totalPrice() { return selectedServices().reduce((sum, service) => sum + Number(service.price || 0), 0); }
+function visitDuration() { return Math.max(0, ...selectedServices().map((service) => Number(service.duration || 0))); }
+function allTreatmentsChosen() { return state.guests.every((guest) => Boolean(guest.serviceId)); }
+function preferenceCode(value) {
+  if (value === "Female masseur" || value === "Female therapist") return "female";
+  if (value === "Male masseur" || value === "Male therapist") return "male";
   return "none";
+}
+function anyGenderPreference() { return state.guests.some((guest) => preferenceCode(guest.therapist) !== "none"); }
+function therapistSelectionAllowed() { return selectedOutlet()?.customer_therapist_selection_allowed !== false; }
+function allocationsPayload() {
+  return state.guests.map((guest, index) => ({
+    guest_index: index + 1,
+    guest_name: guestLabel(guest, index),
+    catalogue_id: guest.serviceId,
+    therapist_preference: preferenceCode(guest.therapist),
+    therapist_request: guest.therapistRequest,
+  }));
 }
 
 function showNotice(message, isError = false) {
@@ -144,14 +103,11 @@ function showNotice(message, isError = false) {
   notice.textContent = message;
   notice.classList.toggle("is-error", isError);
 }
-
-function clearNotice() {
-  document.querySelector(".booking-mode-notice")?.remove();
-}
+function clearNotice() { document.querySelector(".booking-mode-notice")?.remove(); }
 
 async function loadOutlets() {
   if (!api.configured) {
-    showNotice("Preview mode: add your Supabase URL and publishable key in js/booking-config.js to use live availability.");
+    showNotice("Preview mode: configure Supabase to use live availability.");
     return;
   }
   try {
@@ -160,21 +116,15 @@ async function loadOutlets() {
     for (const outlet of payload.outlets || []) {
       if (!outlets[outlet.code]) continue;
       availableCodes.add(outlet.code);
-      outlets[outlet.code] = {
-        ...outlets[outlet.code],
-        ...outlet,
-        name: outlets[outlet.code].name,
-        priceOffset: 0,
-      };
+      outlets[outlet.code] = { ...outlets[outlet.code], ...outlet, name: outlets[outlet.code].name };
     }
     document.querySelectorAll("[data-outlet]").forEach((button) => {
       button.hidden = !availableCodes.has(button.dataset.outlet);
+      renderOutletHours(button, outlets[button.dataset.outlet]);
     });
-    if (availableCodes.size === 0) showNotice("Online booking is not currently enabled for any outlet.", true);
+    if (!availableCodes.size) showNotice("Online booking is not currently enabled for any outlet.", true);
     else clearNotice();
-  } catch (error) {
-    showNotice(error.message || "Unable to connect to the booking service.", true);
-  }
+  } catch (error) { showNotice(error.message || "Unable to connect to the booking service.", true); }
 }
 
 function fallbackImageFor(service) {
@@ -185,16 +135,26 @@ function fallbackImageFor(service) {
   return "./pics/beauty-spa.jpg";
 }
 
-async function loadServices() {
-  state.services.clear();
+function resetAvailability() {
+  dateRequestSerial += 1;
+  state.loadingDates = false;
   state.date = null;
   state.time = null;
+  state.dates = [];
+  state.datesKey = "";
   state.slots = [];
+  availabilityLoadError = "";
+  renderDates();
+  renderTimes();
+}
+
+async function loadServices() {
+  state.guests.forEach((guest) => { guest.serviceId = null; });
+  resetAvailability();
   serviceLoadError = "";
   state.loadingServices = true;
   renderServices();
   updateUi();
-
   if (!api.configured) {
     services = [];
     serviceLoadError = "Online booking is not configured.";
@@ -203,7 +163,6 @@ async function loadServices() {
     updateUi();
     return;
   }
-
   try {
     const payload = await api.getCatalogue(state.outlet);
     services = (payload.services || []).map((service) => ({
@@ -213,162 +172,285 @@ async function loadServices() {
       duration: Number(service.duration_minutes || 0),
       price: service.display_price == null ? null : Number(service.display_price),
       showPrice: Boolean(service.show_price),
-      image: service.public_image_url,
-      more: service.short_description || "",
-      includes: [],
+      image: service.public_image_url || fallbackImageFor(service),
     }));
+    if (!services.length) serviceLoadError = "No online treatments are available for this outlet yet.";
     clearNotice();
-    if (services.length === 0) serviceLoadError = "No online treatments are available for this outlet yet.";
   } catch (error) {
     services = [];
     serviceLoadError = error.message || "Unable to load treatments.";
   } finally {
     state.loadingServices = false;
     renderServices();
+    renderGuestUi();
     updateUi();
   }
 }
 
-function renderServices() {
-  const container = document.querySelector("#service-options");
-  if (state.loadingServices) {
-    container.innerHTML = '<p class="booking-feedback">Loading treatments…</p>';
-    return;
-  }
-  if (serviceLoadError) {
-    container.innerHTML = `<p class="booking-feedback is-error">${escapeHtml(serviceLoadError)}</p>`;
-    return;
-  }
-
-  container.innerHTML = services.map((service) => {
-    const selected = state.services.has(service.id);
-    const details = service.more
-      ? `<details class="service-more"><summary>More about this treatment</summary><p>${escapeHtml(service.more)}</p>${service.includes.length ? `<ul>${service.includes.map((item) => `<li>${escapeHtml(item)}</li>`).join("")}</ul>` : ""}</details>`
-      : "";
-    return `
-      <article class="service-card ${selected ? "is-selected" : ""}" data-service-card="${escapeHtml(service.id)}">
-        <img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" />
-        <div class="service-copy">
-          <h3>${escapeHtml(service.name)}</h3>
-          <p>${escapeHtml(service.description)}</p>
-          <span>${service.duration} minutes</span>
-        </div>
-        <div class="service-action">
-          <strong>${service.showPrice ? money(service.price) : "Price on request"}</strong>
-          <button class="add-service" type="button" data-service="${escapeHtml(service.id)}" aria-pressed="${selected}">${selected ? "Added" : "Add"}</button>
-        </div>
-        ${details}
-      </article>`;
+function renderGuestTabs(containerId, activeIndex) {
+  const container = document.querySelector(containerId);
+  container.innerHTML = state.guests.map((guest, index) => {
+    const complete = Boolean(guest.serviceId);
+    return `<button type="button" role="tab" aria-selected="${index === activeIndex}" class="guest-tab ${index === activeIndex ? "is-active" : ""} ${complete ? "is-complete" : ""}" data-guest-index="${index}"><span>${complete ? "&#10003;" : index + 1}</span>${escapeHtml(guestLabel(guest, index))}</button>`;
   }).join("");
-
-  container.querySelectorAll("[data-service]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      const id = button.dataset.service;
-      if (state.services.has(id)) state.services.clear();
-      else { state.services.clear(); state.services.add(id); }
-      state.time = null;
-      state.slots = [];
-      state.dates = [];
+  container.querySelectorAll("[data-guest-index]").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.treatmentGuest = Number(button.dataset.guestIndex);
       renderServices();
-      if (state.services.size) await loadDates();
-      updateUi();
     });
   });
 }
 
-function renderDates() {
-  const dateContainer = document.querySelector("#date-options");
-  const availabilityNote = document.querySelector(".availability-note");
-  const formatter = new Intl.DateTimeFormat("en-MY", { weekday: "short" });
-  const monthFormatter = new Intl.DateTimeFormat("en-MY", { month: "short" });
-  if (!state.dates.length) {
-    dateContainer.innerHTML = '<p class="booking-feedback">Select a treatment to see online booking dates.</p>';
-    if (availabilityNote) availabilityNote.textContent = "Dates are loaded from the outlet’s online schedule.";
-    return;
+function masseurFeasibility() {
+  const outlet = selectedOutlet();
+  if (!outlet || outlet.female_masseurs == null) return { ok: true, message: "" };
+  const counts = { female: Number(outlet.female_masseurs), male: Number(outlet.male_masseurs), total: Number(outlet.total_masseurs) };
+  const wanted = { female: 0, male: 0 };
+  state.guests.forEach((guest) => {
+    const code = preferenceCode(guest.therapist);
+    if (code !== "none") wanted[code] += 1;
+  });
+  const overLimit = (gender, label) => {
+    if (wanted[gender] <= counts[gender]) return null;
+    if (counts[gender] === 0) return `No ${label} masseurs are available at this outlet. Please choose "No preference" instead.`;
+    return `Only ${counts[gender]} ${label} masseur${counts[gender] === 1 ? " works" : "s work"} at this outlet, so at most ${counts[gender]} guest${counts[gender] === 1 ? "" : "s"} can choose ${label === "female" ? "Female" : "Male"}. Please set the others to "No preference".`;
+  };
+  const message = overLimit("female", "female") || overLimit("male", "male");
+  if (message) return { ok: false, message };
+  if (state.guests.length > counts.total) {
+    return { ok: false, message: `This outlet can host at most ${counts.total} guests at one time.` };
   }
-  const hasAvailableDate = state.dates.some((item) => item.available);
-  if (availabilityNote) {
-    availabilityNote.textContent = hasAvailableDate
-      ? "Choose an available date to see its half-hour start times."
-      : "No online times are available in the next 7 days. Please try again later or contact the outlet.";
-  }
-  dateContainer.innerHTML = state.dates.map((item) => {
-    const key = item.booking_date;
-    const date = new Date(`${key}T12:00:00+08:00`);
-    const label = date.toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" });
-    return `
-      <button class="date-button ${state.date === key ? "is-selected" : ""}" type="button" data-date="${key}" data-date-label="${escapeHtml(label)}" ${item.available ? "" : 'disabled title="No online times available"'}>
-        <small>${formatter.format(date)}</small>
-        <strong>${date.getDate()}</strong>
-        <small>${monthFormatter.format(date)}</small>
-      </button>`;
+  return { ok: true, message: "" };
+}
+
+function renderPaxPicker() {
+  const picker = document.querySelector("#pax-picker");
+  picker.innerHTML = Array.from({ length: MAX_GUESTS }, (_, index) => {
+    const count = index + 1;
+    const selected = state.guests.length === count;
+    return `<button type="button" role="radio" aria-checked="${selected}" class="pax-option ${selected ? "is-selected" : ""}" data-pax="${count}"><strong>${count}</strong><small>${count === 1 ? "guest" : "guests"}</small></button>`;
   }).join("");
-
-  dateContainer.querySelectorAll("[data-date]").forEach((button) => {
-    button.addEventListener("click", async () => {
-      state.date = button.dataset.date;
-      state.time = null;
-      renderDates();
-      await loadAvailability();
-      updateUi();
-    });
+  picker.querySelectorAll("[data-pax]").forEach((button) => {
+    button.addEventListener("click", () => setGuestCount(Number(button.dataset.pax)));
   });
 }
 
-async function loadDates() {
-  state.date = null;
-  state.time = null;
-  state.dates = [];
-  state.slots = [];
-  availabilityLoadError = "";
-  const service = selectedServices()[0];
-  if (!service || !api.configured) { renderDates(); renderTimes(); return; }
-  try {
-    const payload = await api.getDates({ catalogueId: service.id, preference: preferenceCode() });
-    state.dates = payload.dates || [];
-  } catch (error) {
-    availabilityLoadError = error.message || "Unable to load booking dates.";
+function setGuestCount(count) {
+  const next = Math.min(MAX_GUESTS, Math.max(1, count));
+  if (next === state.guests.length) return;
+  while (state.guests.length < next) {
+    const guest = newGuest(state.guests.length);
+    if (sameForAll.treatment) guest.serviceId = state.guests[0]?.serviceId ?? null;
+    state.guests.push(guest);
   }
-  renderDates();
-  renderTimes();
+  state.guests.length = next;
+  state.treatmentGuest = Math.min(state.treatmentGuest, next - 1);
+  resetAvailability();
+  renderGuestUi();
+  renderServices();
   updateUi();
 }
 
-function fallbackSlots() {
-  const times = ["10:30", "11:00", "11:30", "12:00", "13:30", "14:00", "15:30", "16:30", "18:00", "19:00", "20:30", "21:00"];
-  return times.map((time) => {
-    const start = new Date(`${state.date}T${time}:00+08:00`);
-    const end = new Date(start.getTime() + totalDuration() * 60000);
-    return { startAt: start.toISOString(), endAt: end.toISOString(), availableCount: 1 };
+function renderGuestUi() {
+  renderPaxPicker();
+  document.querySelector("#pax-hint").textContent = state.guests.length === 1
+    ? "Booking just for you — your details come at billing."
+    : "Groups share one visit time — every guest starts together.";
+  const allowPref = therapistSelectionAllowed();
+  const prefOptions = ["No preference", "Female masseur", "Male masseur"];
+  const prefShort = { "No preference": "No preference", "Female masseur": "Female", "Male masseur": "Male" };
+  const preview = document.querySelector("#guest-preview");
+  preview.innerHTML = state.guests.map((guest, index) => {
+    const custom = guest.label === `Guest ${index + 1}` ? "" : guest.label;
+    const prefField = allowPref
+      ? `<div class="guest-field" role="group" aria-label="Preferred masseur gender for guest ${index + 1}">
+          <span>Preferred masseur gender</span>
+          <div class="guest-pref">${prefOptions.map((pref) =>
+            `<button type="button" class="pref-chip ${guest.therapist === pref ? "is-selected" : ""}" data-guest-pref="${index}" data-pref-value="${escapeHtml(pref)}" aria-pressed="${guest.therapist === pref}">${prefShort[pref]}</button>`).join("")}</div>
+        </div>`
+      : "";
+    return `<div class="guest-card">
+      <header class="guest-card-head"><b>${index + 1}</b><h4>Guest ${index + 1}</h4></header>
+      <div class="guest-card-fields">
+        <label class="guest-field">
+          <span>Guest name <small>Optional</small></span>
+          <input type="text" maxlength="80" value="${escapeHtml(custom)}" placeholder="e.g. Sarah" data-guest-name="${index}" aria-label="Name for guest ${index + 1}" />
+        </label>
+        ${prefField}
+      </div>
+    </div>`;
+  }).join("");
+  preview.querySelectorAll("[data-guest-name]").forEach((input) => {
+    input.addEventListener("input", () => {
+      const index = Number(input.dataset.guestName);
+      state.guests[index].label = input.value;
+      renderGuestTabs("#treatment-guest-tabs", state.treatmentGuest);
+      if (index === state.treatmentGuest) {
+        document.querySelector("#treatment-guest-heading").textContent = `Selecting for ${guestLabel(state.guests[index], index)}`;
+      }
+      updateReview();
+    });
+    input.addEventListener("blur", () => {
+      const index = Number(input.dataset.guestName);
+      state.guests[index].label = input.value.trim() || `Guest ${index + 1}`;
+      renderGuestUi();
+      updateUi();
+    });
   });
+  preview.querySelectorAll("[data-guest-pref]").forEach((button) => {
+    button.addEventListener("click", () => {
+      const guest = state.guests[Number(button.dataset.guestPref)];
+      if (!guest) return;
+      guest.therapist = button.dataset.prefValue;
+      resetAvailability();
+      renderGuestUi();
+      updateUi();
+    });
+  });
+  renderGuestTabs("#treatment-guest-tabs", state.treatmentGuest);
+  const feasibility = masseurFeasibility();
+  const warning = document.querySelector("#preference-warning");
+  const newlyShown = warning.hidden && !feasibility.ok;
+  warning.hidden = feasibility.ok;
+  warning.textContent = feasibility.message;
+  if (newlyShown) warning.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderServices() {
+  const container = document.querySelector("#service-options");
+  if (sameForAll.treatment) state.treatmentGuest = 0;
+  const guest = state.guests[state.treatmentGuest];
+  const multi = state.guests.length > 1;
+  const heading = document.querySelector("#treatment-guest-heading");
+  heading.hidden = !multi || sameForAll.treatment;
+  heading.textContent = guest && multi && !sameForAll.treatment ? `Selecting for ${guestLabel(guest, state.treatmentGuest)}` : "";
+  document.querySelector("#same-treatment-row").hidden = !multi;
+  document.querySelector("#same-treatment-checkbox").checked = sameForAll.treatment;
+  const tabs = document.querySelector("#treatment-guest-tabs");
+  tabs.hidden = !multi || sameForAll.treatment;
+  if (!tabs.hidden) renderGuestTabs("#treatment-guest-tabs", state.treatmentGuest);
+  if (state.loadingServices) { container.innerHTML = '<p class="booking-feedback">Loading treatments...</p>'; return; }
+  if (serviceLoadError) { container.innerHTML = `<p class="booking-feedback is-error">${escapeHtml(serviceLoadError)}</p>`; return; }
+  container.innerHTML = services.map((service) => {
+    const selected = guest?.serviceId === service.id;
+    return `<article class="service-card ${selected ? "is-selected" : ""}">
+      <img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" />
+      <div class="service-copy"><h3>${escapeHtml(service.name)}</h3><p>${escapeHtml(service.description)}</p><span>${service.duration} minutes</span></div>
+      <div class="service-action"><strong>${service.showPrice ? money(service.price) : "Price on request"}</strong><button class="add-service" type="button" data-service="${escapeHtml(service.id)}" aria-pressed="${selected}">${selected ? "Selected" : "Select"}</button></div>
+    </article>`;
+  }).join("");
+  container.querySelectorAll("[data-service]").forEach((button) => {
+    button.addEventListener("click", () => {
+      if (sameForAll.treatment) state.guests.forEach((item) => { item.serviceId = button.dataset.service; });
+      else guest.serviceId = button.dataset.service;
+      resetAvailability();
+      renderServices();
+      renderGuestUi();
+      updateUi();
+      if (!sameForAll.treatment && state.guests.length > 1) {
+        const nextMissing = state.guests.findIndex((item, index) => index > state.treatmentGuest && !item.serviceId);
+        if (nextMissing >= 0) { state.treatmentGuest = nextMissing; setTimeout(renderServices, 170); }
+      }
+    });
+  });
+}
+
+function preferenceHint() {
+  if (state.guests.length > 1 && anyGenderPreference()) {
+    return " This can happen when there aren't enough masseurs matching everyone's preference — try \"No preference\" for some guests.";
+  }
+  return "";
+}
+
+function renderDates() {
+  const container = document.querySelector("#date-options");
+  const note = document.querySelector(".availability-note");
+  if (state.loadingDates) {
+    container.innerHTML = '<p class="booking-feedback">Checking the group\'s schedule...</p>';
+    if (note) note.textContent = "Loading the outlet's booking dates.";
+    return;
+  }
+  if (availabilityLoadError && !state.dates.length) {
+    container.innerHTML = '<p class="booking-feedback is-error">We could not check available dates. Please try again.</p>';
+    if (note) note.textContent = "";
+    return;
+  }
+  if (!state.dates.length) {
+    container.innerHTML = `<p class="booking-feedback">${allTreatmentsChosen() ? "No booking dates are available for the whole group." : "Choose a treatment for every guest first."}</p>`;
+    if (note) note.textContent = "Choose a date to check exact times for the whole group.";
+    return;
+  }
+  if (!state.dates.some((item) => item.available)) {
+    container.innerHTML = `<p class="booking-feedback">No upcoming date can fit the whole group.${preferenceHint()}</p>`;
+    if (note) note.textContent = "";
+    return;
+  }
+  if (note) note.textContent = "Choose a date to check exact times for the whole group.";
+  const weekday = new Intl.DateTimeFormat("en-MY", { weekday: "short" });
+  const month = new Intl.DateTimeFormat("en-MY", { month: "short" });
+  container.innerHTML = state.dates.map((item) => {
+    const key = item.booking_date;
+    const date = new Date(`${key}T12:00:00+08:00`);
+    const label = date.toLocaleDateString("en-MY", { weekday: "short", day: "numeric", month: "short" });
+    return `<button class="date-button ${state.date === key ? "is-selected" : ""}" type="button" data-date="${key}" data-date-label="${escapeHtml(label)}" ${item.available ? "" : "disabled"}><small>${weekday.format(date)}</small><strong>${date.getDate()}</strong><small>${month.format(date)}</small></button>`;
+  }).join("");
+  container.querySelectorAll("[data-date]").forEach((button) => button.addEventListener("click", async () => {
+    state.date = button.dataset.date;
+    state.time = null;
+    renderDates();
+    await loadAvailability();
+    updateUi();
+  }));
+}
+
+async function loadDates() {
+  if (state.loadingDates) return;
+  const allocations = allocationsPayload();
+  const datesKey = JSON.stringify(allocations);
+  if (state.datesKey === datesKey && state.dates.length) return;
+  resetAvailability();
+  if (!allTreatmentsChosen() || !api.configured) return;
+  const requestId = dateRequestSerial;
+  state.loadingDates = true;
+  renderDates();
+  updateUi();
+  try {
+    const payload = await api.getGroupDates({ allocations });
+    if (requestId !== dateRequestSerial) return;
+    state.dates = payload.dates || [];
+    state.datesKey = datesKey;
+  } catch (error) {
+    if (requestId !== dateRequestSerial) return;
+    availabilityLoadError = error.message || "Unable to load booking dates.";
+  } finally {
+    if (requestId === dateRequestSerial) {
+      state.loadingDates = false;
+      renderDates();
+      renderTimes();
+      updateUi();
+    }
+  }
+}
+
+function timeLabel(iso) {
+  return new Intl.DateTimeFormat("en-MY", { hour: "numeric", minute: "2-digit", hour12: true, timeZone: "Asia/Kuala_Lumpur" }).format(new Date(iso));
+}
+function timePeriod(iso) {
+  const hour = Number(new Intl.DateTimeFormat("en-MY", { hour: "2-digit", hourCycle: "h23", timeZone: "Asia/Kuala_Lumpur" }).format(new Date(iso)));
+  return hour < 12 ? "Morning" : hour < 17 ? "Afternoon" : "Evening";
 }
 
 async function loadAvailability() {
   state.time = null;
   state.slots = [];
   availabilityLoadError = "";
-  if (!state.date || !state.outlet || state.services.size === 0) {
-    renderTimes();
-    return;
-  }
-
+  if (!state.date || !allTreatmentsChosen()) { renderTimes(); return; }
   state.loadingTimes = true;
   renderTimes();
   try {
-    if (!api.configured) {
-      state.slots = [];
-    } else {
-      const payload = await api.getTimes({
-        catalogueId: selectedServices()[0].id,
-        date: state.date,
-        preference: preferenceCode(),
-      });
-      state.slots = (payload.slots || []).map((slot) => ({
-        startAt: slot.start_at,
-        endAt: slot.end_at,
-      }));
-      clearNotice();
-    }
+    const payload = await api.getGroupTimes({ date: state.date, allocations: allocationsPayload() });
+    state.slots = (payload.slots || []).map((slot) => ({ startAt: slot.start_at, endAt: slot.end_at }));
+    clearNotice();
   } catch (error) {
     availabilityLoadError = error.message || "Unable to check live availability.";
     showNotice(availabilityLoadError, true);
@@ -379,457 +461,238 @@ async function loadAvailability() {
   }
 }
 
-function timeLabel(iso) {
-  return new Intl.DateTimeFormat("en-MY", {
-    hour: "numeric",
-    minute: "2-digit",
-    hour12: true,
-    timeZone: "Asia/Kuala_Lumpur",
-  }).format(new Date(iso));
-}
-
-function timePeriod(iso) {
-  const hour = Number(new Intl.DateTimeFormat("en-MY", {
-    hour: "2-digit",
-    hourCycle: "h23",
-    timeZone: "Asia/Kuala_Lumpur",
-  }).format(new Date(iso)));
-  if (hour < 12) return "Morning";
-  if (hour < 17) return "Afternoon";
-  return "Evening";
-}
-
 function renderTimes() {
   const container = document.querySelector("#time-options");
-  if (!state.date) {
-    container.innerHTML = '<p class="booking-feedback">Choose a date to see available times.</p>';
-    return;
-  }
-  if (state.loadingTimes) {
-    container.innerHTML = '<p class="booking-feedback">Checking live availability…</p>';
-    return;
-  }
-  if (availabilityLoadError) {
-    container.innerHTML = '<p class="booking-feedback is-error">We could not check live availability. Please try again shortly.</p>';
-    return;
-  }
-  if (state.slots.length === 0) {
-    container.innerHTML = '<p class="booking-feedback">No times are available for this date. Please choose another date.</p>';
-    return;
-  }
-
+  if (!state.date) { container.innerHTML = '<p class="booking-feedback">Choose a date to see times available for everyone.</p>'; return; }
+  if (state.loadingTimes) { container.innerHTML = '<p class="booking-feedback">Checking the group schedule...</p>'; return; }
+  if (availabilityLoadError) { container.innerHTML = '<p class="booking-feedback is-error">We could not check availability. Please try again shortly.</p>'; return; }
+  if (!state.slots.length) { container.innerHTML = `<p class="booking-feedback">No shared times are available for this date. Please choose another date.${preferenceHint()}</p>`; return; }
   const groups = new Map();
   state.slots.forEach((slot, index) => {
     const period = timePeriod(slot.startAt);
     if (!groups.has(period)) groups.set(period, []);
     groups.get(period).push({ ...slot, index });
   });
-
-  container.innerHTML = [...groups.entries()].map(([label, slots]) => `
-    <div class="time-group">
-      <span>${label}</span>
-      <div class="time-button-grid">
-        ${slots.map((slot) => `<button class="time-button ${state.time?.startAt === slot.startAt ? "is-selected" : ""}" type="button" data-slot-index="${slot.index}">${escapeHtml(timeLabel(slot.startAt))}</button>`).join("")}
-      </div>
-    </div>`).join("");
-
-  container.querySelectorAll("[data-slot-index]").forEach((button) => {
-    button.addEventListener("click", () => {
-      state.time = state.slots[Number(button.dataset.slotIndex)];
-      renderTimes();
-      updateUi();
-    });
-  });
+  container.innerHTML = [...groups.entries()].map(([label, slots]) => `<div class="time-group"><span>${label}</span><div class="time-button-grid">${slots.map((slot) => `<button class="time-button ${state.time?.startAt === slot.startAt ? "is-selected" : ""}" type="button" data-slot-index="${slot.index}">${escapeHtml(timeLabel(slot.startAt))}</button>`).join("")}</div></div>`).join("");
+  container.querySelectorAll("[data-slot-index]").forEach((button) => button.addEventListener("click", () => {
+    state.time = state.slots[Number(button.dataset.slotIndex)];
+    renderTimes();
+    updateUi();
+  }));
 }
 
 function canContinue() {
   if (state.step === 1) return Boolean(state.outlet);
-  if (state.step === 2) return state.services.size > 0 && !state.loadingServices;
-  if (state.step === 3) return Boolean(state.therapist);
+  if (state.step === 2) return state.guests.length > 0 && masseurFeasibility().ok;
+  if (state.step === 3) return allTreatmentsChosen() && !state.loadingServices && !state.loadingDates;
   if (state.step === 4) return Boolean(state.date && state.time) && !state.loadingTimes;
   if (state.step === 5) return detailsForm.checkValidity();
   return false;
 }
 
 function setContinueLabel() {
-  nextButton.innerHTML = state.step === 5
-    ? `Reserve for 15 minutes <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>`
-    : `Continue <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>`;
+  const missingTreatments = state.guests.filter((guest) => !guest.serviceId).length;
+  const labels = ["Continue to guests", "Continue to treatments", "See group times", "Continue to billing"];
+  let label = state.step === 5 ? "Reserve and pay" : labels[state.step - 1];
+  if (state.step === 3 && missingTreatments) {
+    label = `Choose ${missingTreatments} more treatment${missingTreatments === 1 ? "" : "s"}`;
+  } else if (state.step === 3 && state.loadingDates) {
+    label = "Checking availability...";
+  }
+  nextButton.innerHTML = `${label} <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>`;
 }
 
 function showStep(step) {
   state.step = Math.min(5, Math.max(1, step));
-  panels.forEach((panel) => {
-    const active = Number(panel.dataset.panel) === state.step;
-    panel.hidden = !active;
-    panel.classList.toggle("is-active", active);
-  });
-  steps.forEach((stepButton, index) => {
+  panels.forEach((panel) => { const active = Number(panel.dataset.panel) === state.step; panel.hidden = !active; panel.classList.toggle("is-active", active); });
+  steps.forEach((button, index) => {
     const number = index + 1;
-    stepButton.classList.toggle("is-active", number === state.step);
-    stepButton.classList.toggle("is-complete", number < state.step);
-    stepButton.disabled = number > state.step;
+    button.classList.toggle("is-active", number === state.step);
+    button.classList.toggle("is-complete", number < state.step);
+    button.disabled = number > state.step;
   });
+  if (state.step === 3) renderServices();
   backButton.hidden = state.step === 1;
   setContinueLabel();
   updateUi();
-  const target = window.matchMedia("(max-width: 680px)").matches
-    ? document.querySelector(".mobile-progress")
-    : document.querySelector(".stepper");
+  const target = window.matchMedia("(max-width: 680px)").matches ? document.querySelector(".mobile-progress") : document.querySelector(".stepper");
   target.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-function updateUi() {
-  nextButton.disabled = !canContinue();
-  updateReview();
-  updateProgress();
-}
-
 function updateReview() {
-  const outlet = selectedOutlet()?.name || "—";
-  const treatments = selectedServices().map((service) => service.name).join(", ") || "—";
+  document.querySelector("#review-outlet").textContent = selectedOutlet()?.name || "-";
+  document.querySelector("#review-guests").textContent = `${state.guests.length} guest${state.guests.length === 1 ? "" : "s"}`;
   const selectedDateButton = document.querySelector(`[data-date="${state.date}"]`);
-  const dateTime = state.date && state.time
-    ? `${selectedDateButton?.dataset.dateLabel || state.date}, ${timeLabel(state.time.startAt)}`
-    : "—";
-  const request = document.querySelector("#therapist-comment")?.value.trim();
-  const therapist = !state.therapist
-    ? "—"
-    : request
-      ? `${state.therapist} · Request: ${request}`
-      : state.therapist;
-
-  document.querySelector("#review-outlet").textContent = outlet;
-  document.querySelector("#review-services").textContent = treatments;
-  document.querySelector("#review-datetime").textContent = dateTime;
-  document.querySelector("#review-therapist").textContent = therapist;
-  document.querySelector("#review-duration").textContent = `${totalDuration()} minutes`;
-  const selected = selectedServices()[0];
-  document.querySelector("#review-total").textContent = selected && !selected.showPrice ? "Price on request" : money(totalPrice());
-
-  const count = selectedServices().length;
-  const caption = !state.outlet
-    ? "Choose an outlet"
-    : count === 0
-      ? selectedOutlet().name
-      : `${count} treatment${count === 1 ? "" : "s"} · ${totalDuration()} min`;
-  document.querySelector("#mobile-summary-caption").textContent = caption;
-  document.querySelector("#mobile-summary-total").textContent = selected && !selected.showPrice ? "Price on request" : money(totalPrice());
+  document.querySelector("#review-datetime").textContent = state.date && state.time ? `${selectedDateButton?.dataset.dateLabel || state.date}, ${timeLabel(state.time.startAt)}` : "-";
+  document.querySelector("#review-guest-list").innerHTML = state.guests.map((guest, index) => {
+    const service = serviceById(guest.serviceId);
+    const treatment = service
+      ? `${escapeHtml(service.name)} · ${service.duration} min`
+      : '<em>Treatment not chosen yet</em>';
+    return `<article class="review-guest">
+      <header><span>${index + 1}</span><b>${escapeHtml(guestLabel(guest, index))}</b><strong>${service?.showPrice ? money(service.price) : service ? "Ask outlet" : "&mdash;"}</strong></header>
+      <p class="review-guest-service">${treatment}</p>
+      <p class="review-guest-pref">${escapeHtml(guest.therapist || "No preference")}</p>
+    </article>`;
+  }).join("");
+  document.querySelector("#review-duration").textContent = `${visitDuration()} minutes`;
+  const hasHiddenPrice = selectedServices().some((service) => !service.showPrice);
+  document.querySelector("#review-total").textContent = hasHiddenPrice ? "Price on request" : money(totalPrice());
+  const configured = state.guests.filter((guest) => guest.serviceId).length;
+  document.querySelector("#mobile-summary-caption").textContent = !state.outlet ? "Choose an outlet" : `${configured}/${state.guests.length} guests ready`;
+  document.querySelector("#mobile-summary-total").textContent = hasHiddenPrice ? "Ask outlet" : money(totalPrice());
 }
 
 function updateProgress() {
   document.querySelector("#mobile-step-label").textContent = stepNames[state.step - 1];
   document.querySelector("#mobile-step-count").textContent = `Step ${state.step} of ${stepNames.length}`;
   document.querySelectorAll("[data-progress-dot]").forEach((dot, index) => {
-    const number = index + 1;
-    dot.classList.toggle("is-complete", number < state.step);
-    dot.classList.toggle("is-current", number === state.step);
+    dot.classList.toggle("is-complete", index + 1 < state.step);
+    dot.classList.toggle("is-current", index + 1 === state.step);
   });
 }
+function updateUi() { nextButton.disabled = !canContinue(); setContinueLabel(); updateReview(); updateProgress(); }
 
-function openSummary() {
-  summarySheet.classList.add("is-open");
-  summaryOverlay.classList.add("is-open");
-  summaryToggle.setAttribute("aria-expanded", "true");
-  document.body.classList.add("summary-open");
-  summaryClose.focus();
-}
-
-function closeSummary() {
-  summarySheet.classList.remove("is-open");
-  summaryOverlay.classList.remove("is-open");
-  summaryToggle.setAttribute("aria-expanded", "false");
-  document.body.classList.remove("summary-open");
-}
+function openSummary() { summarySheet.classList.add("is-open"); summaryOverlay.classList.add("is-open"); summaryToggle.setAttribute("aria-expanded", "true"); document.body.classList.add("summary-open"); summaryClose.focus(); }
+function closeSummary() { summarySheet.classList.remove("is-open"); summaryOverlay.classList.remove("is-open"); summaryToggle.setAttribute("aria-expanded", "false"); document.body.classList.remove("summary-open"); }
 
 function showConfirmation({ preview = false, hold = null } = {}) {
   const eyebrow = document.querySelector("#confirmation-eyebrow");
   const title = document.querySelector("#confirmation-title");
   const message = document.querySelector("#confirmation-message");
   if (preview) {
-    eyebrow.textContent = "Preview mode";
-    title.textContent = "The booking form is ready.";
-    message.textContent = "Configure Supabase to create a real 15-minute hold. No appointment or payment was created.";
+    eyebrow.textContent = "Preview mode"; title.textContent = "The group booking form is ready."; message.textContent = "Configure Supabase to create a real hold. No appointment or payment was created.";
   } else if (state.appointment) {
-    eyebrow.textContent = "Booking confirmed";
-    title.textContent = "Your appointment is booked.";
-    message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. Your appointment is confirmed. We look forward to seeing you.`;
+    eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
   } else {
     const expires = new Date(hold.expires_at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
-    eyebrow.textContent = "Time temporarily reserved";
-    title.textContent = "Your booking hold was created.";
-    message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. This hold expires at ${expires}. Billplz is not connected yet, so this is not a confirmed appointment.`;
+    eyebrow.textContent = "Time temporarily reserved"; title.textContent = "Your group hold was created."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. This hold expires at ${expires}.`;
   }
   document.querySelector("#confirmation-dialog").showModal();
 }
 
-// --- Payment return flow -----------------------------------------------
-// After Billplz redirects the browser back here (?bp_token=...), we poll the
-// hold's status rather than trusting the redirect's own query params — the
-// callback (verified server-side) is the source of truth, and its arrival
-// isn't guaranteed to happen before the browser redirect does.
 let paymentPollTimer = null;
 let paymentPollAttempts = 0;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
-const PAYMENT_POLL_MAX_ATTEMPTS = 60; // ~2 minutes
-
+const PAYMENT_POLL_MAX_ATTEMPTS = 60;
 function setDialogIcon(kind) {
   const mark = document.querySelector(".success-mark");
   mark.classList.remove("is-pending", "is-failed");
-  if (kind === "pending") {
-    mark.classList.add("is-pending");
-    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>';
-  } else if (kind === "failed") {
-    mark.classList.add("is-failed");
-    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8" /></svg>';
-  } else {
-    mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>';
-  }
+  if (kind === "pending") { mark.classList.add("is-pending"); mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>'; }
+  else if (kind === "failed") { mark.classList.add("is-failed"); mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8" /></svg>'; }
+  else mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>';
 }
-
 function showPaymentStatus(kind, { reference = "" } = {}) {
+  const dialog = document.querySelector("#confirmation-dialog");
   const eyebrow = document.querySelector("#confirmation-eyebrow");
   const title = document.querySelector("#confirmation-title");
   const message = document.querySelector("#confirmation-message");
-  const closeButton = document.querySelector("#close-dialog");
-  const dialog = document.querySelector("#confirmation-dialog");
-  const ref = reference ? reference.slice(0, 8).toUpperCase() : "";
-
+  const close = document.querySelector("#close-dialog");
   dialog.dataset.paymentState = kind;
-  closeButton.style.display = kind === "checking" ? "none" : "";
-
-  if (kind === "checking") {
-    setDialogIcon("pending");
-    eyebrow.textContent = "Confirming your payment";
-    title.textContent = "Just a moment…";
-    message.textContent = "We're confirming your payment with Billplz. This usually takes a few seconds.";
-  } else if (kind === "confirmed") {
-    setDialogIcon("success");
-    eyebrow.textContent = "Booking confirmed";
-    title.textContent = "Your appointment is booked.";
-    message.textContent = ref
-      ? `Reference ${ref}. Payment received — we look forward to seeing you.`
-      : "Payment received — we look forward to seeing you.";
-    closeButton.textContent = "Done";
-    closeButton.dataset.action = "home";
-  } else if (kind === "failed") {
-    setDialogIcon("failed");
-    eyebrow.textContent = "Payment not completed";
-    title.textContent = "We couldn't confirm your payment.";
-    message.textContent = "Your time slot was not reserved. Please try booking again.";
-    closeButton.textContent = "Try booking again";
-    closeButton.dataset.action = "retry";
-  } else if (kind === "timeout") {
-    setDialogIcon("pending");
-    eyebrow.textContent = "Still confirming";
-    title.textContent = "This is taking longer than expected.";
-    message.textContent = "Your payment may still be processing. Check again in a moment, or contact us if this continues.";
-    closeButton.textContent = "Check again";
-    closeButton.dataset.action = "recheck";
-  }
-
+  close.style.display = kind === "checking" ? "none" : "";
+  if (kind === "checking") { setDialogIcon("pending"); eyebrow.textContent = "Confirming your payment"; title.textContent = "Just a moment..."; message.textContent = "We're confirming your group booking with Billplz."; }
+  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Payment received${reference ? ` - reference ${reference.slice(0, 8).toUpperCase()}` : ""}.`; close.textContent = "Done"; close.dataset.action = "home"; }
+  else if (kind === "failed") { setDialogIcon("failed"); eyebrow.textContent = "Payment not completed"; title.textContent = "We couldn't confirm your booking."; message.textContent = "Your group time was not reserved. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
+  else { setDialogIcon("pending"); eyebrow.textContent = "Still confirming"; title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
 }
-
-function stopPaymentPoll() {
-  if (paymentPollTimer) clearTimeout(paymentPollTimer);
-  paymentPollTimer = null;
-}
-
+function stopPaymentPoll() { if (paymentPollTimer) clearTimeout(paymentPollTimer); paymentPollTimer = null; }
 async function pollPaymentStatus(token) {
-  stopPaymentPoll();
-  paymentPollAttempts += 1;
+  stopPaymentPoll(); paymentPollAttempts += 1;
   try {
     const payload = await api.getHoldStatus(token);
-    const status = payload.hold?.status;
-    if (status === "confirmed") {
-      showPaymentStatus("confirmed", { reference: token });
-      return;
-    }
-    if (status === "payment_failed" || status === "cancelled" || status === "expired") {
-      showPaymentStatus("failed");
-      return;
-    }
-  } catch (_error) {
-    // Transient network error — keep polling rather than ending the flow early.
-  }
-  if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS) {
-    showPaymentStatus("timeout");
-    return;
-  }
+    if (payload.hold?.status === "confirmed") { showPaymentStatus("confirmed", { reference: token }); return; }
+    if (["payment_failed", "cancelled", "expired"].includes(payload.hold?.status)) { showPaymentStatus("failed"); return; }
+  } catch (_) { /* Retry transient failures. */ }
+  if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS) { showPaymentStatus("timeout"); return; }
   paymentPollTimer = setTimeout(() => pollPaymentStatus(token), PAYMENT_POLL_INTERVAL_MS);
 }
-
 function initializePaymentReturn() {
   const token = new URLSearchParams(window.location.search).get("bp_token");
   if (!token) return false;
   document.querySelector(".booking-shell").style.display = "none";
-  paymentPollAttempts = 0;
-  showPaymentStatus("checking");
-  pollPaymentStatus(token);
-  return true;
+  paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); return true;
 }
-// -------------------------------------------------------------------------
 
 async function submitHold() {
   if (!detailsForm.reportValidity() || !state.time) return;
-  if (!api.configured) {
-    showConfirmation({ preview: true });
-    return;
-  }
-
+  if (!api.configured) { showConfirmation({ preview: true }); return; }
   const form = new FormData(detailsForm);
   nextButton.disabled = true;
-  nextButton.textContent = "Reserving…";
+  nextButton.textContent = "Reserving your group...";
   try {
-    const payload = await api.createHold({
-      catalogue_id: selectedServices()[0].id,
-      start_at: state.time.startAt,
-      therapist_preference: preferenceCode(),
-      therapist_request: document.querySelector("#therapist-comment").value.trim(),
-      customer_name: form.get("name"),
-      customer_phone: form.get("phone"),
-      customer_email: form.get("email"),
-      notes: form.get("notes"),
-      website: form.get("website"),
+    const payload = await api.createGroupHold({
+      allocations: allocationsPayload(), start_at: state.time.startAt,
+      customer_name: form.get("name"), customer_phone: form.get("phone"), customer_email: form.get("email"),
+      notes: form.get("notes"), website: form.get("website"),
     });
     state.hold = payload.hold;
     state.appointment = null;
-
     let holdNoticeMessage = null;
     try {
-      nextButton.textContent = "Redirecting to payment…";
+      nextButton.textContent = "Redirecting to payment...";
       const pay = await api.payHold(payload.hold.token);
       window.location.href = pay.url;
-      return; // Leaving the page for Billplz's hosted payment page.
+      return;
     } catch (payError) {
-      // Payment isn't configured yet (e.g. still on Billplz sandbox setup) —
-      // fall back to the test auto-confirm path if it's explicitly enabled.
       if (window.BOOKING_CONFIG?.testAutoConfirm) {
-        try {
-          const confirmed = await api.confirmHold(payload.hold.token);
-          state.appointment = confirmed.appointment;
-        } catch (error) {
-          holdNoticeMessage = error.message || "The time was reserved, but automatic confirmation failed.";
-        }
-      } else {
-        holdNoticeMessage = payError.message || "Unable to start payment. Please try again.";
-      }
+        try { state.appointment = (await api.confirmHold(payload.hold.token)).appointment; }
+        catch (error) { holdNoticeMessage = error.message || "The time was reserved, but automatic confirmation failed."; }
+      } else holdNoticeMessage = payError.message || "Unable to start payment. Please try again.";
     }
-    if (holdNoticeMessage) showNotice(holdNoticeMessage, true);
-    else clearNotice();
+    if (holdNoticeMessage) showNotice(holdNoticeMessage, true); else clearNotice();
     showConfirmation({ hold: payload.hold });
   } catch (error) {
-    showNotice(error.message || "Unable to reserve this time.", true);
-    if (error.status === 409) {
-      state.time = null;
-      await loadAvailability();
-      showStep(4);
-    }
-  } finally {
-    setContinueLabel();
-    updateUi();
-  }
+    showNotice(error.message || "Unable to reserve this group time.", true);
+    if (error.status === 409) { state.time = null; await loadAvailability(); showStep(4); }
+  } finally { setContinueLabel(); updateUi(); }
 }
 
-document.querySelectorAll("[data-outlet]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    state.outlet = button.dataset.outlet;
-    state.therapist = null;
-    document.querySelectorAll("[data-therapist]").forEach((option) => option.classList.remove("is-selected"));
-    document.querySelectorAll("[data-outlet]").forEach((option) => option.classList.toggle("is-selected", option === button));
-    await loadServices();
-    state.dates = [];
-    renderDates();
-    renderTimes();
-    updateUi();
-  });
-});
+document.querySelectorAll("[data-outlet]").forEach((button) => button.addEventListener("click", async () => {
+  state.outlet = button.dataset.outlet;
+  if (!therapistSelectionAllowed()) state.guests.forEach((guest) => { guest.therapist = "No preference"; });
+  document.querySelectorAll("[data-outlet]").forEach((option) => option.classList.toggle("is-selected", option === button));
+  await loadServices();
+  renderGuestUi();
+  updateUi();
+}));
 
-document.querySelectorAll("[data-therapist]").forEach((button) => {
-  button.addEventListener("click", async () => {
-    state.therapist = button.dataset.therapist;
-    state.time = null;
-    document.querySelectorAll("[data-therapist]").forEach((option) => option.classList.toggle("is-selected", option === button));
-    await loadDates();
-    updateUi();
-  });
+document.querySelector("#same-treatment-checkbox").addEventListener("change", (event) => {
+  sameForAll.treatment = event.target.checked;
+  if (sameForAll.treatment) {
+    const source = state.guests[state.treatmentGuest] || state.guests[0];
+    state.guests.forEach((guest) => { guest.serviceId = source?.serviceId ?? null; });
+    state.treatmentGuest = 0;
+    resetAvailability();
+  }
+  renderServices(); renderGuestUi(); updateUi();
 });
-
-steps.forEach((stepButton) => {
-  stepButton.addEventListener("click", () => {
-    const target = Number(stepButton.dataset.stepTarget);
-    if (target <= state.step) showStep(target);
-  });
-});
-
+steps.forEach((button) => button.addEventListener("click", () => { const target = Number(button.dataset.stepTarget); if (target <= state.step) showStep(target); }));
 nextButton.addEventListener("click", async () => {
-  if (state.step === 5) {
-    await submitHold();
-    return;
-  }
-  if (state.step === 2 && !therapistSelectionAllowed()) {
-    state.therapist = "No preference";
-    await loadDates();
-    showStep(4);
-    return;
-  }
+  if (state.step === 5) { await submitHold(); return; }
+  if (state.step === 3 && canContinue()) await loadDates();
   if (canContinue()) showStep(state.step + 1);
 });
-
-backButton.addEventListener("click", () => showStep(state.step === 4 && !therapistSelectionAllowed() ? 2 : state.step - 1));
+backButton.addEventListener("click", () => showStep(state.step - 1));
 detailsForm.addEventListener("input", updateUi);
-document.querySelector("#therapist-comment").addEventListener("input", updateUi);
 summaryToggle.addEventListener("click", openSummary);
 summaryClose.addEventListener("click", closeSummary);
 summaryOverlay.addEventListener("click", closeSummary);
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && summarySheet.classList.contains("is-open")) {
-    closeSummary();
-    summaryToggle.focus();
-  }
-});
-window.addEventListener("resize", () => {
-  if (window.innerWidth > 900 && summarySheet.classList.contains("is-open")) closeSummary();
-});
+document.addEventListener("keydown", (event) => { if (event.key === "Escape" && summarySheet.classList.contains("is-open")) { closeSummary(); summaryToggle.focus(); } });
+window.addEventListener("resize", () => { if (window.innerWidth > 900 && summarySheet.classList.contains("is-open")) closeSummary(); });
 document.querySelector("#close-dialog").addEventListener("click", () => {
-  const dialog = document.querySelector("#confirmation-dialog");
-  const closeButton = document.querySelector("#close-dialog");
-  const action = closeButton.dataset.action;
-  if (action === "retry") {
-    window.location.href = "./booking.html";
-    return;
-  }
-  if (action === "recheck") {
-    const token = new URLSearchParams(window.location.search).get("bp_token");
-    if (token) {
-      stopPaymentPoll();
-      paymentPollAttempts = 0;
-      showPaymentStatus("checking");
-      pollPaymentStatus(token);
-    }
-    return;
-  }
-  if (action === "home") {
-    window.location.href = "./index.html";
-    return;
-  }
-  dialog.close();
+  const close = document.querySelector("#close-dialog");
+  if (close.dataset.action === "retry") { window.location.href = "./booking.html"; return; }
+  if (close.dataset.action === "home") { window.location.href = "./index.html"; return; }
+  if (close.dataset.action === "recheck") { const token = new URLSearchParams(window.location.search).get("bp_token"); if (token) { paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); } return; }
+  document.querySelector("#confirmation-dialog").close();
 });
-document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => {
-  if (document.querySelector("#confirmation-dialog").dataset.paymentState === "checking") {
-    event.preventDefault();
-  }
-});
+document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => { if (event.currentTarget.dataset.paymentState === "checking") event.preventDefault(); });
 
 async function initializeBooking() {
   if (initializePaymentReturn()) return;
-  services = [];
-  renderServices();
-  renderDates();
-  renderTimes();
-  updateUi();
+  document.querySelectorAll("[data-outlet]").forEach((button) => renderOutletHours(button, outlets[button.dataset.outlet]));
+  renderGuestUi(); renderServices(); renderDates(); renderTimes(); updateUi();
   await loadOutlets();
 }
-
 initializeBooking();

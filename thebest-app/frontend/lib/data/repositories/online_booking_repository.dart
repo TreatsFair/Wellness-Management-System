@@ -14,6 +14,11 @@ class OnlineBookingRepository {
           .eq('outlet_id', outletId)
           .single(),
       _client
+          .from('business_settings')
+          .select('open_time,close_time')
+          .eq('outlet_id', outletId)
+          .single(),
+      _client
           .from('online_booking_services')
           .select()
           .eq('outlet_id', outletId)
@@ -45,12 +50,13 @@ class OnlineBookingRepository {
     ]);
     return {
       'settings': Map<String, dynamic>.from(results[0] as Map),
-      'catalogue': _maps(results[1]),
-      'services': _maps(results[2]),
-      'rooms': _maps(results[3]),
-      'roomLinks': _maps(results[4]),
-      'hours': _maps(results[5]),
-      'closures': _maps(results[6]),
+      'businessSettings': Map<String, dynamic>.from(results[1] as Map),
+      'catalogue': _maps(results[2]),
+      'services': _maps(results[3]),
+      'rooms': _maps(results[4]),
+      'roomLinks': _maps(results[5]),
+      'hours': _maps(results[6]),
+      'closures': _maps(results[7]),
     };
   }
 

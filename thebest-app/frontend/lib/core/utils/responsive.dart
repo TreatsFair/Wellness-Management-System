@@ -19,14 +19,6 @@ class Responsive {
   static double screenHeight(BuildContext context) =>
       MediaQuery.of(context).size.height;
 
-  static double uiScale(Size size) {
-    final width = size.width;
-    if (width < 600) return 1;
-    if (width < tabletBreakpoint) return 0.9;
-    if (width < desktopBreakpoint) return 0.94;
-    return 1;
-  }
-
   static double horizontalPadding(BuildContext context) =>
       isTablet(context) ? 28.0 : 18.0;
 

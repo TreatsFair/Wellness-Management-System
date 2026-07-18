@@ -1173,3 +1173,4 @@ where a.id = ata.appointment_id
         and t.source <> 'online_booking'
     )
   );
+;

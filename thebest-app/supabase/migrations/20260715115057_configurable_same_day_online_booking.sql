@@ -66,4 +66,4 @@ begin
     return next;
   end loop;
 end;
-$$;
+$$;;

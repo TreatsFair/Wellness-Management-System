@@ -68,3 +68,5 @@ $$;
 
 revoke all on function public.get_walkin_therapist_availability(date, time, integer) from public, anon;
 grant execute on function public.get_walkin_therapist_availability(date, time, integer) to authenticated;
+
+;

@@ -24,3 +24,5 @@ begin
   execute v_definition;
 end;
 $$;
+
+;

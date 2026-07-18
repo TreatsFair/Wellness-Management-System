@@ -108,6 +108,9 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
                     initial: Map<String, dynamic>.from(
                       _data!['settings'] as Map,
                     ),
+                    businessSettings: Map<String, dynamic>.from(
+                      _data!['businessSettings'] as Map,
+                    ),
                     onSave: (values) async {
                       await _repository.saveSettings(_outletId, values);
                       await _load();
@@ -171,10 +174,12 @@ class _SettingsPane extends StatefulWidget {
     super.key,
     required this.outletName,
     required this.initial,
+    required this.businessSettings,
     required this.onSave,
   });
   final String outletName;
   final Map<String, dynamic> initial;
+  final Map<String, dynamic> businessSettings;
   final Future<void> Function(Map<String, dynamic>) onSave;
   @override
   State<_SettingsPane> createState() => _SettingsPaneState();
@@ -189,6 +194,12 @@ class _SettingsPaneState extends State<_SettingsPane> {
       interval,
       bookingWindow;
   bool saving = false;
+
+  String _businessTime(String key) {
+    final value = widget.businessSettings[key]?.toString() ?? '';
+    return value.length >= 5 ? value.substring(0, 5) : '--:--';
+  }
+
   @override
   void initState() {
     super.initState();
@@ -279,9 +290,11 @@ class _SettingsPaneState extends State<_SettingsPane> {
 
   Future<void> _save() async {
     if (saving || form.currentState?.validate() != true) return;
-    if (_timeToMinutes(close.text) <= _timeToMinutes(open.text)) {
+    if (_timeToMinutes(close.text) == _timeToMinutes(open.text)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Public closing must be after opening')),
+        const SnackBar(
+          content: Text('Public opening and closing must be different'),
+        ),
       );
       return;
     }
@@ -347,6 +360,19 @@ class _SettingsPaneState extends State<_SettingsPane> {
             const Text(
               'Public hours',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+            ),
+            const SizedBox(height: 6),
+            Text(
+              'Outlet operating hours: ${_businessTime('open_time')} - ${_businessTime('close_time')}. '
+              'These come from Business Settings and are shown on the public outlet card.',
+              style: const TextStyle(color: Color(0xFF536274), height: 1.4),
+            ),
+            const SizedBox(height: 6),
+            const Text(
+              'Public opening and closing only limit when customers can book online. '
+              'They may be narrower than the outlet hours and do not change the timetable. '
+              'A closing time of 00:00 means midnight at the end of the day.',
+              style: TextStyle(color: Color(0xFF536274), height: 1.4),
             ),
             const SizedBox(height: 12),
             LayoutBuilder(

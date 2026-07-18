@@ -1,14 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/accessibility/accessibility_settings.dart';
+import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/detail_drawer_layout.dart';
 import '../booking/booking_screen.dart';
+import '../customers/customer_screen.dart';
+import 'appointment_checkin_logic.dart';
 
 DateTime _stripTime(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -94,6 +100,15 @@ double _readDouble(Object? value) {
   return 0;
 }
 
+String _moneyAmount(double value) => 'RM ${value.toStringAsFixed(2)}';
+
+bool _showsOperationalStatus(String status) {
+  final normalized = status.trim().toLowerCase();
+  return normalized != 'payment pending' &&
+      normalized != 'pending payment' &&
+      normalized != 'unpaid';
+}
+
 int _readInt(Object? value, [int fallback = 0]) {
   if (value is int) return value;
   if (value is num) return value.round();
@@ -141,7 +156,11 @@ class _ScheduleAppointment {
   final String paymentMethod;
   final String paymentStatus;
   final double paidAmount;
+  final double originalPaidAmount;
+  final double paidAddOnAmount;
   final List<Map<String, dynamic>> serviceItems;
+  final List<Map<String, dynamic>> bookedServiceItems;
+  final List<Map<String, dynamic>> paidServiceItems;
   final Map<String, dynamic> therapistCommissionData;
   final int lateGraceMinutes;
   final int delayWarningMinutes;
@@ -180,7 +199,11 @@ class _ScheduleAppointment {
     required this.paymentMethod,
     required this.paymentStatus,
     required this.paidAmount,
+    required this.originalPaidAmount,
+    required this.paidAddOnAmount,
     required this.serviceItems,
+    required this.bookedServiceItems,
+    required this.paidServiceItems,
     required this.therapistCommissionData,
     required this.lateGraceMinutes,
     required this.delayWarningMinutes,
@@ -192,7 +215,7 @@ class _ScheduleAppointment {
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
-    Map<String, dynamic>? transaction,
+    List<Map<String, dynamic>> transactions = const [],
     List<Map<String, dynamic>> therapistAllocations = const [],
     required int lateGraceMinutes,
     required int delayWarningMinutes,
@@ -213,9 +236,8 @@ class _ScheduleAppointment {
     final customerName = isGuestCustomer && _isGuestName(rawCustomerName)
         ? 'Guest'
         : rawCustomerName ?? 'Customer';
-    final allocationRows = List<Map<String, dynamic>>.from(
-      therapistAllocations,
-    )..sort((left, right) {
+    final allocationRows = List<Map<String, dynamic>>.from(therapistAllocations)
+      ..sort((left, right) {
         final leftCreated = _readDateTime(
           left['createdAt'] ?? left['created_at'],
         );
@@ -242,8 +264,38 @@ class _ScheduleAppointment {
         'Unassigned';
     if (allocationNames.isEmpty) allocationNames.add(primaryTherapistName);
 
+    final appointmentId = data['id']?.toString() ?? '';
+    final paidTransactions = transactions.where((transaction) {
+      return transaction['paymentStatus']?.toString().toLowerCase() == 'paid';
+    }).toList();
+    final primaryTransactions = paidTransactions.where((transaction) {
+      return transaction['source']?.toString().toLowerCase() !=
+          'appointment_addon';
+    }).toList();
+    final displayTransaction = primaryTransactions.isNotEmpty
+        ? primaryTransactions.first
+        : paidTransactions.isNotEmpty
+        ? paidTransactions.first
+        : transactions.isNotEmpty
+        ? transactions.first
+        : null;
+    final bookedServiceItems = <Map<String, dynamic>>[
+      for (final transaction in primaryTransactions)
+        ...transactionItemsForAppointment(
+          transaction: transaction,
+          appointmentId: appointmentId,
+        ),
+    ];
+    final paidServiceItems = <Map<String, dynamic>>[
+      for (final transaction in paidTransactions)
+        ...transactionItemsForAppointment(
+          transaction: transaction,
+          appointmentId: appointmentId,
+        ),
+    ];
+
     return _ScheduleAppointment(
-      id: data['id']?.toString() ?? '',
+      id: appointmentId,
       appointmentGroupId: data['appointmentGroupId']?.toString() ?? '',
       customerId: customerId,
       dateKey: dateKey,
@@ -294,14 +346,46 @@ class _ScheduleAppointment {
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
       notes: data['notes']?.toString() ?? '',
       price: _readDouble(data['totalPrice'] ?? data['price']),
-      receiptNumber: transaction?['receiptNumber']?.toString() ?? '',
-      paymentMethod: transaction?['paymentMethod']?.toString() ?? '',
+      receiptNumber: displayTransaction?['receiptNumber']?.toString() ?? '',
+      paymentMethod: displayTransaction?['paymentMethod']?.toString() ?? '',
       // Authoritative payment state now lives on the appointment row itself
       // (043), kept in sync from transactions by trigger. Reading it here
       // instead of inferring "paid" from whether a transaction row happened to
       // join fixes paid online bookings that used to show as Payment Pending.
       paymentStatus: data['paymentStatus']?.toString() ?? 'unpaid',
-      paidAmount: _readDouble(transaction?['totalAmount']),
+      paidAmount: paidTransactions.fold<double>(
+        0,
+        (total, transaction) =>
+            total +
+            transactionAmountForAppointment(
+              transaction: transaction,
+              appointmentId: appointmentId,
+            ),
+      ),
+      originalPaidAmount: primaryTransactions.fold<double>(
+        0,
+        (total, transaction) =>
+            total +
+            transactionAmountForAppointment(
+              transaction: transaction,
+              appointmentId: appointmentId,
+            ),
+      ),
+      paidAddOnAmount: paidTransactions
+          .where(
+            (transaction) =>
+                transaction['source']?.toString().toLowerCase() ==
+                'appointment_addon',
+          )
+          .fold<double>(
+            0,
+            (total, transaction) =>
+                total +
+                transactionAmountForAppointment(
+                  transaction: transaction,
+                  appointmentId: appointmentId,
+                ),
+          ),
       serviceItems: _readServiceItems(
         data['serviceItems'],
         serviceId: serviceId,
@@ -312,6 +396,8 @@ class _ScheduleAppointment {
         service: service,
         fallbackPrice: _readDouble(data['totalPrice'] ?? data['price']),
       ),
+      bookedServiceItems: bookedServiceItems,
+      paidServiceItems: paidServiceItems,
       therapistCommissionData: {
         'id': therapistId,
         'name': therapist?['name'],
@@ -377,6 +463,54 @@ class _ScheduleAppointment {
     ];
   }
 
+  List<Map<String, dynamic>> get addOnServiceItems {
+    final additions = appointmentAddOnItems(
+      currentItems: serviceItems,
+      paidItems: bookedServiceItems,
+    );
+    final unpaid = appointmentUnpaidItems(
+      currentItems: additions,
+      paidItems: appointmentAddOnItems(
+        currentItems: paidServiceItems,
+        paidItems: bookedServiceItems,
+      ),
+    );
+    final unpaidCounts = <String, int>{};
+    for (final item in unpaid) {
+      final id = serviceItemId(item);
+      if (id.isNotEmpty) unpaidCounts[id] = (unpaidCounts[id] ?? 0) + 1;
+    }
+    return additions.map((item) {
+      final id = serviceItemId(item);
+      final remaining = unpaidCounts[id] ?? 0;
+      if (remaining > 0) unpaidCounts[id] = remaining - 1;
+      return {...item, 'paymentStatus': remaining > 0 ? 'unpaid' : 'paid'};
+    }).toList();
+  }
+
+  List<Map<String, dynamic>> get unpaidServiceItems {
+    return appointmentUnpaidItems(
+      currentItems: serviceItems,
+      paidItems: paidServiceItems,
+    );
+  }
+
+  List<Map<String, dynamic>> get unpaidAddOnServiceItems {
+    final addOnIds = addOnServiceItems.map(serviceItemId).toList();
+    final unpaid = unpaidServiceItems;
+    final counts = <String, int>{};
+    for (final id in addOnIds) {
+      if (id.isNotEmpty) counts[id] = (counts[id] ?? 0) + 1;
+    }
+    return unpaid.where((item) {
+      final id = serviceItemId(item);
+      final remaining = counts[id] ?? 0;
+      if (remaining <= 0) return false;
+      counts[id] = remaining - 1;
+      return true;
+    }).toList();
+  }
+
   static String _readDateKey(Object? value) {
     final raw = value?.toString().trim() ?? '';
     if (raw.isEmpty) return DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -417,10 +551,12 @@ class _ScheduleAppointment {
     if (end <= start) end += 24 * 60;
     return end;
   }
+
   int get scheduledServiceMinutes {
     final booked = bookedEndMinutes - bookedStartMinutes;
     return booked > 0 ? booked.clamp(0, 1440) : durationMinutes;
   }
+
   int get cleanupEndMinutes => endMinutes + bufferAfterMinutes.clamp(0, 240);
   int get blockDurationMinutes =>
       (cleanupEndMinutes - startMinutes).clamp(0, 1440);
@@ -434,7 +570,7 @@ class _ScheduleAppointment {
   String get endLabel => _clockLabel(displayEndTime);
   String get timeRange => '$startLabel - $endLabel';
   String get cleanupUntilLabel => bufferAfterMinutes <= 0
-      ? 'No cleanup buffer'
+      ? ''
       : 'Cleanup until ${_clockLabel(_minutesToTime(cleanupEndMinutes))} '
             '(+$bufferAfterMinutes min)';
   String get blockDurationLabel => bufferAfterMinutes <= 0
@@ -446,9 +582,9 @@ class _ScheduleAppointment {
   DateTime? get actualServiceEndAt => actualStartedAt == null
       ? null
       : endAt?.toLocal() ??
-            actualStartedAt!
-                .toLocal()
-                .add(Duration(minutes: scheduledServiceMinutes));
+            actualStartedAt!.toLocal().add(
+              Duration(minutes: scheduledServiceMinutes),
+            );
   String get actualServiceTimeRange {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
@@ -456,6 +592,7 @@ class _ScheduleAppointment {
     return '${DateFormat('h:mm a').format(started)} - '
         '${DateFormat('h:mm a').format(ended)}';
   }
+
   String? get actualServiceCompletionLabel => null;
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
   String get servicePriceLabel => '$serviceName - $priceLabel';
@@ -522,8 +659,7 @@ class _ScheduleAppointment {
   bool get isPending =>
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
   // Staff only need to confirm payment or check in; completion is automatic.
-  bool get canAdvance =>
-      isPending && isServiceDateToday;
+  bool get canAdvance => isPending && isServiceDateToday;
   // payment_status on the appointment (043) is the single source of truth.
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
   bool get isRefunded => paymentStatus.toLowerCase() == 'refunded';
@@ -568,7 +704,7 @@ class _ScheduleAppointment {
     if (arrivalDelayLabel.isNotEmpty) return arrivalDelayLabel;
     return isAwaiting
         ? (canAdvance ? 'Ready to Start' : 'Awaiting')
-        : 'Payment Pending';
+        : 'Unpaid';
   }
 
   String get paymentStatusLabel {
@@ -652,6 +788,11 @@ class _AppointmentGroup {
   String get customerName => primary.customerName;
   String get customerPhone => primary.customerPhone;
   String get customerGender => primary.customerGender;
+  String get notes => appointments
+      .map((appointment) => appointment.notes.trim())
+      .where((note) => note.isNotEmpty)
+      .toSet()
+      .join('\n');
   String get initials => primary.initials;
   bool get isGuestAccount => primary.isGuestAccount;
   bool get isCancelled => appointments.every((a) => a.isCancelled);
@@ -661,9 +802,8 @@ class _AppointmentGroup {
   bool get isPending =>
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
   // Staff only need to confirm payment or check in; completion is automatic.
-  bool get canAdvance =>
-      isPending && primary.isServiceDateToday;
-  bool get hasPayment => primary.hasPayment;
+  bool get canAdvance => isPending && primary.isServiceDateToday;
+  bool get hasPayment => appointments.every((appointment) => appointment.hasPayment);
   bool get isRefunded => primary.isRefunded;
   bool get isAwaiting => appointments.any((a) => a.isAwaiting);
   int get arrivalDelayMinutes => appointments.fold<int>(
@@ -681,11 +821,21 @@ class _AppointmentGroup {
     if (hasDelayWarning) return 'Delayed $minutes min';
     return '';
   }
+
   String get receiptNumber => primary.receiptNumber;
   String get paymentMethod => primary.paymentMethod;
   String get paymentStatus => primary.paymentStatus;
   String get paymentStatusLabel => primary.paymentStatusLabel;
-  double get paidAmount => primary.paidAmount;
+  double get paidAmount =>
+      appointments.fold(0, (total, appointment) => total + appointment.paidAmount);
+  double get originalPaidAmount => appointments.fold(
+    0,
+    (total, appointment) => total + appointment.originalPaidAmount,
+  );
+  double get paidAddOnAmount => appointments.fold(
+    0,
+    (total, appointment) => total + appointment.paidAddOnAmount,
+  );
   String get statusLabel => isCompleted
       ? 'Completed'
       : isInProgress
@@ -698,7 +848,7 @@ class _AppointmentGroup {
       ? arrivalDelayLabel
       : isAwaiting
       ? (canAdvance ? 'Ready to Start' : 'Awaiting')
-      : 'Payment Pending';
+      : 'Unpaid';
   String get durationLabel => _durationLabel(durationMinutes);
 
   int get startMinutes =>
@@ -775,6 +925,18 @@ class _AppointmentGroup {
     return items;
   }
 
+  List<Map<String, dynamic>> get addOnServiceItems => [
+    for (final appointment in appointments)
+      for (final item in appointment.addOnServiceItems)
+        {...item, 'appointmentId': appointment.id},
+  ];
+
+  List<Map<String, dynamic>> get unpaidAddOnServiceItems => [
+    for (final appointment in appointments)
+      for (final item in appointment.unpaidAddOnServiceItems)
+        {...item, 'appointmentId': appointment.id},
+  ];
+
   bool matches(String query) {
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return true;
@@ -791,6 +953,8 @@ class _LateStartDecision {
   final DateTime? adjustedEndAt;
   final bool allowLateExtensionOverlap;
 }
+
+enum _CheckInSheetResult { completed, editServices }
 
 Future<_LateStartDecision> _lateStartDecision({
   required BuildContext context,
@@ -890,6 +1054,20 @@ class _AppointmentTherapist {
   }
 }
 
+class _BookingHoldReservation {
+  const _BookingHoldReservation({
+    required this.therapistId,
+    required this.startsAt,
+    required this.endsAt,
+    required this.expiresAt,
+  });
+
+  final String therapistId;
+  final DateTime startsAt;
+  final DateTime endsAt;
+  final DateTime expiresAt;
+}
+
 class _TherapistSwitchOption {
   const _TherapistSwitchOption({
     required this.therapist,
@@ -921,14 +1099,15 @@ List<_AppointmentTherapist> _buildAppointmentTherapists(
   List<Map<String, dynamic>> rows,
   List<_ScheduleAppointment> appointments,
 ) {
-  final therapists = rows
-      .where((row) {
-        final role = row['role']?.toString().toLowerCase() ?? 'therapist';
-        return role.contains('therapist');
-      })
-      .map(_AppointmentTherapist.fromMap)
-      .toList()
-    ..sort((a, b) => a.name.compareTo(b.name));
+  final therapists =
+      rows
+          .where((row) {
+            final role = row['role']?.toString().toLowerCase() ?? 'therapist';
+            return role.contains('therapist');
+          })
+          .map(_AppointmentTherapist.fromMap)
+          .toList()
+        ..sort((a, b) => a.name.compareTo(b.name));
 
   final knownIds = therapists.map((therapist) => therapist.id).toSet();
   for (final appointment in appointments) {
@@ -951,8 +1130,15 @@ List<_AppointmentTherapist> _buildAppointmentTherapists(
 
 class AppointmentsScreen extends StatefulWidget {
   final String userRole;
+  final String? initialCheckInAppointmentId;
+  final DateTime? initialDate;
 
-  const AppointmentsScreen({super.key, required this.userRole});
+  const AppointmentsScreen({
+    super.key,
+    required this.userRole,
+    this.initialCheckInAppointmentId,
+    this.initialDate,
+  });
 
   @override
   State<AppointmentsScreen> createState() => _AppointmentsScreenState();
@@ -981,12 +1167,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   final _dashboardRepository = DashboardRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
   final _transactionTable = SupabaseTableService('transactions');
+  final _bookingHoldsTable = SupabaseTableService('booking_holds');
 
   late DateTime _selectedDate;
   late DateTime _windowStart;
   final _searchController = TextEditingController();
   List<_ScheduleAppointment> _appointments = [];
   List<_AppointmentTherapist> _therapists = [];
+  List<_BookingHoldReservation> _activeBookingHolds = [];
   _AppointmentGroup? _selectedGroup;
   _AppointmentStatusFilter _statusFilter = _AppointmentStatusFilter.all;
   bool _showTabletTimeline = false;
@@ -995,11 +1183,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   BusinessRuleSettings _businessRuleSettings = BusinessRuleSettings.defaults();
   bool _loading = true;
   String? _error;
+  bool _initialCheckInHandled = false;
 
   @override
   void initState() {
     super.initState();
-    _selectedDate = _stripTime(DateTime.now());
+    _selectedDate = _stripTime(widget.initialDate ?? DateTime.now());
     _windowStart = _windowStartFor(_selectedDate);
     _searchController.addListener(() => setState(() {}));
     _loadAppointments();
@@ -1163,6 +1352,33 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       final endKey = _dateKey(_windowStart.add(const Duration(days: 6)));
       final appointmentRows = await _appointmentRepository
           .getAppointmentsInDateRange(startKey, endKey);
+      final holdRows = await _bookingHoldsTable.client
+          .from('booking_holds')
+          .select('assigned_therapist_id,start_at,end_at,expires_at')
+          .eq('outlet_id', OutletContext.activeOutletId.value)
+          .eq('status', 'pending_payment')
+          .gt('expires_at', DateTime.now().toUtc().toIso8601String());
+      final activeBookingHolds = <_BookingHoldReservation>[];
+      for (final row in holdRows) {
+        final therapistId = row['assigned_therapist_id']?.toString() ?? '';
+        final startsAt = _readDateTime(row['start_at'])?.toLocal();
+        final endsAt = _readDateTime(row['end_at'])?.toLocal();
+        final expiresAt = _readDateTime(row['expires_at'])?.toLocal();
+        if (therapistId.isEmpty ||
+            startsAt == null ||
+            endsAt == null ||
+            expiresAt == null) {
+          continue;
+        }
+        activeBookingHolds.add(
+          _BookingHoldReservation(
+            therapistId: therapistId,
+            startsAt: startsAt,
+            endsAt: endsAt,
+            expiresAt: expiresAt,
+          ),
+        );
+      }
       final appointmentIds = appointmentRows
           .map((data) => data['id']?.toString() ?? '')
           .where((id) => id.isNotEmpty)
@@ -1197,18 +1413,27 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           appointmentGroupIds.cast<Object>(),
         ),
       ]);
-      final transactionsByAppointment = <String, Map<String, dynamic>>{};
-      final transactionsByGroup = <String, Map<String, dynamic>>{};
+      final transactionsByAppointment = <String, List<Map<String, dynamic>>>{};
+      final transactionsByGroup = <String, List<Map<String, dynamic>>>{};
+      final seenTransactionIds = <String>{};
       for (final transaction in [
         ...transactionResults[0],
         ...transactionResults[1],
       ]) {
+        final transactionId = transaction['id']?.toString() ?? '';
+        if (transactionId.isNotEmpty && !seenTransactionIds.add(transactionId)) {
+          continue;
+        }
         final appointmentId = transaction['appointmentId']?.toString() ?? '';
         final groupId = transaction['appointmentGroupId']?.toString() ?? '';
         if (appointmentId.isNotEmpty) {
-          transactionsByAppointment[appointmentId] = transaction;
+          transactionsByAppointment
+              .putIfAbsent(appointmentId, () => [])
+              .add(transaction);
         }
-        if (groupId.isNotEmpty) transactionsByGroup[groupId] = transaction;
+        if (groupId.isNotEmpty) {
+          transactionsByGroup.putIfAbsent(groupId, () => []).add(transaction);
+        }
       }
       final customerIds = appointmentRows
           .map((data) => data['customerId']?.toString() ?? '')
@@ -1217,9 +1442,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           .map((data) => data['serviceId']?.toString() ?? '')
           .where((id) => id.isNotEmpty);
       final therapistIds = [
-        ...appointmentRows.map(
-          (data) => data['therapistId']?.toString() ?? '',
-        ),
+        ...appointmentRows.map((data) => data['therapistId']?.toString() ?? ''),
         ...therapistAllocationRows.map(
           (data) =>
               data['therapistId']?.toString() ??
@@ -1267,10 +1490,11 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   services: services,
                   therapists: therapists,
                   rooms: rooms,
-                  transaction:
+                  transactions:
                       transactionsByAppointment[data['id']?.toString()] ??
                       transactionsByGroup[data['appointmentGroupId']
-                          ?.toString()],
+                          ?.toString()] ??
+                      const [],
                   therapistAllocations:
                       therapistAllocationsByAppointment[data['id']
                           ?.toString()] ??
@@ -1292,6 +1516,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       setState(() {
         _appointments = appointments;
         _therapists = _buildAppointmentTherapists(therapistRows, appointments);
+        _activeBookingHolds = activeBookingHolds;
         if (_selectedGroup != null) {
           final matches = _appointmentGroups
               .where((group) => group.id == _selectedGroup!.id)
@@ -1304,6 +1529,31 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+    if (mounted) _scheduleInitialCheckIn();
+  }
+
+  void _scheduleInitialCheckIn() {
+    final appointmentId = widget.initialCheckInAppointmentId;
+    if (_initialCheckInHandled || appointmentId == null) return;
+    final matches = _appointmentGroups.where(
+      (group) => group.appointments.any((item) => item.id == appointmentId),
+    );
+    _initialCheckInHandled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      if (matches.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Appointment is no longer available')),
+        );
+        Navigator.pop(context, false);
+        return;
+      }
+      final group = matches.first;
+      final completed = group.isGroup
+          ? await _openGroupCheckout(group)
+          : await _openCheckout(group.primary);
+      if (mounted) Navigator.pop(context, completed);
+    });
   }
 
   void _moveDays(int days) {
@@ -1438,6 +1688,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     );
     if (saved != null && mounted) {
       await _loadAppointments();
+      if (saved == 'collectAddOnPayment' && mounted) {
+        final updated = _appointmentGroups.where(
+          (group) => group.appointments.any((item) => item.id == appointment.id),
+        );
+        if (updated.isNotEmpty) await _openAddOnPayment(updated.first);
+      }
     }
   }
 
@@ -1460,22 +1716,36 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     if (result == null || !mounted) return;
 
     await _loadAppointments();
-    if (result == 'confirmGroupPayment') {
+    if (result == 'collectAddOnPayment') {
       final updated = _appointmentGroups
           .where((item) => item.id == group.id)
           .toList();
       if (updated.isNotEmpty && mounted) {
-        await _openGroupCheckout(updated.first);
+        await _openAddOnPayment(updated.first);
       }
     }
+  }
+
+  Future<void> _openAddOnPayment(_AppointmentGroup group) async {
+    final paid = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => _AppointmentAddOnPaymentSheet(group: group),
+    );
+    if (paid == true && mounted) await _loadAppointments();
   }
 
   AppointmentEditPayload _editPayloadForAppointments(
     List<_ScheduleAppointment> appointments, {
     String? activeAppointmentId,
+    bool checkInMode = false,
   }) {
     final sorted = [...appointments]
-      ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+      ..sort((a, b) {
+        final timeCompare = a.startMinutes.compareTo(b.startMinutes);
+        return timeCompare != 0 ? timeCompare : a.id.compareTo(b.id);
+      });
     final primary = sorted.first;
     final activeIndex = sorted.indexWhere((a) => a.id == activeAppointmentId);
     return AppointmentEditPayload(
@@ -1487,17 +1757,50 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       customerId: primary.customerId,
       customerName: primary.customerName,
       customerPhone: primary.customerPhone,
+      notes: sorted
+          .map((appointment) => appointment.notes.trim())
+          .firstWhere((note) => note.isNotEmpty, orElse: () => ''),
       activePaxIndex: activeIndex < 0 ? 0 : activeIndex,
+      checkInMode: checkInMode,
+      hasPayment: sorted.every((appointment) => appointment.hasPayment),
       allocations: sorted.map((appointment) {
-        final serviceIds = <String>{
-          ...appointment.serviceItems
-              .map((item) => item['id']?.toString() ?? '')
-              .where((id) => id.isNotEmpty),
-          if (appointment.serviceId.isNotEmpty) appointment.serviceId,
-        }.toList();
+        final serviceIds = appointment.serviceItems
+            .map(serviceItemId)
+            .where((id) => id.isNotEmpty)
+            .toList();
+        if (serviceIds.isEmpty && appointment.serviceId.isNotEmpty) {
+          serviceIds.add(appointment.serviceId);
+        }
+        var bookedServiceIds = appointment.bookedServiceItems
+            .map(serviceItemId)
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+        if (bookedServiceIds.isEmpty && appointment.hasPayment) {
+          bookedServiceIds = appointment.serviceItems
+              .where((item) => item['lineType']?.toString() != 'add_on')
+              .map(serviceItemId)
+              .where((id) => id.isNotEmpty)
+              .toSet()
+              .toList();
+        }
+        var lockedServiceIds = appointment.paidServiceItems
+            .map(serviceItemId)
+            .where((id) => id.isNotEmpty)
+            .toSet()
+            .toList();
+        if (lockedServiceIds.isEmpty && appointment.hasPayment) {
+          lockedServiceIds = appointment.bookedServiceItems
+              .map(serviceItemId)
+              .where((id) => id.isNotEmpty)
+              .toSet()
+              .toList();
+        }
         return AppointmentEditAllocation(
           appointmentId: appointment.id,
           serviceIds: serviceIds,
+          bookedServiceIds: bookedServiceIds,
+          lockedServiceIds: lockedServiceIds,
           therapistId: appointment.therapistId,
           roomId: appointment.roomId,
           startTime: appointment.startTime,
@@ -1507,59 +1810,69 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     );
   }
 
-  Future<void> _openCheckout(_ScheduleAppointment appointment) async {
-    final checkedOut = await showModalBottomSheet<bool>(
+  Future<bool> _openCheckout(_ScheduleAppointment appointment) async {
+    final result = await showModalBottomSheet<_CheckInSheetResult>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => _AppointmentCheckoutSheet(appointment: appointment),
     );
-    if (checkedOut == true && mounted) {
+    if (result == _CheckInSheetResult.completed && mounted) {
       await _loadAppointments();
+      return true;
+    } else if (result == _CheckInSheetResult.editServices && mounted) {
+      return _openCheckInServiceEditor(
+        _AppointmentGroup(
+          id: appointment.id,
+          appointmentGroupId: '',
+          appointments: [appointment],
+        ),
+      );
     }
+    return false;
   }
 
-  Future<void> _openGroupCheckout(_AppointmentGroup group) async {
-    final checkedOut = await showModalBottomSheet<bool>(
+  Future<bool> _openGroupCheckout(_AppointmentGroup group) async {
+    final result = await showModalBottomSheet<_CheckInSheetResult>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
       builder: (context) => _AppointmentGroupCheckoutSheet(group: group),
     );
-    if (checkedOut == true && mounted) {
+    if (result == _CheckInSheetResult.completed && mounted) {
       await _loadAppointments();
+      return true;
+    } else if (result == _CheckInSheetResult.editServices && mounted) {
+      return _openCheckInServiceEditor(group);
     }
+    return false;
   }
 
-  Future<void> _startService(_ScheduleAppointment appointment) async {
-    await _appointmentRepository.startAppointment(
-      appointment.id,
-      startedAt: DateTime.now(),
+  Future<bool> _openCheckInServiceEditor(_AppointmentGroup group) async {
+    final result = await Navigator.push<Object?>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => NewAppointmentScreen(
+          userRole: widget.userRole,
+          editPayload: _editPayloadForAppointments(
+            group.appointments,
+            checkInMode: true,
+          ),
+        ),
+      ),
     );
-    if (!mounted) return;
+    if (result != 'checkInSaved' || !mounted) return false;
     await _loadAppointments();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Customer arrived - service started')),
-    );
+    if (!mounted) return false;
+    final updated = _appointmentGroups.where((item) => item.id == group.id);
+    if (updated.isEmpty) return false;
+    if (updated.first.isGroup) {
+      return _openGroupCheckout(updated.first);
+    }
+    return _openCheckout(updated.first.primary);
   }
 
-  Future<void> _startGroupService(_AppointmentGroup group) async {
-    await _appointmentRepository.startAppointmentGroup(
-      group.appointments.map((appointment) => appointment.id),
-      startedAt: DateTime.now(),
-    );
-    if (!mounted) return;
-    await _loadAppointments();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Customers arrived - services started')),
-    );
-  }
-
-  Future<void> _openTherapistSwitch(
-    _ScheduleAppointment appointment,
-  ) async {
+  Future<void> _openTherapistSwitch(_ScheduleAppointment appointment) async {
     final candidates = _therapists
         .where(
           (therapist) =>
@@ -1640,7 +1953,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     var splitMethod = 'service_time';
     final reasonController = TextEditingController();
     final startedAt = appointment.actualStartedAt?.toLocal();
-    final receivesFullCommission = startedAt == null ||
+    final receivesFullCommission =
+        startedAt == null ||
         !DateTime.now().isAfter(startedAt.add(const Duration(minutes: 15)));
 
     final confirmed = await showDialog<bool>(
@@ -1821,9 +2135,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                         ),
                       ],
                       selected: {splitMethod},
-                      onSelectionChanged: (selection) => setDialogState(
-                        () => splitMethod = selection.first,
-                      ),
+                      onSelectionChanged: (selection) =>
+                          setDialogState(() => splitMethod = selection.first),
                     ),
                   ],
                   const SizedBox(height: 8),
@@ -1883,9 +2196,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       );
     } catch (error) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(friendlyErrorMessage(error))),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(friendlyErrorMessage(error))));
       }
     } finally {
       reasonController.dispose();
@@ -1893,88 +2206,77 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   void _showMobileSummary(_AppointmentGroup group) {
-    showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      isScrollControlled: true,
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(
-            16,
-            0,
-            16,
-            MediaQuery.of(context).viewInsets.bottom + 16,
-          ),
-          child: group.isGroup
-              ? _AppointmentGroupSummaryPanel(
-                  group: group,
-                  compact: true,
-                  onClose: () => Navigator.pop(context),
-                  onEditGroup: () async {
-                    Navigator.pop(context);
-                    await _openEditGroup(group);
-                  },
-                  onEditPax: (appointment) async {
-                    Navigator.pop(context);
-                    await _openEditGroup(
-                      group,
-                      activeAppointmentId: appointment.id,
-                    );
-                  },
-                  onSwitchPax: (appointment) async {
-                    Navigator.pop(context);
-                    await _openTherapistSwitch(appointment);
-                  },
-                  onComplete: group.canAdvance
-                      ? () async {
-                          Navigator.pop(context);
-                          if (group.hasPayment) {
-                            await _startGroupService(group);
-                          } else {
+    Navigator.push<void>(
+      context,
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (routeContext) => Scaffold(
+          backgroundColor: Colors.white,
+          body: SafeArea(
+            child: group.isGroup
+                ? _AppointmentGroupSummaryPanel(
+                    group: group,
+                    compact: true,
+                    onClose: () => Navigator.pop(routeContext),
+                    onEditGroup: () async {
+                      Navigator.pop(routeContext);
+                      await _openEditGroup(group);
+                    },
+                    onEditPax: (appointment) async {
+                      Navigator.pop(routeContext);
+                      await _openEditGroup(
+                        group,
+                        activeAppointmentId: appointment.id,
+                      );
+                    },
+                    onSwitchPax: (appointment) async {
+                      Navigator.pop(routeContext);
+                      await _openTherapistSwitch(appointment);
+                    },
+                    onComplete: group.canAdvance
+                        ? () async {
+                            Navigator.pop(routeContext);
                             await _openGroupCheckout(group);
                           }
-                        }
-                      : null,
-                  onCancel: group.isCompleted
-                      ? null
-                      : () async {
-                          Navigator.pop(context);
-                          await _cancelAppointmentGroup(group);
-                        },
-                )
-              : _AppointmentSummaryPanel(
-                  appointment: group.primary,
-                  compact: true,
-                  onClose: () => Navigator.pop(context),
-                  onEdit: () async {
-                    Navigator.pop(context);
-                    await _openEdit(group.primary);
-                  },
-                  onSwitchTherapist: group.primary.isCancelled ||
-                          group.primary.isNoShow ||
-                          group.primary.isCompleted
-                      ? null
-                      : () async {
-                          Navigator.pop(context);
-                          await _openTherapistSwitch(group.primary);
-                        },
-                  onComplete: group.primary.canAdvance
-                      ? () async {
-                          Navigator.pop(context);
-                          if (group.primary.hasPayment) {
-                            await _startService(group.primary);
-                          } else {
+                        : null,
+                    onCancel: group.isCompleted
+                        ? null
+                        : () async {
+                            Navigator.pop(routeContext);
+                            await _cancelAppointmentGroup(group);
+                          },
+                  )
+                : _AppointmentSummaryPanel(
+                    appointment: group.primary,
+                    compact: true,
+                    onClose: () => Navigator.pop(routeContext),
+                    onEdit: () async {
+                      Navigator.pop(routeContext);
+                      await _openEdit(group.primary);
+                    },
+                    onSwitchTherapist:
+                        group.primary.isCancelled ||
+                            group.primary.isNoShow ||
+                            group.primary.isCompleted
+                        ? null
+                        : () async {
+                            Navigator.pop(routeContext);
+                            await _openTherapistSwitch(group.primary);
+                          },
+                    onComplete: group.primary.canAdvance
+                        ? () async {
+                            Navigator.pop(routeContext);
                             await _openCheckout(group.primary);
                           }
-                        }
-                      : null,
-                  onCancel: group.isCompleted
-                      ? null
-                      : () async {
-                          Navigator.pop(context);
-                          await _cancelAppointment(group.primary);
-                        },
-                ),
+                        : null,
+                    onCancel: group.isCompleted
+                        ? null
+                        : () async {
+                            Navigator.pop(routeContext);
+                            await _cancelAppointment(group.primary);
+                          },
+                  ),
+          ),
         ),
       ),
     );
@@ -2009,7 +2311,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   Widget build(BuildContext context) {
     final isTablet = MediaQuery.of(context).size.width >= 900;
     return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
       floatingActionButton: null,
       body: SafeArea(child: isTablet ? _buildTablet() : _buildMobile()),
     );
@@ -2102,48 +2403,68 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   Widget _buildTablet() {
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Column(
-            children: [
-              _TabletScheduleHeader(
-                searchController: _searchController,
-                onBack: () => Navigator.pop(context),
-                onAdd: _openBooking,
-              ),
-              _ScheduleCalendarStrip(
-                days: _visibleDays,
-                selectedDate: _selectedDate,
-                monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
-                appointmentsForDay: _appointmentsForDay,
-                onSelect: _selectDate,
-                onPrevious: () => _moveDays(-1),
-                onNext: () => _moveDays(1),
-                onOpenCalendar: _openCalendarPicker,
-                compact: false,
-              ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final panelWidth = DetailDrawerLayout.widthFor(constraints.maxWidth);
+        final panelMaxHeight = DetailDrawerLayout.maxHeightFor(
+          constraints.maxHeight,
+        );
 
-              Expanded(child: _buildTabletBody()),
-            ],
-          ),
-        ),
-        AnimatedPositioned(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOutCubic,
-          top: 198,
-          right: _selectedGroup == null ? -390 : 18,
-          bottom: 18,
-          width: 360,
-          child: IgnorePointer(
-            ignoring: _selectedGroup == null,
-            child: AnimatedOpacity(
-              duration: const Duration(milliseconds: 140),
-              opacity: _selectedGroup == null ? 0 : 1,
-              child: _selectedGroup == null
-                  ? const SizedBox.shrink()
-                  : _selectedGroup!.isGroup
-                  ? _AppointmentGroupSummaryPanel(
+        return Stack(
+          children: [
+            Positioned.fill(
+              child: Column(
+                children: [
+                  _TabletScheduleHeader(
+                    searchController: _searchController,
+                    onBack: () => Navigator.pop(context),
+                    onAdd: _openBooking,
+                  ),
+                  _ScheduleCalendarStrip(
+                    days: _visibleDays,
+                    selectedDate: _selectedDate,
+                    monthLabel: DateFormat('MMMM yyyy').format(_selectedDate),
+                    appointmentsForDay: _appointmentsForDay,
+                    onSelect: _selectDate,
+                    onPrevious: () => _moveDays(-1),
+                    onNext: () => _moveDays(1),
+                    onOpenCalendar: _openCalendarPicker,
+                    compact: false,
+                  ),
+                  Expanded(child: _buildTabletBody()),
+                ],
+              ),
+            ),
+            AnimatedPositioned(
+              duration: const Duration(milliseconds: 180),
+              curve: Curves.easeOutCubic,
+              top: 0,
+              right: _selectedGroup == null
+                  ? -(panelWidth + 32)
+                  : DetailDrawerLayout.rightMargin,
+              bottom: 0,
+              width: panelWidth,
+              child: IgnorePointer(
+                ignoring: _selectedGroup == null,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 140),
+                  opacity: _selectedGroup == null ? 0 : 1,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxHeight: panelMaxHeight,
+                      ),
+                      child: Material(
+                        color: context.appSurface,
+                        elevation: 14,
+                        shadowColor: const Color(0x330F172A),
+                        borderRadius: BorderRadius.circular(16),
+                        clipBehavior: Clip.antiAlias,
+                        child: _selectedGroup == null
+                            ? const SizedBox.shrink()
+                            : _selectedGroup!.isGroup
+                            ? _AppointmentGroupSummaryPanel(
                       group: _selectedGroup!,
                       onClose: () => setState(() => _selectedGroup = null),
                       onEditGroup: () => _openEditGroup(_selectedGroup!),
@@ -2153,15 +2474,13 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       ),
                       onSwitchPax: _openTherapistSwitch,
                       onComplete: _selectedGroup!.canAdvance
-                          ? () => _selectedGroup!.hasPayment
-                                ? _startGroupService(_selectedGroup!)
-                                : _openGroupCheckout(_selectedGroup!)
+                          ? () => _openGroupCheckout(_selectedGroup!)
                           : null,
                       onCancel: _selectedGroup!.isCompleted
                           ? null
                           : () => _cancelAppointmentGroup(_selectedGroup!),
-                    )
-                  : _AppointmentSummaryPanel(
+                              )
+                            : _AppointmentSummaryPanel(
                       appointment: _selectedGroup!.primary,
                       onClose: () => setState(() => _selectedGroup = null),
                       onEdit: () => _openEdit(_selectedGroup!.primary),
@@ -2170,22 +2489,23 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                               _selectedGroup!.primary.isNoShow ||
                               _selectedGroup!.primary.isCompleted
                           ? null
-                          : () => _openTherapistSwitch(
-                              _selectedGroup!.primary,
-                            ),
+                          : () => _openTherapistSwitch(_selectedGroup!.primary),
                       onComplete: _selectedGroup!.primary.canAdvance
-                          ? () => _selectedGroup!.primary.hasPayment
-                                ? _startService(_selectedGroup!.primary)
-                                : _openCheckout(_selectedGroup!.primary)
+                          ? () => _openCheckout(_selectedGroup!.primary)
                           : null,
                       onCancel: _selectedGroup!.isCompleted
                           ? null
                           : () => _cancelAppointment(_selectedGroup!.primary),
+                              ),
+                      ),
                     ),
+                  ),
+                ),
+              ),
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 
@@ -2254,6 +2574,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                 child: _AppointmentTherapistPanel(
                   therapists: _therapists,
                   appointments: dayAppointments,
+                  bookingHolds: _activeBookingHolds,
                   selectedDate: _selectedDate,
                 ),
               ),
@@ -2388,10 +2709,7 @@ class _TodayCalendarButton extends StatelessWidget {
   final bool compact;
   final VoidCallback onPressed;
 
-  const _TodayCalendarButton({
-    required this.compact,
-    required this.onPressed,
-  });
+  const _TodayCalendarButton({required this.compact, required this.onPressed});
 
   @override
   Widget build(BuildContext context) {
@@ -2411,10 +2729,7 @@ class _TodayCalendarButton extends StatelessWidget {
         ),
         child: const Text(
           'Today',
-          style: TextStyle(
-            fontSize: 13,
-            fontWeight: FontWeight.w800,
-          ),
+          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w800),
         ),
       ),
     );
@@ -2883,8 +3198,7 @@ class _ScheduleCalendarStrip extends StatelessWidget {
                       child: _DayTile(
                         day: days[index],
                         selected:
-                            _stripTime(days[index]) ==
-                            _stripTime(selectedDate),
+                            _stripTime(days[index]) == _stripTime(selectedDate),
                         count: appointmentsForDay(days[index]).length,
                         compact: true,
                         onTap: () => onSelect(days[index]),
@@ -2924,7 +3238,10 @@ class _ScheduleCalendarStrip extends StatelessWidget {
                       ),
                     ),
                     const SizedBox(width: 14),
-                    _MonthPickerButton(label: monthLabel, onTap: onOpenCalendar),
+                    _MonthPickerButton(
+                      label: monthLabel,
+                      onTap: onOpenCalendar,
+                    ),
                   ],
                 ),
               ),
@@ -3062,16 +3379,12 @@ class _DayTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final countLabel = compact
-        ? ''
-        : '$count booking${count == 1 ? '' : 's'}';
+    final countLabel = compact ? '' : '$count booking${count == 1 ? '' : 's'}';
     final selectedColor = compact
         ? const Color(0xFFE2F3EB)
         : const Color(0xFF0F7A43);
     final selectedText = compact ? const Color(0xFF0F6B3E) : Colors.white;
-    final selectedSubtext = compact
-        ? const Color(0xFF0F6B3E)
-        : Colors.white;
+    final selectedSubtext = compact ? const Color(0xFF0F6B3E) : Colors.white;
     return GestureDetector(
       onTap: onTap,
       child: AnimatedContainer(
@@ -3083,7 +3396,7 @@ class _DayTile extends StatelessWidget {
         ),
         decoration: BoxDecoration(
           color: selected ? selectedColor : Colors.white,
-        borderRadius: BorderRadius.circular(compact ? 10 : 10),
+          borderRadius: BorderRadius.circular(compact ? 10 : 10),
           border: compact && !selected
               ? null
               : Border.all(
@@ -3144,9 +3457,7 @@ class _DayTile extends StatelessWidget {
                     fontSize: 10,
                     height: 1.1,
                     fontWeight: FontWeight.w700,
-                    color: selected
-                        ? selectedSubtext
-                        : const Color(0xFF64748B),
+                    color: selected ? selectedSubtext : const Color(0xFF64748B),
                   ),
                 ),
               ],
@@ -3365,8 +3676,7 @@ class _TabletDaySummary extends StatelessWidget {
             value: inProgress,
             color: const Color(0xFFF97316),
             selected: selectedFilter == _AppointmentStatusFilter.inProgress,
-            onTap: () =>
-                onFilterChanged(_AppointmentStatusFilter.inProgress),
+            onTap: () => onFilterChanged(_AppointmentStatusFilter.inProgress),
           ),
         ),
         const SizedBox(width: 12),
@@ -4045,6 +4355,9 @@ class _TabletAppointmentListRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = _statusColorsForGroup(appointment);
+    final showOperationalStatus = _showsOperationalStatus(
+      appointment.statusLabel,
+    );
     final serviceLabel = _appointmentServiceLabel(appointment);
     final startClock = _clockLabel(
       _minutesToTime(appointment.primary.startMinutes),
@@ -4203,11 +4516,13 @@ class _TabletAppointmentListRow extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    _ListStatusChip(
-                      label: appointment.statusLabel,
-                      colors: colors,
-                    ),
-                    const SizedBox(height: 5),
+                    if (showOperationalStatus) ...[
+                      _ListStatusChip(
+                        label: appointment.statusLabel,
+                        colors: colors,
+                      ),
+                      const SizedBox(height: 5),
+                    ],
                     _PaymentPill(paymentStatus: appointment.paymentStatus),
                   ],
                 ),
@@ -4417,11 +4732,13 @@ class _ListIconButton extends StatelessWidget {
 class _AppointmentTherapistPanel extends StatelessWidget {
   final List<_AppointmentTherapist> therapists;
   final List<_AppointmentGroup> appointments;
+  final List<_BookingHoldReservation> bookingHolds;
   final DateTime selectedDate;
 
   const _AppointmentTherapistPanel({
     required this.therapists,
     required this.appointments,
+    required this.bookingHolds,
     required this.selectedDate,
   });
 
@@ -4484,6 +4801,7 @@ class _AppointmentTherapistPanel extends StatelessWidget {
             for (final (index, item) in _sortedTherapistsForDay(
               therapists: therapists,
               appointments: appointments,
+              bookingHolds: bookingHolds,
               selectedDate: selectedDate,
             ).indexed) ...[
               if (index > 0) const SizedBox(height: 10),
@@ -4520,10 +4838,7 @@ class _TherapistStatusTile extends StatelessWidget {
   final _AppointmentTherapist therapist;
   final _TherapistDayStatus status;
 
-  const _TherapistStatusTile({
-    required this.therapist,
-    required this.status,
-  });
+  const _TherapistStatusTile({required this.therapist, required this.status});
 
   @override
   Widget build(BuildContext context) {
@@ -4542,10 +4857,7 @@ class _TherapistStatusTile extends StatelessWidget {
             backgroundColor: color.withValues(alpha: 0.12),
             child: Text(
               therapist.initials,
-              style: TextStyle(
-                fontWeight: FontWeight.w900,
-                color: color,
-              ),
+              style: TextStyle(fontWeight: FontWeight.w900, color: color),
             ),
           ),
           const SizedBox(width: 11),
@@ -4648,6 +4960,7 @@ class _TherapistSortItem {
 List<_TherapistSortItem> _sortedTherapistsForDay({
   required List<_AppointmentTherapist> therapists,
   required List<_AppointmentGroup> appointments,
+  required List<_BookingHoldReservation> bookingHolds,
   required DateTime selectedDate,
 }) {
   final items = therapists.map((therapist) {
@@ -4656,13 +4969,15 @@ List<_TherapistSortItem> _sortedTherapistsForDay({
       status: _therapistDayStatus(
         therapist: therapist,
         appointments: appointments,
+        bookingHolds: bookingHolds,
         selectedDate: selectedDate,
       ),
     );
   }).toList();
   items.sort((a, b) {
-    final rank = _therapistStatusRank(a.status)
-        .compareTo(_therapistStatusRank(b.status));
+    final rank = _therapistStatusRank(
+      a.status,
+    ).compareTo(_therapistStatusRank(b.status));
     if (rank != 0) return rank;
     return a.therapist.name.compareTo(b.therapist.name);
   });
@@ -4672,7 +4987,9 @@ List<_TherapistSortItem> _sortedTherapistsForDay({
 int _therapistStatusRank(_TherapistDayStatus status) {
   final label = status.label.toLowerCase();
   final detail = status.detail.toLowerCase();
-  if (label == 'in session' || label == 'cleaning') return 0;
+  if (label == 'in session' || label == 'cleaning' || label == 'reserved') {
+    return 0;
+  }
   if (label == 'available' && !detail.startsWith('next')) return 1;
   if (label == 'available' && detail.startsWith('next')) return 2;
   if (label == 'open' || detail.contains('no bookings')) return 3;
@@ -4682,6 +4999,7 @@ int _therapistStatusRank(_TherapistDayStatus status) {
 _TherapistDayStatus _therapistDayStatus({
   required _AppointmentTherapist therapist,
   required List<_AppointmentGroup> appointments,
+  required List<_BookingHoldReservation> bookingHolds,
   required DateTime selectedDate,
 }) {
   if (!therapist.available) {
@@ -4694,23 +5012,52 @@ _TherapistDayStatus _therapistDayStatus({
 
   final assigned = appointments
       .where(
-        (group) => group.appointments.any(
-          (appointment) => appointment.therapistId == therapist.id,
-        ),
+        (group) =>
+            !group.isCancelled &&
+            !group.isNoShow &&
+            !group.isCompleted &&
+            group.appointments.any(
+              (appointment) => appointment.therapistId == therapist.id,
+            ),
       )
       .toList();
+  final now = DateTime.now();
+  final holds = bookingHolds.where((hold) {
+    return hold.therapistId == therapist.id &&
+        hold.expiresAt.isAfter(now) &&
+        _stripTime(hold.startsAt) == _stripTime(selectedDate);
+  }).toList()..sort((a, b) => a.startsAt.compareTo(b.startsAt));
   final today = _stripTime(DateTime.now());
   final selectedToday = _stripTime(selectedDate) == today;
   if (!selectedToday) {
+    if (holds.isNotEmpty) {
+      return _TherapistDayStatus(
+        label: 'Reserved',
+        detail: 'Payment hold at ${DateFormat('h:mm a').format(holds.first.startsAt)}',
+        color: const Color(0xFF2563EB),
+      );
+    }
     return _TherapistDayStatus(
       label: assigned.isEmpty ? 'Open' : '${assigned.length} booked',
       detail: assigned.isEmpty ? 'No bookings' : 'Selected day schedule',
-      color: assigned.isEmpty ? const Color(0xFF10B981) : const Color(0xFF2563EB),
+      color: assigned.isEmpty
+          ? const Color(0xFF10B981)
+          : const Color(0xFF2563EB),
     );
   }
 
-  final now = DateTime.now();
   final nowMinutes = now.hour * 60 + now.minute;
+  final currentHolds = holds.where(
+    (hold) => !now.isBefore(hold.startsAt) && now.isBefore(hold.endsAt),
+  );
+  if (currentHolds.isNotEmpty) {
+    final current = currentHolds.first;
+    return _TherapistDayStatus(
+      label: 'Reserved',
+      detail: 'Payment hold until ${DateFormat('h:mm a').format(current.endsAt)}',
+      color: const Color(0xFF2563EB),
+    );
+  }
   final active = assigned.where((group) {
     return nowMinutes >= group.startMinutes &&
         nowMinutes < group.cleanupEndMinutes;
@@ -4718,6 +5065,14 @@ _TherapistDayStatus _therapistDayStatus({
   if (active.isNotEmpty) {
     active.sort((a, b) => a.cleanupEndMinutes.compareTo(b.cleanupEndMinutes));
     final current = active.first;
+    if (!current.isInProgress) {
+      return _TherapistDayStatus(
+        label: 'Reserved',
+        detail:
+            'Until ${_clockLabel(_minutesToTime(current.cleanupEndMinutes))}',
+        color: const Color(0xFF2563EB),
+      );
+    }
     if (nowMinutes >= current.endMinutes) {
       return _TherapistDayStatus(
         label: 'Cleaning',
@@ -4733,14 +5088,27 @@ _TherapistDayStatus _therapistDayStatus({
     );
   }
 
-  final upcoming = assigned
-      .where((group) => group.startMinutes > nowMinutes)
-      .toList()
-    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  final upcoming =
+      assigned.where((group) => group.startMinutes > nowMinutes).toList()
+        ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  final upcomingHolds = holds.where((hold) => hold.startsAt.isAfter(now));
+  if (upcomingHolds.isNotEmpty &&
+      (upcoming.isEmpty ||
+          upcomingHolds.first.startsAt.hour * 60 +
+                  upcomingHolds.first.startsAt.minute <=
+              upcoming.first.startMinutes)) {
+    return _TherapistDayStatus(
+      label: 'Reserved',
+      detail:
+          'Payment hold at ${DateFormat('h:mm a').format(upcomingHolds.first.startsAt)}',
+      color: const Color(0xFF2563EB),
+    );
+  }
   if (upcoming.isNotEmpty) {
     return _TherapistDayStatus(
       label: 'Available',
-      detail: 'Next ${_clockLabel(_minutesToTime(upcoming.first.startMinutes))}',
+      detail:
+          'Next ${_clockLabel(_minutesToTime(upcoming.first.startMinutes))}',
       color: const Color(0xFF10B981),
     );
   }
@@ -4962,11 +5330,7 @@ class _MobileAgendaTimeHeader extends StatelessWidget {
               ),
             ),
             if (concurrent)
-              const Icon(
-                Icons.open_in_new,
-                size: 16,
-                color: Color(0xFF667085),
-              ),
+              const Icon(Icons.open_in_new, size: 16, color: Color(0xFF667085)),
           ],
         ),
       ),
@@ -5404,6 +5768,11 @@ class _MobileAppointmentCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
+    final stackDetails =
+        (metrics.preset == UiScalePreset.large ||
+            MediaQuery.textScalerOf(context).scale(1) > 1.15) &&
+        MediaQuery.sizeOf(context).width < 520;
     final colors = _statusColorsForGroup(appointment);
     final startClock = _clockLabel(
       _minutesToTime(appointment.primary.startMinutes),
@@ -5424,7 +5793,12 @@ class _MobileAppointmentCard extends StatelessWidget {
         onTap: onTap,
         borderRadius: BorderRadius.circular(8),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 13, 12, 13),
+          padding: EdgeInsets.fromLTRB(
+            metrics.cardPadding,
+            metrics.cardPadding - 3,
+            metrics.cardPadding,
+            metrics.cardPadding - 3,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -5485,63 +5859,111 @@ class _MobileAppointmentCard extends StatelessWidget {
               const SizedBox(height: 11),
               Divider(height: 1, color: colors.border),
               const SizedBox(height: 10),
-              Row(
-                children: [
-                  Icon(
-                    Icons.schedule_outlined,
-                    size: 16,
-                    color: colors.accent,
-                  ),
-                  const SizedBox(width: 7),
-                  Expanded(
-                    child: Text(
-                      timeLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF334155),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    appointment.priceLabel,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 15.5,
-                      fontWeight: FontWeight.w900,
+              if (stackDetails) ...[
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      Icons.schedule_outlined,
+                      size: 18,
                       color: colors.accent,
                     ),
-                  ),
-                ],
-              ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        timeLabel,
+                        maxLines: 2,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF334155),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      appointment.priceLabel,
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w900,
+                        color: colors.accent,
+                      ),
+                    ),
+                  ],
+                ),
+              ] else
+                Row(
+                  children: [
+                    Icon(
+                      Icons.schedule_outlined,
+                      size: 16,
+                      color: colors.accent,
+                    ),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        timeLabel,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF334155),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      appointment.priceLabel,
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: 15.5,
+                        fontWeight: FontWeight.w900,
+                        color: colors.accent,
+                      ),
+                    ),
+                  ],
+                ),
               const SizedBox(height: 9),
-              Row(
-                children: [
-                  Expanded(
-                    child: _MobileCardInfoRow(
+              if (stackDetails)
+                Column(
+                  children: [
+                    _MobileCardInfoRow(
                       icon: Icons.badge_outlined,
                       label: appointment.therapistName,
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: _MobileCardInfoRow(
+                    const SizedBox(height: 7),
+                    _MobileCardInfoRow(
                       icon: Icons.meeting_room_outlined,
                       label: appointment.roomName,
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.chevron_right_rounded,
-                    size: 20,
-                    color: colors.accent,
-                  ),
-                ],
-              ),
+                  ],
+                )
+              else
+                Row(
+                  children: [
+                    Expanded(
+                      child: _MobileCardInfoRow(
+                        icon: Icons.badge_outlined,
+                        label: appointment.therapistName,
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: _MobileCardInfoRow(
+                        icon: Icons.meeting_room_outlined,
+                        label: appointment.roomName,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      size: 20,
+                      color: colors.accent,
+                    ),
+                  ],
+                ),
             ],
           ),
         ),
@@ -5591,8 +6013,12 @@ class _MobileAppointmentStatusTag extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
     return Container(
-      constraints: const BoxConstraints(maxWidth: 128),
+      constraints: BoxConstraints(
+        minHeight: metrics.badgeHeight,
+        maxWidth: 148,
+      ),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: colors.accent.withValues(alpha: 0.12),
@@ -5600,8 +6026,8 @@ class _MobileAppointmentStatusTag extends StatelessWidget {
       ),
       child: Text(
         label,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
+        maxLines: 2,
+        textAlign: TextAlign.center,
         style: TextStyle(
           fontSize: 10.8,
           fontWeight: FontWeight.w900,
@@ -6086,184 +6512,621 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = _statusColorsForGroup(group);
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(compact ? 18 : 16),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x26000000),
-            blurRadius: 24,
-            offset: Offset(0, 10),
-          ),
-        ],
+    return _AppointmentDetailContent(
+      appointments: group.appointments,
+      compact: compact,
+      colors: colors,
+      customerName: group.customerName,
+      customerPhone: group.customerPhone,
+      initials: group.initials,
+      statusLabel: group.statusLabel,
+      paymentStatus: group.paymentStatus,
+      date: group.date,
+      bookedTimeRange: group.primary.bookedTimeRange,
+      actualTimeRange: group.primary.hasActualTiming
+          ? group.primary.actualServiceTimeRange
+          : null,
+      durationLabel: group.durationLabel,
+      total: group.price,
+      paidAmount: group.paidAmount,
+      receiptNumber: group.receiptNumber,
+      paymentMethod: group.paymentMethod,
+      notes: group.notes,
+      onClose: onClose,
+      onEdit: onEditGroup,
+      onEditPax: onEditPax,
+      onSwitchPax: onSwitchPax,
+      onComplete: onComplete,
+      onCancel: onCancel,
+    );
+  }
+}
+
+class _AppointmentDetailContent extends StatelessWidget {
+  final List<_ScheduleAppointment> appointments;
+  final bool compact;
+  final _AppointmentStatusStyle colors;
+  final String customerName;
+  final String customerPhone;
+  final String initials;
+  final String statusLabel;
+  final String paymentStatus;
+  final DateTime date;
+  final String bookedTimeRange;
+  final String? actualTimeRange;
+  final String durationLabel;
+  final double total;
+  final double paidAmount;
+  final String receiptNumber;
+  final String paymentMethod;
+  final String notes;
+  final VoidCallback onClose;
+  final VoidCallback onEdit;
+  final void Function(_ScheduleAppointment appointment) onEditPax;
+  final void Function(_ScheduleAppointment appointment)? onSwitchPax;
+  final VoidCallback? onComplete;
+  final VoidCallback? onCancel;
+
+  const _AppointmentDetailContent({
+    required this.appointments,
+    required this.compact,
+    required this.colors,
+    required this.customerName,
+    required this.customerPhone,
+    required this.initials,
+    required this.statusLabel,
+    required this.paymentStatus,
+    required this.date,
+    required this.bookedTimeRange,
+    required this.actualTimeRange,
+    required this.durationLabel,
+    required this.total,
+    required this.paidAmount,
+    required this.receiptNumber,
+    required this.paymentMethod,
+    required this.notes,
+    required this.onClose,
+    required this.onEdit,
+    required this.onEditPax,
+    required this.onSwitchPax,
+    required this.onComplete,
+    required this.onCancel,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final compactHorizontalPadding = screenWidth < 360 ? 12.0 : 16.0;
+    final isWalkIn = appointments.first.isWalkIn;
+    final accent = isWalkIn ? const Color(0xFF0F8A5F) : colors.accent;
+    final typeColor = isWalkIn
+        ? const Color(0xFF2563EB)
+        : const Color(0xFF7C3AED);
+    final showOperationalStatus = _showsOperationalStatus(statusLabel);
+    final VoidCallback? switchAction =
+        appointments.length == 1 && onSwitchPax != null
+        ? () => onSwitchPax!(appointments.first)
+        : null;
+    final content = SingleChildScrollView(
+      padding: EdgeInsets.fromLTRB(
+        compact ? compactHorizontalPadding : 18,
+        compact ? 8 : 18,
+        compact ? compactHorizontalPadding : 18,
+        compact ? 24 : 18,
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (compact)
             Row(
               children: [
-                _StatusBadge(label: group.statusLabel, colors: colors),
-                const SizedBox(width: 8),
-                _PaymentBadge(paymentStatus: group.paymentStatus),
-                const SizedBox(width: 8),
-                _StatusBadge(label: '${group.paxCount} pax', colors: colors),
-                const Spacer(),
-                IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                CircleAvatar(
-                  radius: 28,
-                  backgroundColor: colors.accent.withValues(alpha: 0.78),
+                IconButton(
+                  onPressed: onClose,
+                  icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+                  tooltip: 'Back',
+                ),
+                Expanded(
                   child: Text(
-                    group.initials,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
+                    isWalkIn ? 'Booking Details' : 'Appointment Details',
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 17,
                       fontWeight: FontWeight.w900,
+                      color: context.appText,
                     ),
                   ),
                 ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        group.customerName,
-                        style: const TextStyle(
-                          fontSize: 19,
-                          fontWeight: FontWeight.w900,
-                          color: Color(0xFF111827),
-                        ),
+                const SizedBox(width: 48, height: 48),
+              ],
+            ),
+          Row(
+            children: [
+              CircleAvatar(
+                radius: 29,
+                backgroundColor: accent,
+                child: Text(
+                  initials,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 21,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      customerName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w900,
+                        color: context.appText,
                       ),
-                      const SizedBox(height: 4),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      customerPhone.trim().isEmpty ? '-' : customerPhone,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: context.appMuted,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (!compact)
+                IconButton(
+                  onPressed: onClose,
+                  icon: const Icon(Icons.close_rounded),
+                  tooltip: 'Close',
+                ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              if (showOperationalStatus)
+                _StatusBadge(label: statusLabel, colors: colors),
+              _PaymentBadge(paymentStatus: paymentStatus),
+              _DetailChip(
+                label: isWalkIn ? 'Walk-in' : 'Appointment',
+                color: typeColor,
+              ),
+              _DetailChip(
+                label: '${appointments.length} pax',
+                color: const Color(0xFF64748B),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _BookingTimingCard(
+            date: date,
+            bookedTimeRange: bookedTimeRange,
+            durationLabel: durationLabel,
+            actualTimeRange: actualTimeRange,
+          ),
+          if (notes.trim().isNotEmpty) ...[
+            const SizedBox(height: 14),
+            _BookingCommentsCard(notes: notes),
+          ],
+          const SizedBox(height: 18),
+          Text(
+            'Guest Services',
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+              color: context.appText,
+            ),
+          ),
+          const SizedBox(height: 10),
+          for (var index = 0; index < appointments.length; index++)
+            _GroupPaxDetailCard(
+              index: index,
+              appointment: appointments[index],
+              accent: accent,
+              onEdit: () => onEditPax(appointments[index]),
+              onSwitch:
+                  onSwitchPax == null ||
+                      appointments[index].isCancelled ||
+                      appointments[index].isNoShow ||
+                      appointments[index].isCompleted
+                  ? null
+                  : () => onSwitchPax!(appointments[index]),
+            ),
+          _BookingTotalCard(total: total),
+          if (receiptNumber.isNotEmpty || paidAmount > 0) ...[
+            const SizedBox(height: 10),
+            _PaymentReceiptCard(
+              receiptNumber: receiptNumber,
+              paymentMethod: paymentMethod,
+              paidAmount: paidAmount,
+              onTap: receiptNumber.isEmpty
+                  ? null
+                  : () => showTransactionOrderDetailSheet(
+                      context,
+                      receiptNumber: receiptNumber,
+                    ),
+            ),
+          ],
+          const SizedBox(height: 18),
+          if (onComplete != null) ...[
+            _VisibleDetailAction(
+              icon: isWalkIn
+                  ? Icons.play_arrow_rounded
+                  : Icons.login_rounded,
+              label: isWalkIn ? 'Start Service' : 'Check In',
+              color: const Color(0xFF15803D),
+              filled: true,
+              onPressed: onComplete!,
+            ),
+            const SizedBox(height: 10),
+          ],
+          if (switchAction != null) ...[
+            _VisibleDetailAction(
+              icon: Icons.swap_horiz_rounded,
+              label: 'Switch Therapist',
+              color: const Color(0xFF0F766E),
+              onPressed: switchAction,
+            ),
+            const SizedBox(height: 10),
+          ],
+          _VisibleDetailAction(
+            icon: Icons.edit_outlined,
+            label: isWalkIn ? 'Edit Walk-in' : 'Edit Appointment',
+            color: accent,
+            onPressed: onEdit,
+          ),
+          if (onCancel != null) ...[
+            const SizedBox(height: 10),
+            _VisibleDetailAction(
+              icon: Icons.delete_outline,
+              label: 'Cancel Booking',
+              color: const Color(0xFFDC2626),
+              onPressed: onCancel!,
+            ),
+          ],
+        ],
+      ),
+    );
+
+    return Container(
+      width: double.infinity,
+      height: compact ? double.infinity : null,
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(compact ? 0 : 8),
+        boxShadow: compact
+            ? null
+            : const [
+                BoxShadow(
+                  color: Color(0x1F000000),
+                  blurRadius: 22,
+                  offset: Offset(0, 8),
+                ),
+              ],
+      ),
+      child: content,
+    );
+  }
+}
+
+class _VisibleDetailAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool filled;
+  final VoidCallback onPressed;
+
+  const _VisibleDetailAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onPressed,
+    this.filled = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(8),
+    );
+    return SizedBox(
+      width: double.infinity,
+      height: 48,
+      child: filled
+          ? FilledButton.icon(
+              onPressed: onPressed,
+              icon: Icon(icon, size: 19),
+              label: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: color,
+                shape: shape,
+                textStyle: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            )
+          : OutlinedButton.icon(
+              onPressed: onPressed,
+              icon: Icon(icon, size: 19),
+              label: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: color,
+                side: BorderSide(color: color),
+                shape: shape,
+                textStyle: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
+    );
+  }
+}
+
+class _DetailChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _DetailChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _BookingTimingCard extends StatelessWidget {
+  final DateTime date;
+  final String bookedTimeRange;
+  final String durationLabel;
+  final String? actualTimeRange;
+
+  const _BookingTimingCard({
+    required this.date,
+    required this.bookedTimeRange,
+    required this.durationLabel,
+    required this.actualTimeRange,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              children: [
+                _TimingLine(
+                  icon: Icons.calendar_today_outlined,
+                  text: DateFormat('EEE, d MMMM yyyy').format(date),
+                ),
+                const SizedBox(height: 10),
+                _TimingLine(
+                  icon: Icons.schedule_outlined,
+                  text: '$bookedTimeRange  •  $durationLabel',
+                ),
+              ],
+            ),
+          ),
+          if (actualTimeRange != null && actualTimeRange!.isNotEmpty)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              decoration: const BoxDecoration(
+                color: Color(0xFFF0FDF7),
+                borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
+              ),
+              child: _TimingLine(
+                icon: Icons.play_circle_outline_rounded,
+                text: 'Actual service time: $actualTimeRange',
+                color: const Color(0xFF0F8A5F),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimingLine extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  const _TimingLine({
+    required this.icon,
+    required this.text,
+    this.color = const Color(0xFF475569),
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: color),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _BookingTotalCard extends StatelessWidget {
+  final double total;
+
+  const _BookingTotalCard({required this.total});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        children: [
+          const Text(
+            'Grand Total',
+            style: TextStyle(
+              fontSize: 13,
+              color: Color(0xFF475569),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  _moneyAmount(total),
+                  maxLines: 1,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    color: Color(0xFF0F8A5F),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PaymentReceiptCard extends StatelessWidget {
+  final String receiptNumber;
+  final String paymentMethod;
+  final double paidAmount;
+  final VoidCallback? onTap;
+
+  const _PaymentReceiptCard({
+    required this.receiptNumber,
+    required this.paymentMethod,
+    required this.paidAmount,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: context.appSurface,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: context.appBorder),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.receipt_long_outlined,
+                size: 25,
+                color: Color(0xFF475569),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Payment & Receipt',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF111827),
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Paid via ${_paymentMethodLabel(paymentMethod)}  •  ${_moneyAmount(paidAmount)}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: Color(0xFF64748B),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (receiptNumber.isNotEmpty) ...[
+                      const SizedBox(height: 2),
                       Text(
-                        group.customerPhone,
+                        'Receipt: $receiptNumber',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF6B7280),
+                          fontSize: 11.5,
+                          color: Color(0xFF64748B),
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],
-                  ),
+                  ],
+                ),
+              ),
+              if (onTap != null) ...[
+                const SizedBox(width: 8),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Color(0xFF94A3B8),
                 ),
               ],
-            ),
-            const SizedBox(height: 22),
-            _SummaryItem(
-              icon: Icons.groups_2_outlined,
-              label: 'Pax',
-              title: '${group.paxCount}',
-            ),
-            _SummaryItem(
-              icon: Icons.spa_outlined,
-              label: 'Services',
-              title: '${group.serviceItems.length} services',
-            ),
-            _SummaryItem(
-              icon: Icons.person_outline,
-              label: 'Staff',
-              title: group.therapistName,
-            ),
-            _SummaryItem(
-              icon: Icons.meeting_room_outlined,
-              label: 'Resources',
-              title: group.roomName,
-            ),
-            _SummaryItem(
-              icon: Icons.calendar_today_outlined,
-              label: 'Date',
-              title: DateFormat('EEEE, d MMMM yyyy').format(group.date),
-            ),
-            _SummaryItem(
-              icon: Icons.schedule_outlined,
-              label: 'Booked time',
-              title: group.primary.bookedTimeRange,
-              subtitle: group.primary.bufferAfterMinutes > 0
-                  ? group.primary.cleanupUntilLabel
-                  : null,
-            ),
-            if (group.primary.hasActualTiming)
-              _SummaryItem(
-                icon: Icons.play_circle_outline,
-                label: 'Actual service time',
-                title: group.primary.actualServiceTimeRange,
-                subtitle: 'Service duration: ${group.primary.durationLabel}',
-              ),
-            _SummaryItem(
-              icon: Icons.payments_outlined,
-              label: 'Price',
-              title: 'RM ${group.price.toStringAsFixed(0)}',
-            ),
-            if (group.hasPayment) ...[
-              _SummaryItem(
-                icon: Icons.receipt_long_outlined,
-                label: 'Receipt',
-                title: group.receiptNumber,
-              ),
-              _SummaryItem(
-                icon: Icons.verified_outlined,
-                label: 'Payment',
-                title:
-                    '${_paymentMethodLabel(group.paymentMethod)} - ${group.paymentStatus.toLowerCase() == 'paid' ? 'Paid' : group.paymentStatus}',
-                subtitle: 'RM ${group.paidAmount.toStringAsFixed(2)} paid',
-              ),
             ],
-            const SizedBox(height: 6),
-            const Text(
-              'Service Details',
-              style: TextStyle(
-                fontSize: 13,
-                color: Color(0xFF111827),
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-            const SizedBox(height: 10),
-            for (var index = 0; index < group.appointments.length; index++)
-              _GroupPaxDetailCard(
-                index: index,
-                appointment: group.appointments[index],
-                onEdit: () => onEditPax(group.appointments[index]),
-                onSwitch: group.appointments[index].isCancelled ||
-                        group.appointments[index].isNoShow ||
-                        group.appointments[index].isCompleted
-                    ? null
-                    : () => onSwitchPax(group.appointments[index]),
-              ),
-            const SizedBox(height: 12),
-            if (onComplete != null)
-              _PanelActionButton(
-                icon: group.hasPayment
-                    ? Icons.login_rounded
-                    : Icons.point_of_sale_outlined,
-                label: group.hasPayment
-                    ? 'Check-In'
-                    : 'Confirm Payment',
-                color: const Color(0xFF15803D),
-                onPressed: onComplete!,
-              ),
-            _PanelActionButton(
-              icon: Icons.edit_outlined,
-              label: 'Edit Appointment',
-              color: const Color(0xFFF59E0B),
-              onPressed: onEditGroup,
-            ),
-            if (onCancel != null)
-              _PanelActionButton(
-                icon: Icons.delete_outline,
-                label: 'Cancel Booking',
-                color: const Color(0xFFE53935),
-                onPressed: onCancel!,
-              ),
-          ],
+          ),
         ),
       ),
     );
@@ -6273,119 +7136,185 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
 class _GroupPaxDetailCard extends StatelessWidget {
   final int index;
   final _ScheduleAppointment appointment;
+  final Color accent;
   final VoidCallback onEdit;
   final VoidCallback? onSwitch;
 
   const _GroupPaxDetailCard({
     required this.index,
     required this.appointment,
+    required this.accent,
     required this.onEdit,
     required this.onSwitch,
   });
 
   @override
   Widget build(BuildContext context) {
+    final appointment = this.appointment;
+    final addOnTotal = appointment.addOnServiceItems.fold<double>(
+      0,
+      (sum, item) => sum + _readDouble(item['price']),
+    );
+    final serviceTotal = (appointment.price - addOnTotal)
+        .clamp(0, double.infinity)
+        .toDouble();
+    final serviceNames = appointment.serviceItems
+        .map((item) => item['name']?.toString() ?? '')
+        .where((name) => name.isNotEmpty)
+        .join(', ');
     return Container(
       width: double.infinity,
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(12),
+      margin: const EdgeInsets.only(bottom: 12),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
       ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Container(
-            width: 34,
-            height: 34,
-            alignment: Alignment.center,
-            decoration: BoxDecoration(
-              color: const Color(0xFFEFF6FF),
-              borderRadius: BorderRadius.circular(9),
-            ),
-            child: Text(
-              '${index + 1}',
-              style: const TextStyle(
-                color: Color(0xFF2563EB),
-                fontWeight: FontWeight.w900,
-              ),
-            ),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Pax ${index + 1} - ${appointment.customerName}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF111827),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  appointment.serviceName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF4B5563),
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                for (var therapistIndex = 0;
-                    therapistIndex < appointment.therapistNames.length;
-                    therapistIndex++)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 2),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEAF7F6),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
                     child: Text(
-                      '${appointment.therapistNames.length == 1 ? 'Therapist' : 'Therapist ${therapistIndex + 1}'}: ${appointment.therapistNames[therapistIndex]}',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      '${index + 1}',
                       style: const TextStyle(
-                        fontSize: 11,
-                        color: Color(0xFF6B7280),
-                        fontWeight: FontWeight.w600,
+                        color: Color(0xFF0F766E),
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
                       ),
                     ),
                   ),
-                const SizedBox(height: 2),
-                Text(
-                  '${appointment.roomName} - ${appointment.priceLabel} - ${appointment.cleanupUntilLabel}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF6B7280),
-                    fontWeight: FontWeight.w600,
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Guest ${index + 1} - ${appointment.customerName}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w900,
+                            color: context.appText,
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          serviceNames.isEmpty
+                              ? appointment.serviceName
+                              : serviceNames,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: context.appMuted,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                        const SizedBox(height: 7),
+                        Wrap(
+                          spacing: 10,
+                          runSpacing: 5,
+                          children: [
+                            _PaxMeta(
+                              icon: Icons.person_outline,
+                              text: appointment.therapistName,
+                            ),
+                            _PaxMeta(
+                              icon: Icons.meeting_room_outlined,
+                              text: appointment.roomName,
+                            ),
+                          ],
+                        ),
+                        if (appointment.addOnServiceItems.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          Text(
+                            '${appointment.addOnServiceItems.length} add-on${appointment.addOnServiceItems.length == 1 ? '' : 's'}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: accent,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
                   ),
+                  const SizedBox(width: 8),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (onSwitch != null) ...[
+                        _PaxHeaderAction(
+                          tooltip: 'Switch therapist',
+                          icon: Icons.swap_horiz_rounded,
+                          color: const Color(0xFF0F766E),
+                          onPressed: onSwitch!,
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      _PaxHeaderAction(
+                        tooltip: 'Edit guest services',
+                        icon: Icons.edit_outlined,
+                        color: const Color(0xFF6B7280),
+                        onPressed: onEdit,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+          ),
+          const Divider(height: 1, color: Color(0xFFE5E7EB)),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (appointment.addOnServiceItems.isNotEmpty)
+                  _AppointmentAddOnCard(
+                    items: appointment.addOnServiceItems,
+                  ),
+                if (appointment.addOnServiceItems.isNotEmpty)
+                  const SizedBox(height: 12),
+                const Text(
+                  'Pricing',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF0F8A5F),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _PaxPriceRow(
+                  label: 'Service total',
+                  amount: serviceTotal,
+                ),
+                if (addOnTotal > 0)
+                  _PaxPriceRow(
+                    label:
+                        'Add-ons (${appointment.addOnServiceItems.length})',
+                    amount: addOnTotal,
+                  ),
+                const Divider(height: 18, color: Color(0xFFE5E7EB)),
+                _PaxPriceRow(
+                  label: 'Total',
+                  amount: appointment.price,
+                  emphasized: true,
                 ),
               ],
             ),
-          ),
-          Column(
-            children: [
-              if (onSwitch != null)
-                IconButton(
-                  tooltip: 'Switch therapist',
-                  onPressed: onSwitch,
-                  icon: const Icon(Icons.swap_horiz_rounded, size: 18),
-                  color: const Color(0xFF1B6B72),
-                ),
-              IconButton(
-                tooltip: 'Edit pax',
-                onPressed: onEdit,
-                icon: const Icon(Icons.edit_outlined, size: 18),
-                color: const Color(0xFFF59E0B),
-              ),
-            ],
           ),
         ],
       ),
@@ -6393,7 +7322,191 @@ class _GroupPaxDetailCard extends StatelessWidget {
   }
 }
 
+class _PaxMeta extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _PaxMeta({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: const Color(0xFF64748B)),
+        const SizedBox(width: 4),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 170),
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11,
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _PaxPriceRow extends StatelessWidget {
+  final String label;
+  final double amount;
+  final bool emphasized;
+
+  const _PaxPriceRow({
+    required this.label,
+    required this.amount,
+    this.emphasized = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: emphasized ? 12.5 : 11.5,
+                color: emphasized
+                    ? const Color(0xFF111827)
+                    : const Color(0xFF64748B),
+                fontWeight: emphasized ? FontWeight.w900 : FontWeight.w600,
+              ),
+            ),
+          ),
+          Text(
+            _moneyAmount(amount),
+            style: TextStyle(
+              fontSize: emphasized ? 13 : 11.5,
+              color: emphasized
+                  ? const Color(0xFF0F8A5F)
+                  : const Color(0xFF475569),
+              fontWeight: emphasized ? FontWeight.w900 : FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PaxHeaderAction extends StatelessWidget {
+  final String tooltip;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onPressed;
+
+  const _PaxHeaderAction({
+    required this.tooltip,
+    required this.icon,
+    required this.color,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            width: 30,
+            height: 30,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: context.appBorder),
+            ),
+            child: Icon(icon, size: 17, color: color),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BookingCommentsCard extends StatelessWidget {
+  final String notes;
+
+  const _BookingCommentsCard({required this.notes});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.chat_bubble_outline, size: 16, color: Color(0xFF1B6B72)),
+            SizedBox(width: 7),
+            Text(
+              'Booking Comments',
+              style: TextStyle(
+                fontSize: 12,
+                color: Color(0xFF1B6B72),
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: const Color(0xFFF0F9F8),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFFCDE8E5)),
+          ),
+          child: Text(
+            notes.trim(),
+            style: const TextStyle(
+              fontSize: 13,
+              color: Color(0xFF374151),
+              height: 1.4,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 _AppointmentStatusStyle _statusColors(_ScheduleAppointment appointment) {
+  if (appointment.isCancelled) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFDC2626),
+      bg: Color(0xFFFEF2F2),
+      border: Color(0xFFFCA5A5),
+    );
+  }
+  if (appointment.isNoShow) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF64748B),
+      bg: Color(0xFFF8FAFC),
+      border: Color(0xFFCBD5E1),
+    );
+  }
+  if (appointment.isRefunded) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF6B7280),
+      bg: Color(0xFFF3F4F6),
+      border: Color(0xFFD1D5DB),
+    );
+  }
   return _statusColorsFor(
     appointment.isPending,
     appointment.isCompleted,
@@ -6405,6 +7518,27 @@ _AppointmentStatusStyle _statusColors(_ScheduleAppointment appointment) {
 }
 
 _AppointmentStatusStyle _statusColorsForGroup(_AppointmentGroup group) {
+  if (group.isCancelled) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFFDC2626),
+      bg: Color(0xFFFEF2F2),
+      border: Color(0xFFFCA5A5),
+    );
+  }
+  if (group.isNoShow) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF64748B),
+      bg: Color(0xFFF8FAFC),
+      border: Color(0xFFCBD5E1),
+    );
+  }
+  if (group.isRefunded) {
+    return const _AppointmentStatusStyle(
+      accent: Color(0xFF6B7280),
+      bg: Color(0xFFF3F4F6),
+      border: Color(0xFFD1D5DB),
+    );
+  }
   return _statusColorsFor(
     group.isPending,
     group.isCompleted,
@@ -6510,201 +7644,34 @@ class _AppointmentSummaryPanel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = _statusColors(appointment);
-    return Container(
-      padding: const EdgeInsets.all(22),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(compact ? 18 : 16),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x26000000),
-            blurRadius: 24,
-            offset: Offset(0, 10),
-          ),
-        ],
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                _StatusBadge(label: appointment.statusLabel, colors: colors),
-                const SizedBox(width: 8),
-                _PaymentBadge(paymentStatus: appointment.paymentStatus),
-                const Spacer(),
-                IconButton(onPressed: onClose, icon: const Icon(Icons.close)),
-              ],
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                CircleAvatar(
-                  radius: 28,
-                  backgroundColor: colors.accent.withValues(alpha: 0.78),
-                  child: Text(
-                    appointment.initials,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 20,
-                      fontWeight: FontWeight.w900,
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 14),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        appointment.customerName,
-                        style: const TextStyle(
-                          fontSize: 19,
-                          fontWeight: FontWeight.w900,
-                          color: Color(0xFF111827),
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        appointment.customerPhone,
-                        style: const TextStyle(
-                          fontSize: 13,
-                          color: Color(0xFF6B7280),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 22),
-            _SummaryItem(
-              icon: Icons.spa_outlined,
-              label: 'Service',
-              title: appointment.serviceName,
-              subtitle: appointment.serviceDescription,
-            ),
-            for (var therapistIndex = 0;
-                therapistIndex < appointment.therapistNames.length;
-                therapistIndex++)
-              _SummaryItem(
-                icon: Icons.person_outline,
-                label: appointment.therapistNames.length == 1
-                    ? 'Therapist'
-                    : 'Therapist ${therapistIndex + 1}',
-                title: appointment.therapistNames[therapistIndex],
-              ),
-            _SummaryItem(
-              icon: Icons.meeting_room_outlined,
-              label: 'Room / Zone',
-              title: appointment.roomName,
-            ),
-            _SummaryItem(
-              icon: Icons.calendar_today_outlined,
-              label: 'Date',
-              title: DateFormat('EEEE, d MMMM yyyy').format(appointment.date),
-            ),
-            _SummaryItem(
-              icon: Icons.schedule_outlined,
-              label: 'Booked time',
-              title: appointment.bookedTimeRange,
-              subtitle: appointment.bufferAfterMinutes > 0
-                  ? appointment.cleanupUntilLabel
-                  : null,
-            ),
-            if (appointment.hasActualTiming)
-              _SummaryItem(
-                icon: Icons.play_circle_outline,
-                label: 'Actual service time',
-                title: appointment.actualServiceTimeRange,
-                subtitle: 'Service duration: ${appointment.durationLabel}',
-              ),
-            _SummaryItem(
-              icon: Icons.payments_outlined,
-              label: 'Price',
-              title: 'RM ${appointment.price.toStringAsFixed(0)}',
-            ),
-            if (appointment.hasPayment) ...[
-              _SummaryItem(
-                icon: Icons.receipt_long_outlined,
-                label: 'Receipt',
-                title: appointment.receiptNumber,
-              ),
-              _SummaryItem(
-                icon: Icons.verified_outlined,
-                label: 'Payment',
-                title:
-                    '${_paymentMethodLabel(appointment.paymentMethod)} - ${appointment.paymentStatus.toLowerCase() == 'paid' ? 'Paid' : appointment.paymentStatus}',
-                subtitle:
-                    'RM ${appointment.paidAmount.toStringAsFixed(2)} paid',
-              ),
-            ],
-            if (appointment.notes.trim().isNotEmpty) ...[
-              const SizedBox(height: 4),
-              const Text(
-                'Notes',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF6B7280),
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(14),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF3F4F6),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  appointment.notes,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF374151),
-                    height: 1.4,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
-            const SizedBox(height: 18),
-            if (onSwitchTherapist != null)
-              _PanelActionButton(
-                icon: Icons.swap_horiz_rounded,
-                label: 'Switch Therapist',
-                color: const Color(0xFF1B6B72),
-                onPressed: onSwitchTherapist!,
-              ),
-            if (onComplete != null)
-              _PanelActionButton(
-                icon: appointment.hasPayment
-                    ? Icons.login_rounded
-                    : Icons.point_of_sale_outlined,
-                label: appointment.hasPayment
-                    ? 'Check-In'
-                    : 'Confirm Payment',
-                color: const Color(0xFF15803D),
-                onPressed: onComplete!,
-              ),
-            _PanelActionButton(
-              icon: Icons.edit_outlined,
-              label: 'Edit Appointment',
-              color: const Color(0xFFF59E0B),
-              onPressed: onEdit,
-            ),
-            if (onCancel != null)
-              _PanelActionButton(
-                icon: Icons.delete_outline,
-                label: 'Cancel Booking',
-                color: const Color(0xFFE53935),
-                onPressed: onCancel!,
-              ),
-          ],
-        ),
-      ),
+    return _AppointmentDetailContent(
+      appointments: [appointment],
+      compact: compact,
+      colors: colors,
+      customerName: appointment.customerName,
+      customerPhone: appointment.customerPhone,
+      initials: appointment.initials,
+      statusLabel: appointment.statusLabel,
+      paymentStatus: appointment.paymentStatus,
+      date: appointment.date,
+      bookedTimeRange: appointment.bookedTimeRange,
+      actualTimeRange: appointment.hasActualTiming
+          ? appointment.actualServiceTimeRange
+          : null,
+      durationLabel: appointment.durationLabel,
+      total: appointment.price,
+      paidAmount: appointment.paidAmount,
+      receiptNumber: appointment.receiptNumber,
+      paymentMethod: appointment.paymentMethod,
+      notes: appointment.notes,
+      onClose: onClose,
+      onEdit: onEdit,
+      onEditPax: (_) => onEdit(),
+      onSwitchPax: onSwitchTherapist == null
+          ? null
+          : (_) => onSwitchTherapist!(),
+      onComplete: onComplete,
+      onCancel: onCancel,
     );
   }
 }
@@ -6849,104 +7816,79 @@ class _TimelineStatusBadge extends StatelessWidget {
   }
 }
 
-class _SummaryItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String title;
-  final String? subtitle;
+class _AppointmentAddOnCard extends StatelessWidget {
+  final List<Map<String, dynamic>> items;
 
-  const _SummaryItem({
-    required this.icon,
-    required this.label,
-    required this.title,
-    this.subtitle,
-  });
+  const _AppointmentAddOnCard({required this.items});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Icon(icon, size: 20, color: const Color(0xFF4B5563)),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF6B7280),
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFF111827),
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle!,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: Color(0xFF6B7280),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ],
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text(
+          'Add-on Services',
+          style: TextStyle(
+            fontSize: 11,
+            color: Color(0xFFB45309),
+            fontWeight: FontWeight.w900,
           ),
+        ),
+        const SizedBox(height: 7),
+        for (var index = 0; index < items.length; index++) ...[
+          _AddOnServiceRow(item: items[index]),
+          if (index != items.length - 1) const SizedBox(height: 6),
         ],
-      ),
+        const Padding(
+          padding: EdgeInsets.only(top: 11),
+          child: Divider(height: 1, color: Color(0xFFE5E7EB)),
+        ),
+      ],
     );
   }
 }
 
-class _PanelActionButton extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final Color color;
-  final VoidCallback onPressed;
+class _AddOnServiceRow extends StatelessWidget {
+  final Map<String, dynamic> item;
 
-  const _PanelActionButton({
-    required this.icon,
-    required this.label,
-    required this.color,
-    required this.onPressed,
-  });
+  const _AddOnServiceRow({required this.item});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
-      child: SizedBox(
-        width: double.infinity,
-        height: 44,
-        child: OutlinedButton.icon(
-          onPressed: onPressed,
-          icon: Icon(icon, size: 18),
-          label: Text(label),
-          style: OutlinedButton.styleFrom(
-            backgroundColor: Colors.white,
-            foregroundColor: color,
-            side: BorderSide(color: color.withValues(alpha: 0.72)),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-            textStyle: const TextStyle(fontWeight: FontWeight.w900),
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(top: 5),
+          child: Icon(
+            Icons.circle,
+            size: 4,
+            color: Color(0xFF64748B),
           ),
         ),
-      ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            item['name']?.toString() ?? 'Service add-on',
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11.5,
+              color: Color(0xFF475569),
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        Text(
+          _moneyAmount(_readDouble(item['price'])),
+          style: const TextStyle(
+            fontSize: 11.5,
+            color: Color(0xFF475569),
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -6973,16 +7915,22 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
-  PriceBreakdown get _priceBreakdown =>
+  PriceBreakdown get _visitPriceBreakdown =>
       _businessSettings.priceBreakdown(widget.appointment.price);
 
-  double get _servicePrice => _priceBreakdown.servicePrice;
-  double get _sstAmount => _priceBreakdown.sstAmount;
-  double get _totalAmount => _priceBreakdown.totalAmount;
+  bool get _hasPriorPayment => widget.appointment.hasPayment;
+  double get _addOnSubtotal => widget.appointment.unpaidAddOnServiceItems.fold(
+    0,
+    (total, item) => total + _readDouble(item['price']),
+  );
+  PriceBreakdown get _chargePriceBreakdown => _businessSettings.priceBreakdown(
+    _hasPriorPayment ? _addOnSubtotal : widget.appointment.price,
+  );
+  double get _amountDue => _chargePriceBreakdown.totalAmount;
 
   bool get _canConfirm {
-    if (_paymentMethod == null || _saving) return false;
-    return true;
+    if (_saving) return false;
+    return _amountDue <= 0.005 || _paymentMethod != null;
   }
 
   bool get _hasMemberDetails {
@@ -7072,60 +8020,93 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
         startedAt: serviceStartedAt,
       );
 
-      await _appointmentRepository.checkoutAppointment(
-        appointmentId: widget.appointment.id,
-        newCustomerValues: shouldSaveCustomerProfile
-            ? {
-                'name': customerName,
-                'phone': _phone.text.trim(),
-                'gender': '',
-                'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                'notes': 'Created from appointment checkout',
-              }
-            : null,
-        appointmentUpdates: {
-          'customerId': customerId,
-          ...widget.appointment.serviceStartUpdates(
+      if (_amountDue <= 0.005) {
+        await _appointmentRepository.startAppointment(
+          widget.appointment.id,
+          startedAt: serviceStartedAt,
+          expectedEndAt:
+              lateStart.adjustedEndAt ?? widget.appointment._serviceEndDateTime,
+          allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
+        );
+      } else if (_hasPriorPayment) {
+        await _appointmentRepository.checkInPaidAppointmentWithAddOn(
+          appointmentId: widget.appointment.id,
+          addOnServiceItems: widget.appointment.unpaidAddOnServiceItems,
+          appointmentUpdates: widget.appointment.serviceStartUpdates(
             serviceStartedAt,
             adjustedEndAt: lateStart.adjustedEndAt,
             allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
           ),
-        },
-        transactionValues: {
-          'customerId': customerId,
-          'customerName': customerName,
-          'customerPhone': _phone.text.trim().isNotEmpty
-              ? _phone.text.trim()
-              : widget.appointment.customerPhone,
-          if (counterStaff != null) ...{
-            'counterStaffId': counterStaff['id'],
-            'counterStaffName': counterStaff['name'],
+          transactionValues: {
+            if (counterStaff != null) ...{
+              'counterStaffId': counterStaff['id'],
+              'counterStaffName': counterStaff['name'],
+            },
+            'servicePrice': _chargePriceBreakdown.servicePrice,
+            'sstAmount': _chargePriceBreakdown.sstAmount,
+            'totalAmount': _amountDue,
+            'paymentMethod': _paymentMethod,
+            'receiptNumber': _receiptNumber,
           },
-          'servicePrice': _servicePrice,
-          'sstAmount': _sstAmount,
-          'totalAmount': _totalAmount,
-          'source': 'appointment',
-          'paymentMethod': _paymentMethod,
-          'paymentStatus': 'paid',
-          'receiptNumber': _receiptNumber,
-        },
-      );
+        );
+      } else {
+        await _appointmentRepository.checkoutAppointment(
+          appointmentId: widget.appointment.id,
+          newCustomerValues: shouldSaveCustomerProfile
+              ? {
+                  'name': customerName,
+                  'phone': _phone.text.trim(),
+                  'gender': '',
+                  'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+                  'notes': 'Created from appointment checkout',
+                }
+              : null,
+          appointmentUpdates: {
+            'customerId': customerId,
+            ...widget.appointment.serviceStartUpdates(
+              serviceStartedAt,
+              adjustedEndAt: lateStart.adjustedEndAt,
+              allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
+            ),
+          },
+          transactionValues: {
+            'customerId': customerId,
+            'customerName': customerName,
+            'customerPhone': _phone.text.trim().isNotEmpty
+                ? _phone.text.trim()
+                : widget.appointment.customerPhone,
+            if (counterStaff != null) ...{
+              'counterStaffId': counterStaff['id'],
+              'counterStaffName': counterStaff['name'],
+            },
+            'servicePrice': _chargePriceBreakdown.servicePrice,
+            'sstAmount': _chargePriceBreakdown.sstAmount,
+            'totalAmount': _amountDue,
+            'source': 'appointment',
+            'paymentMethod': _paymentMethod,
+            'paymentStatus': 'paid',
+            'receiptNumber': _receiptNumber,
+          },
+        );
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Payment recorded - service is now in progress'),
+          content: Text('Customer checked in - service is now in progress'),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
-      Navigator.pop(context, true);
+      Navigator.pop(context, _CheckInSheetResult.completed);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Unable to confirm booking: ${friendlyErrorMessage(e)}'),
+          content: Text(
+            'Unable to confirm booking: ${friendlyErrorMessage(e)}',
+          ),
           backgroundColor: const Color(0xFFE53935),
           behavior: SnackBarBehavior.floating,
         ),
@@ -7164,7 +8145,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'Confirm Payment',
+                              'Check In Appointment',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w900,
@@ -7173,7 +8154,9 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                             ),
                             const SizedBox(height: 3),
                             Text(
-                              '#$_receiptNumber',
+                              _amountDue > 0.005
+                                  ? '#$_receiptNumber'
+                                  : 'No payment due',
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w700,
@@ -7186,7 +8169,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                       IconButton(
                         onPressed: _saving
                             ? null
-                            : () => Navigator.pop(context, false),
+                            : () => Navigator.pop(context),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -7239,79 +8222,104 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                   ],
                   const SizedBox(height: 16),
                   _CheckoutRecapCard(appointment: widget.appointment),
-                  const SizedBox(height: 16),
-                  _CheckoutPriceCard(
-                    servicePrice: _servicePrice,
-                    sstAmount: _sstAmount,
-                    totalAmount: _totalAmount,
-                    sstLabel: _businessSettings.sstLabel,
-                  ),
-                  const SizedBox(height: 18),
-                  const Text(
-                    'Payment Method',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1A1A2E),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _saving
+                          ? null
+                          : () => Navigator.pop(
+                              context,
+                              _CheckInSheetResult.editServices,
+                            ),
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text('Add Services'),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final compact = constraints.maxWidth < 460;
-                      final width = compact
-                          ? constraints.maxWidth
-                          : (constraints.maxWidth - 36) / 4;
-                      return Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.payments_outlined,
-                              label: 'Cash',
-                              isSelected: _paymentMethod == 'cash',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'cash'),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.qr_code_2_outlined,
-                              label: 'QR Code',
-                              isSelected: _paymentMethod == 'qr_code',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'qr_code'),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.credit_card_outlined,
-                              label: 'Credit Card',
-                              isSelected: _paymentMethod == 'credit_card',
-                              onTap: () => setState(
-                                () => _paymentMethod = 'credit_card',
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.credit_card,
-                              label: 'Debit Card',
-                              isSelected: _paymentMethod == 'debit_card',
-                              onTap: () => setState(
-                                () => _paymentMethod = 'debit_card',
-                              ),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
+                  const SizedBox(height: 16),
+                  _CheckoutPriceCard(
+                    servicePrice: _hasPriorPayment
+                        ? _chargePriceBreakdown.servicePrice
+                        : _visitPriceBreakdown.servicePrice,
+                    sstAmount: _hasPriorPayment
+                        ? _chargePriceBreakdown.sstAmount
+                        : _visitPriceBreakdown.sstAmount,
+                    totalAmount: _amountDue,
+                    alreadyPaid: widget.appointment.paidAmount,
+                    dueNow: _amountDue,
+                    sstLabel: _businessSettings.sstLabel,
+                    serviceLabel: _hasPriorPayment
+                        ? 'Unpaid add-ons'
+                        : 'Services',
                   ),
+                  if (_amountDue > 0.005) ...[
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Payment Method',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final compact = constraints.maxWidth < 460;
+                        final width = compact
+                            ? constraints.maxWidth
+                            : (constraints.maxWidth - 36) / 4;
+                        return Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.payments_outlined,
+                                label: 'Cash',
+                                isSelected: _paymentMethod == 'cash',
+                                onTap: () =>
+                                    setState(() => _paymentMethod = 'cash'),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.qr_code_2_outlined,
+                                label: 'QR Code',
+                                isSelected: _paymentMethod == 'qr_code',
+                                onTap: () =>
+                                    setState(() => _paymentMethod = 'qr_code'),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.credit_card_outlined,
+                                label: 'Credit Card',
+                                isSelected: _paymentMethod == 'credit_card',
+                                onTap: () => setState(
+                                  () => _paymentMethod = 'credit_card',
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.credit_card,
+                                label: 'Debit Card',
+                                isSelected: _paymentMethod == 'debit_card',
+                                onTap: () => setState(
+                                  () => _paymentMethod = 'debit_card',
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
                   const SizedBox(height: 22),
                   SizedBox(
                     width: double.infinity,
@@ -7328,7 +8336,11 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                               ),
                             )
                           : const Icon(Icons.check, size: 18),
-                      label: const Text('Confirm Payment & Start Service'),
+                      label: Text(
+                        _amountDue > 0.005
+                            ? 'Collect ${_moneyAmount(_amountDue)} & Check In'
+                            : 'Confirm Check In',
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
                         disabledBackgroundColor: const Color(0xFFBDBDBD),
@@ -7336,6 +8348,222 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                           borderRadius: BorderRadius.circular(10),
                         ),
                         textStyle: const TextStyle(fontWeight: FontWeight.w900),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AppointmentAddOnPaymentSheet extends StatefulWidget {
+  final _AppointmentGroup group;
+
+  const _AppointmentAddOnPaymentSheet({required this.group});
+
+  @override
+  State<_AppointmentAddOnPaymentSheet> createState() =>
+      _AppointmentAddOnPaymentSheetState();
+}
+
+class _AppointmentAddOnPaymentSheetState
+    extends State<_AppointmentAddOnPaymentSheet> {
+  final _appointmentRepository = AppointmentRepository();
+  final _businessSettingsRepository = BusinessSettingsRepository();
+  final _commissionRepository = CommissionRepository();
+  late final String _receiptNumber;
+  BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
+  String? _paymentMethod;
+  bool _saving = false;
+
+  double get _subtotal => widget.group.unpaidAddOnServiceItems.fold(
+    0,
+    (total, item) => total + _readDouble(item['price']),
+  );
+  PriceBreakdown get _breakdown =>
+      _businessSettings.priceBreakdown(_subtotal);
+
+  @override
+  void initState() {
+    super.initState();
+    _receiptNumber = _generateReceiptNumber();
+    _loadBusinessSettings();
+  }
+
+  Future<void> _loadBusinessSettings() async {
+    try {
+      final settings = await _businessSettingsRepository.getActiveSettings();
+      if (mounted) setState(() => _businessSettings = settings);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _businessSettings = BusinessRuleSettings.defaults());
+      }
+    }
+  }
+
+  Future<void> _collectPayment() async {
+    if (_saving || _paymentMethod == null || _breakdown.totalAmount <= 0.005) {
+      return;
+    }
+    setState(() => _saving = true);
+    try {
+      final counterStaff = await _commissionRepository
+          .getAvailableCounterStaff();
+      final transactionValues = <String, dynamic>{
+        if (counterStaff != null) ...{
+          'counterStaffId': counterStaff['id'],
+          'counterStaffName': counterStaff['name'],
+        },
+        'servicePrice': _breakdown.servicePrice,
+        'sstAmount': _breakdown.sstAmount,
+        'totalAmount': _breakdown.totalAmount,
+        'paymentMethod': _paymentMethod,
+        'receiptNumber': _receiptNumber,
+      };
+      if (widget.group.isGroup) {
+        await _appointmentRepository.payAppointmentGroupAddOns(
+          appointmentGroupId: widget.group.appointmentGroupId,
+          appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
+          addOnItemsByAppointment: {
+            for (final appointment in widget.group.appointments)
+              appointment.id: [
+                for (final item in appointment.unpaidAddOnServiceItems)
+                  {...item, 'appointmentId': appointment.id},
+              ],
+          },
+          transactionValues: transactionValues,
+        );
+      } else {
+        await _appointmentRepository.payAppointmentAddOns(
+          appointmentId: widget.group.primary.id,
+          addOnServiceItems: widget.group.primary.unpaidAddOnServiceItems,
+          transactionValues: transactionValues,
+        );
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Add-on payment recorded'),
+          backgroundColor: Color(0xFF1B6B72),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      Navigator.pop(context, true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to record payment: ${friendlyErrorMessage(e)}'),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.of(context).viewInsets.bottom;
+    return SafeArea(
+      top: false,
+      child: Align(
+        alignment: Alignment.bottomCenter,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxWidth: 620,
+            maxHeight: MediaQuery.of(context).size.height * 0.92,
+          ),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 12),
+            padding: EdgeInsets.fromLTRB(20, 18, 20, bottomInset + 20),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Expanded(
+                        child: Text(
+                          'Collect Add-on Payment',
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF111827),
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        onPressed: _saving ? null : () => Navigator.pop(context),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
+                  ),
+                  Text(
+                    '#$_receiptNumber',
+                    style: const TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFF6B7280),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _GroupCheckoutRecapCard(group: widget.group),
+                  const SizedBox(height: 12),
+                  _CheckoutPriceCard(
+                    servicePrice: _breakdown.servicePrice,
+                    sstAmount: _breakdown.sstAmount,
+                    totalAmount: _breakdown.totalAmount,
+                    alreadyPaid: widget.group.paidAmount,
+                    dueNow: _breakdown.totalAmount,
+                    sstLabel: _businessSettings.sstLabel,
+                    serviceLabel: 'Unpaid add-ons',
+                  ),
+                  const SizedBox(height: 18),
+                  const Text(
+                    'Payment Method',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w900,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  _CheckoutPaymentMethodGrid(
+                    selected: _paymentMethod,
+                    onSelected: (method) =>
+                        setState(() => _paymentMethod = method),
+                  ),
+                  const SizedBox(height: 22),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: FilledButton.icon(
+                      onPressed: !_saving && _paymentMethod != null
+                          ? _collectPayment
+                          : null,
+                      icon: _saving
+                          ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Icon(Icons.payments_outlined, size: 18),
+                      label: Text(
+                        'Collect ${_moneyAmount(_breakdown.totalAmount)}',
                       ),
                     ),
                   ),
@@ -7372,14 +8600,21 @@ class _AppointmentGroupCheckoutSheetState
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
-  PriceBreakdown get _priceBreakdown =>
+  PriceBreakdown get _visitPriceBreakdown =>
       _businessSettings.priceBreakdown(widget.group.price);
 
-  double get _servicePrice => _priceBreakdown.servicePrice;
-  double get _sstAmount => _priceBreakdown.sstAmount;
-  double get _totalAmount => _priceBreakdown.totalAmount;
+  bool get _hasPriorPayment => widget.group.hasPayment;
+  double get _addOnSubtotal => widget.group.unpaidAddOnServiceItems.fold(
+    0,
+    (total, item) => total + _readDouble(item['price']),
+  );
+  PriceBreakdown get _chargePriceBreakdown => _businessSettings.priceBreakdown(
+    _hasPriorPayment ? _addOnSubtotal : widget.group.price,
+  );
+  double get _amountDue => _chargePriceBreakdown.totalAmount;
 
-  bool get _canConfirm => _paymentMethod != null && !_saving;
+  bool get _canConfirm =>
+      !_saving && (_amountDue <= 0.005 || _paymentMethod != null);
 
   bool get _hasMemberDetails {
     final name = _name.text.trim();
@@ -7471,62 +8706,116 @@ class _AppointmentGroupCheckoutSheetState
         if (!mounted) return;
       }
 
-      await _appointmentRepository.checkoutAppointmentGroup(
-        appointmentGroupId: widget.group.appointmentGroupId,
-        appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
-        newCustomerValues: shouldSaveCustomerProfile
-            ? {
-                'name': customerName,
-                'phone': _phone.text.trim(),
-                'gender': '',
-                'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                'notes': 'Created from group appointment checkout',
-              }
-            : null,
-        appointmentUpdates: {'customerId': customerId},
-        appointmentUpdatesById: {
-          for (final appointment in widget.group.appointments)
-            appointment.id: appointment.serviceStartUpdates(
-              serviceStartedAt,
-              adjustedEndAt:
-                  lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
-              allowLateExtensionOverlap:
+      if (_amountDue <= 0.005) {
+        await _appointmentRepository.startAppointmentGroup(
+          widget.group.appointmentGroupId,
+          widget.group.appointments.map((appointment) => appointment.id),
+          startedAt: serviceStartedAt,
+          expectedEndAtByAppointment: {
+            for (final appointment in widget.group.appointments)
+              appointment.id:
+                  lateStartByAppointmentId[appointment.id]?.adjustedEndAt ??
+                  appointment._serviceEndDateTime,
+          },
+          allowLateExtensionOverlapByAppointment: {
+            for (final appointment in widget.group.appointments)
+              appointment.id:
                   lateStartByAppointmentId[appointment.id]
                       ?.allowLateExtensionOverlap ??
                   false,
-            ),
-        },
-        transactionValues: {
-          'customerId': customerId,
-          'customerName': customerName,
-          'customerPhone': _phone.text.trim().isNotEmpty
-              ? _phone.text.trim()
-              : widget.group.customerPhone,
-          if (counterStaff != null) ...{
-            'counterStaffId': counterStaff['id'],
-            'counterStaffName': counterStaff['name'],
           },
-          'servicePrice': _servicePrice,
-          'sstAmount': _sstAmount,
-          'totalAmount': _totalAmount,
-          'source': 'appointment',
-          'paymentMethod': _paymentMethod,
-          'paymentStatus': 'paid',
-          'receiptNumber': _receiptNumber,
-        },
-      );
+        );
+      } else if (_hasPriorPayment) {
+        await _appointmentRepository.checkInPaidAppointmentGroupWithAddOn(
+          appointmentGroupId: widget.group.appointmentGroupId,
+          appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
+          addOnItemsByAppointment: {
+            for (final appointment in widget.group.appointments)
+              appointment.id: [
+                for (final item in appointment.unpaidAddOnServiceItems)
+                  {...item, 'appointmentId': appointment.id},
+              ],
+          },
+          appointmentUpdatesById: {
+            for (final appointment in widget.group.appointments)
+              appointment.id: appointment.serviceStartUpdates(
+                serviceStartedAt,
+                adjustedEndAt:
+                    lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
+                allowLateExtensionOverlap:
+                    lateStartByAppointmentId[appointment.id]
+                        ?.allowLateExtensionOverlap ??
+                    false,
+              ),
+          },
+          transactionValues: {
+            if (counterStaff != null) ...{
+              'counterStaffId': counterStaff['id'],
+              'counterStaffName': counterStaff['name'],
+            },
+            'servicePrice': _chargePriceBreakdown.servicePrice,
+            'sstAmount': _chargePriceBreakdown.sstAmount,
+            'totalAmount': _amountDue,
+            'paymentMethod': _paymentMethod,
+            'receiptNumber': _receiptNumber,
+          },
+        );
+      } else {
+        await _appointmentRepository.checkoutAppointmentGroup(
+          appointmentGroupId: widget.group.appointmentGroupId,
+          appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
+          newCustomerValues: shouldSaveCustomerProfile
+              ? {
+                  'name': customerName,
+                  'phone': _phone.text.trim(),
+                  'gender': '',
+                  'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
+                  'notes': 'Created from group appointment checkout',
+                }
+              : null,
+          appointmentUpdates: {'customerId': customerId},
+          appointmentUpdatesById: {
+            for (final appointment in widget.group.appointments)
+              appointment.id: appointment.serviceStartUpdates(
+                serviceStartedAt,
+                adjustedEndAt:
+                    lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
+                allowLateExtensionOverlap:
+                    lateStartByAppointmentId[appointment.id]
+                        ?.allowLateExtensionOverlap ??
+                    false,
+              ),
+          },
+          transactionValues: {
+            'customerId': customerId,
+            'customerName': customerName,
+            'customerPhone': _phone.text.trim().isNotEmpty
+                ? _phone.text.trim()
+                : widget.group.customerPhone,
+            if (counterStaff != null) ...{
+              'counterStaffId': counterStaff['id'],
+              'counterStaffName': counterStaff['name'],
+            },
+            'servicePrice': _chargePriceBreakdown.servicePrice,
+            'sstAmount': _chargePriceBreakdown.sstAmount,
+            'totalAmount': _amountDue,
+            'source': 'appointment',
+            'paymentMethod': _paymentMethod,
+            'paymentStatus': 'paid',
+            'receiptNumber': _receiptNumber,
+          },
+        );
+      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text(
-            'Group payment recorded - services are now in progress',
-          ),
+          content: Text('Customers checked in - services are now in progress'),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
-      Navigator.pop(context, true);
+      Navigator.pop(context, _CheckInSheetResult.completed);
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
@@ -7573,7 +8862,7 @@ class _AppointmentGroupCheckoutSheetState
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'Confirm Group Payment',
+                              'Check In Group',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w900,
@@ -7582,7 +8871,9 @@ class _AppointmentGroupCheckoutSheetState
                             ),
                             const SizedBox(height: 3),
                             Text(
-                              '#$_receiptNumber',
+                              _amountDue > 0.005
+                                  ? '#$_receiptNumber'
+                                  : 'No payment due',
                               style: const TextStyle(
                                 fontSize: 12,
                                 fontWeight: FontWeight.w700,
@@ -7595,7 +8886,7 @@ class _AppointmentGroupCheckoutSheetState
                       IconButton(
                         onPressed: _saving
                             ? null
-                            : () => Navigator.pop(context, false),
+                            : () => Navigator.pop(context),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -7648,79 +8939,104 @@ class _AppointmentGroupCheckoutSheetState
                   ],
                   const SizedBox(height: 16),
                   _GroupCheckoutRecapCard(group: widget.group),
-                  const SizedBox(height: 16),
-                  _CheckoutPriceCard(
-                    servicePrice: _servicePrice,
-                    sstAmount: _sstAmount,
-                    totalAmount: _totalAmount,
-                    sstLabel: _businessSettings.sstLabel,
-                  ),
-                  const SizedBox(height: 18),
-                  const Text(
-                    'Payment Method',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1A1A2E),
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _saving
+                          ? null
+                          : () => Navigator.pop(
+                              context,
+                              _CheckInSheetResult.editServices,
+                            ),
+                      icon: const Icon(Icons.add_rounded),
+                      label: const Text('Add Services'),
                     ),
                   ),
-                  const SizedBox(height: 12),
-                  LayoutBuilder(
-                    builder: (context, constraints) {
-                      final compact = constraints.maxWidth < 460;
-                      final width = compact
-                          ? constraints.maxWidth
-                          : (constraints.maxWidth - 36) / 4;
-                      return Wrap(
-                        spacing: 12,
-                        runSpacing: 12,
-                        children: [
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.payments_outlined,
-                              label: 'Cash',
-                              isSelected: _paymentMethod == 'cash',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'cash'),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.qr_code_2_outlined,
-                              label: 'QR Code',
-                              isSelected: _paymentMethod == 'qr_code',
-                              onTap: () =>
-                                  setState(() => _paymentMethod = 'qr_code'),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.credit_card_outlined,
-                              label: 'Credit Card',
-                              isSelected: _paymentMethod == 'credit_card',
-                              onTap: () => setState(
-                                () => _paymentMethod = 'credit_card',
-                              ),
-                            ),
-                          ),
-                          SizedBox(
-                            width: width,
-                            child: _CheckoutPaymentMethodCard(
-                              icon: Icons.credit_card,
-                              label: 'Debit Card',
-                              isSelected: _paymentMethod == 'debit_card',
-                              onTap: () => setState(
-                                () => _paymentMethod = 'debit_card',
-                              ),
-                            ),
-                          ),
-                        ],
-                      );
-                    },
+                  const SizedBox(height: 16),
+                  _CheckoutPriceCard(
+                    servicePrice: _hasPriorPayment
+                        ? _chargePriceBreakdown.servicePrice
+                        : _visitPriceBreakdown.servicePrice,
+                    sstAmount: _hasPriorPayment
+                        ? _chargePriceBreakdown.sstAmount
+                        : _visitPriceBreakdown.sstAmount,
+                    totalAmount: _amountDue,
+                    alreadyPaid: widget.group.paidAmount,
+                    dueNow: _amountDue,
+                    sstLabel: _businessSettings.sstLabel,
+                    serviceLabel: _hasPriorPayment
+                        ? 'Unpaid add-ons'
+                        : 'Services',
                   ),
+                  if (_amountDue > 0.005) ...[
+                    const SizedBox(height: 18),
+                    const Text(
+                      'Payment Method',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w900,
+                        color: Color(0xFF1A1A2E),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    LayoutBuilder(
+                      builder: (context, constraints) {
+                        final compact = constraints.maxWidth < 460;
+                        final width = compact
+                            ? constraints.maxWidth
+                            : (constraints.maxWidth - 36) / 4;
+                        return Wrap(
+                          spacing: 12,
+                          runSpacing: 12,
+                          children: [
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.payments_outlined,
+                                label: 'Cash',
+                                isSelected: _paymentMethod == 'cash',
+                                onTap: () =>
+                                    setState(() => _paymentMethod = 'cash'),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.qr_code_2_outlined,
+                                label: 'QR Code',
+                                isSelected: _paymentMethod == 'qr_code',
+                                onTap: () =>
+                                    setState(() => _paymentMethod = 'qr_code'),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.credit_card_outlined,
+                                label: 'Credit Card',
+                                isSelected: _paymentMethod == 'credit_card',
+                                onTap: () => setState(
+                                  () => _paymentMethod = 'credit_card',
+                                ),
+                              ),
+                            ),
+                            SizedBox(
+                              width: width,
+                              child: _CheckoutPaymentMethodCard(
+                                icon: Icons.credit_card,
+                                label: 'Debit Card',
+                                isSelected: _paymentMethod == 'debit_card',
+                                onTap: () => setState(
+                                  () => _paymentMethod = 'debit_card',
+                                ),
+                              ),
+                            ),
+                          ],
+                        );
+                      },
+                    ),
+                  ],
                   const SizedBox(height: 22),
                   SizedBox(
                     width: double.infinity,
@@ -7737,7 +9053,11 @@ class _AppointmentGroupCheckoutSheetState
                               ),
                             )
                           : const Icon(Icons.check, size: 18),
-                      label: const Text('Confirm Payment & Start Services'),
+                      label: Text(
+                        _amountDue > 0.005
+                            ? 'Collect ${_moneyAmount(_amountDue)} & Check In'
+                            : 'Confirm Check In',
+                      ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
                         disabledBackgroundColor: const Color(0xFFBDBDBD),
@@ -7904,59 +9224,79 @@ class _GroupCheckoutPaxRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
+    final bookedIds = appointment.bookedServiceItems.map(serviceItemId).toSet();
+    final addOnStatusById = {
+      for (final item in appointment.addOnServiceItems)
+        serviceItemId(item): item['paymentStatus']?.toString() ?? 'unpaid',
+    };
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
-          'Pax ${index + 1}',
+          'Pax ${index + 1} - ${appointment.customerName}',
           style: const TextStyle(
             fontSize: 12,
             color: Color(0xFF2563EB),
             fontWeight: FontWeight.w900,
           ),
         ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '${appointment.customerName} - ${appointment.serviceName}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Color(0xFF111827),
-                  fontWeight: FontWeight.w800,
+        const SizedBox(height: 6),
+        for (final item in appointment.serviceItems)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 5),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        item['name']?.toString() ?? 'Service',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Color(0xFF111827),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      Text(
+                        bookedIds.contains(serviceItemId(item))
+                            ? 'Original online booking'
+                            : addOnStatusById[serviceItemId(item)] == 'paid'
+                            ? 'Add-on - Paid'
+                            : 'Add-on - Payment due',
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: bookedIds.contains(serviceItemId(item))
+                              ? const Color(0xFF2563EB)
+                              : addOnStatusById[serviceItemId(item)] == 'paid'
+                              ? const Color(0xFF15803D)
+                              : const Color(0xFFB45309),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                '${appointment.therapistName} - ${appointment.roomName}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                appointment.bufferAfterMinutes > 0
-                    ? '${appointment.durationMinutes} min service + ${appointment.bufferAfterMinutes} min cleanup'
-                    : '${appointment.durationMinutes} min service',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
-              ),
-            ],
+                Text(
+                  _moneyAmount(_readDouble(item['price'])),
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF111827),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
           ),
-        ),
-        const SizedBox(width: 8),
         Text(
-          appointment.priceLabel,
-          style: const TextStyle(
-            fontSize: 12,
-            color: Color(0xFF111827),
-            fontWeight: FontWeight.w900,
-          ),
+          '${appointment.therapistName} - ${appointment.roomName}',
+          style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '${appointment.timeRange} - ${appointment.durationMinutes} min service',
+          style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
         ),
       ],
     );
@@ -7968,13 +9308,19 @@ class _CheckoutPriceCard extends StatelessWidget {
   final double sstAmount;
   final double totalAmount;
   final String sstLabel;
+  final double alreadyPaid;
+  final double dueNow;
+  final String serviceLabel;
 
   const _CheckoutPriceCard({
     required this.servicePrice,
     required this.sstAmount,
     required this.totalAmount,
     required this.sstLabel,
-  });
+    this.alreadyPaid = 0,
+    double? dueNow,
+    this.serviceLabel = 'Service',
+  }) : dueNow = dueNow ?? totalAmount;
 
   @override
   Widget build(BuildContext context) {
@@ -7988,9 +9334,19 @@ class _CheckoutPriceCard extends StatelessWidget {
       ),
       child: Column(
         children: [
-          _CheckoutPriceRow('Service', 'RM ${servicePrice.toStringAsFixed(2)}'),
+          _CheckoutPriceRow(
+            serviceLabel,
+            'RM ${servicePrice.toStringAsFixed(2)}',
+          ),
           const SizedBox(height: 8),
           _CheckoutPriceRow(sstLabel, 'RM ${sstAmount.toStringAsFixed(2)}'),
+          if (alreadyPaid > 0.005) ...[
+            const SizedBox(height: 8),
+            _CheckoutPriceRow(
+              'Already Paid',
+              '- RM ${alreadyPaid.toStringAsFixed(2)}',
+            ),
+          ],
           const Padding(
             padding: EdgeInsets.symmetric(vertical: 10),
             child: Divider(color: Color(0xFFEEEEEE), height: 1),
@@ -7999,7 +9355,7 @@ class _CheckoutPriceCard extends StatelessWidget {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               const Text(
-                'Total',
+                'Due Now',
                 style: TextStyle(
                   fontSize: 15,
                   fontWeight: FontWeight.w900,
@@ -8007,7 +9363,7 @@ class _CheckoutPriceCard extends StatelessWidget {
                 ),
               ),
               Text(
-                'RM ${totalAmount.toStringAsFixed(2)}',
+                'RM ${dueNow.toStringAsFixed(2)}',
                 style: const TextStyle(
                   fontSize: 20,
                   fontWeight: FontWeight.w900,
@@ -8042,6 +9398,50 @@ class _CheckoutPriceRow extends StatelessWidget {
           style: const TextStyle(fontSize: 13, color: Color(0xFF1A1A2E)),
         ),
       ],
+    );
+  }
+}
+
+class _CheckoutPaymentMethodGrid extends StatelessWidget {
+  final String? selected;
+  final ValueChanged<String> onSelected;
+
+  const _CheckoutPaymentMethodGrid({
+    required this.selected,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    const methods = [
+      ('cash', Icons.payments_outlined, 'Cash'),
+      ('qr_code', Icons.qr_code_2_outlined, 'QR Code'),
+      ('credit_card', Icons.credit_card_outlined, 'Credit Card'),
+      ('debit_card', Icons.credit_card, 'Debit Card'),
+    ];
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 460;
+        final width = compact
+            ? (constraints.maxWidth - 12) / 2
+            : (constraints.maxWidth - 36) / 4;
+        return Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            for (final method in methods)
+              SizedBox(
+                width: width,
+                child: _CheckoutPaymentMethodCard(
+                  icon: method.$2,
+                  label: method.$3,
+                  isSelected: selected == method.$1,
+                  onTap: () => onSelected(method.$1),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }

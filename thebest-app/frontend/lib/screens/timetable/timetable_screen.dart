@@ -3,7 +3,9 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
@@ -12,6 +14,10 @@ import '../../data/repositories/repository_utils.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/transaction_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/app_shell_scope.dart';
+import '../../widgets/detail_drawer_layout.dart';
+import '../appointments/appointment_screen.dart';
+import '../customers/customer_screen.dart';
 
 const Color _timetableAccent = Color(0xFF0F766E);
 const double _timetableSidePanelBreakpoint = 900;
@@ -47,7 +53,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   // Resource ids the user has narrowed the timetable to (empty = show all).
   final Set<String> _selectedResourceIds = {};
   bool _resourceFilterExpanded = false;
-  _TimetableEntry? _selectedEntry;
+  bool _localFullscreen = false;
   int _openMinute = 9 * 60;
   int _closeMinute = 21 * 60;
 
@@ -162,15 +168,6 @@ class _TimetableScreenState extends State<TimetableScreen> {
             .toList();
         _openMinute = settings.$1;
         _closeMinute = settings.$2;
-        final selectedId = _selectedEntry?.id;
-        if (selectedId != null) {
-          _selectedEntry = null;
-          for (final entry in entries) {
-            if (entry.id != selectedId) continue;
-            _selectedEntry = entry;
-            break;
-          }
-        }
       });
     } catch (e) {
       if (mounted) setState(() => _error = e.toString());
@@ -401,6 +398,27 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   Future<bool> _startEntry(_TimetableEntry entry) async {
+    if (!entry.isWalkIn) {
+      final completed = await Navigator.push<bool>(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AppointmentsScreen(
+            userRole: widget.userRole,
+            initialCheckInAppointmentId: entry.id,
+            initialDate: entry.selectedDate,
+          ),
+        ),
+      );
+      if (!mounted) return false;
+      await _loadTimetable();
+      if (!mounted) return false;
+      if (completed == true) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('Appointment checked in')));
+      }
+      return completed == true;
+    }
     try {
       await _appointmentRepository.startAppointment(
         entry.id,
@@ -448,8 +466,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
         : entry._serviceStartDateTime;
     final requiredEnd = entry._serviceEndDateTime;
     final requiredWindow =
-        '${DateFormat('h:mm a').format(requiredStart)} - '
-        '${DateFormat('h:mm a').format(requiredEnd)}';
+        '${DateFormat('HH:mm').format(requiredStart)} - '
+        '${DateFormat('HH:mm').format(requiredEnd)}';
     final options = await Future.wait(
       candidates.map((therapist) async {
         if (!therapist.available) {
@@ -554,148 +572,205 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   void _showEntry(_TimetableEntry entry) {
-    if (MediaQuery.of(context).size.width >= _timetableSidePanelBreakpoint) {
-      setState(() => _selectedEntry = entry);
+    final barrierLabel = MaterialLocalizations.of(
+      context,
+    ).modalBarrierDismissLabel;
+    showGeneralDialog<void>(
+      context: context,
+      barrierDismissible: true,
+      barrierLabel: barrierLabel,
+      barrierColor: const Color(0x330F172A),
+      transitionDuration: const Duration(milliseconds: 220),
+      pageBuilder: (routeContext, _, _) {
+        final screenSize = MediaQuery.sizeOf(routeContext);
+        final screenWidth = screenSize.width;
+        final compact = screenWidth < _timetableSidePanelBreakpoint;
+
+        final details = _TimetableDetailCard(
+          entry: entry,
+          compact: compact,
+          edgeToEdge: compact,
+          onClose: () => Navigator.pop(routeContext),
+          onStart: () async {
+            final changed = await _startEntry(entry);
+            if (changed && routeContext.mounted) {
+              Navigator.pop(routeContext);
+            }
+            return changed;
+          },
+          onSwitchTherapist: () async {
+            final changed = await _switchEntryTherapist(entry);
+            if (changed && routeContext.mounted) {
+              Navigator.pop(routeContext);
+            }
+            return changed;
+          },
+        );
+
+        if (compact) {
+          return Scaffold(
+            body: SafeArea(child: details),
+          );
+        }
+
+        final drawerWidth = DetailDrawerLayout.widthFor(screenWidth);
+        final verticalMargin = DetailDrawerLayout.topMarginFor(
+          screenSize.height,
+        );
+        final drawerMaxHeight = DetailDrawerLayout.maxHeightFor(
+          screenSize.height,
+        );
+        return Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              vertical: verticalMargin,
+            ).copyWith(
+              right: DetailDrawerLayout.rightMargin,
+            ),
+            child: Material(
+              color: routeContext.appSurface,
+              elevation: 14,
+              shadowColor: const Color(0x330F172A),
+              borderRadius: BorderRadius.circular(16),
+              clipBehavior: Clip.antiAlias,
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minWidth: drawerWidth,
+                  maxWidth: drawerWidth,
+                  maxHeight: drawerMaxHeight,
+                ),
+                child: details,
+              ),
+            ),
+          ),
+        );
+      },
+      transitionBuilder: (context, animation, secondaryAnimation, child) {
+        final curved = CurvedAnimation(
+          parent: animation,
+          curve: Curves.easeOutCubic,
+          reverseCurve: Curves.easeInCubic,
+        );
+        return SlideTransition(
+          position: Tween<Offset>(
+            begin: const Offset(1, 0),
+            end: Offset.zero,
+          ).animate(curved),
+          child: child,
+        );
+      },
+    );
+  }
+
+  void _setFullscreen(bool fullscreen) {
+    final shell = AppShellScope.of(context);
+    if (shell != null) {
+      shell.setFullscreen(fullscreen);
       return;
     }
-
-    showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (sheetContext) => _TimetableDetailSheet(
-        entry: entry,
-        onStart: () async {
-          final changed = await _startEntry(entry);
-          if (changed && sheetContext.mounted) Navigator.pop(sheetContext);
-          return changed;
-        },
-        onSwitchTherapist: () async {
-          final changed = await _switchEntryTherapist(entry);
-          if (changed && sheetContext.mounted) Navigator.pop(sheetContext);
-          return changed;
-        },
-      ),
-    );
+    if (_localFullscreen == fullscreen) return;
+    setState(() => _localFullscreen = fullscreen);
   }
 
   @override
   Widget build(BuildContext context) {
+    final shell = AppShellScope.of(context);
+    final fullscreen = shell?.fullscreen ?? _localFullscreen;
     final screenWidth = MediaQuery.of(context).size.width;
     final isTabletLayout = screenWidth >= 900;
     final isWideLayout = screenWidth >= 1200;
-    final showSidePanel = screenWidth >= _timetableSidePanelBreakpoint;
     final entries = _filteredEntries;
     final resources = _applyResourceSelection(_visibleResources);
     final modeResources = _mode == 'rooms' ? _roomResources : _staffResources;
 
-    return Scaffold(
-      backgroundColor: const Color(0xFFF6F8FA),
-      body: SafeArea(
-        child: Column(
-          children: [
-            _TimetableHeader(
-              selectedDate: _selectedDate,
-              onBack: () => Navigator.maybePop(context),
-              onPrevious: () => _shiftDate(-1),
-              onNext: () => _shiftDate(1),
-              onPickDate: _pickDate,
-              onToday: _goToToday,
-              onRefresh: _loadTimetable,
-              onSettings: _showTimetableSettings,
-            ),
-            Container(
-              color: Colors.white,
-              padding: EdgeInsets.fromLTRB(
-                isWideLayout ? 24 : 14,
-                10,
-                isWideLayout ? 24 : 14,
-                14,
-              ),
-              child: Column(
-                children: [
-                  _StatsRow(
-                    stats: _stats,
-                    mode: _mode,
-                    compact: !isTabletLayout,
-                    selectedDate: _selectedDate,
-                  ),
-                  const SizedBox(height: 12),
-                  _ViewToggle(view: _view, onChanged: _onViewChanged),
-                  if (_view == 'timetable') ...[
-                    const SizedBox(height: 10),
-                    _TimetableControls(
-                      mode: _mode,
-                      controller: _search,
-                      onModeChanged: _onModeChanged,
-                      resources: modeResources,
-                      entries: _entries,
-                      selectedDate: _selectedDate,
-                      selectedIds: _selectedResourceIds,
-                      filterExpanded: _resourceFilterExpanded,
-                      onToggleFilter: () => setState(
-                        () =>
-                            _resourceFilterExpanded = !_resourceFilterExpanded,
+    return PopScope(
+      canPop: !fullscreen,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop && fullscreen) _setFullscreen(false);
+      },
+      child: Scaffold(
+        body: SafeArea(
+          child: Column(
+            children: [
+              if (!fullscreen)
+                _TimetableHeader(
+                  selectedDate: _selectedDate,
+                  onBack: () => Navigator.maybePop(context),
+                  onPrevious: () => _shiftDate(-1),
+                  onNext: () => _shiftDate(1),
+                  onPickDate: _pickDate,
+                  onToday: _goToToday,
+                  onRefresh: _loadTimetable,
+                  onSettings: _showTimetableSettings,
+                ),
+              Container(
+                color: Colors.white,
+                padding: EdgeInsets.fromLTRB(
+                  isWideLayout ? 24 : 14,
+                  fullscreen ? 8 : 10,
+                  isWideLayout ? 24 : 14,
+                  fullscreen ? 8 : 14,
+                ),
+                child: Column(
+                  children: [
+                    if (!fullscreen) ...[
+                      _StatsRow(
+                        stats: _stats,
+                        mode: _mode,
+                        compact: !isTabletLayout,
+                        selectedDate: _selectedDate,
                       ),
-                      onToggleResource: _toggleResourceSelection,
-                      onClearResources: () =>
-                          setState(_selectedResourceIds.clear),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            Expanded(
-              child: Stack(
-                children: [
-                  RefreshIndicator(
-                    onRefresh: _loadTimetable,
-                    notificationPredicate: (notification) =>
-                        notification.metrics.axis == Axis.vertical,
-                    child: _view == 'overview'
-                        ? _TimetableOverview(
-                            loading: _loading,
-                            error: _error,
-                            entries: _entries,
-                            therapists: _therapists,
-                            rooms: _rooms,
-                            roomUnits: _roomUnits,
-                            selectedDate: _selectedDate,
-                            onTapEntry: _showEntry,
-                            onOpenTimetable: _openTimetable,
-                          )
-                        : _buildBody(isTabletLayout, entries, resources),
-                  ),
-                  if (showSidePanel)
-                    AnimatedPositioned(
-                      duration: const Duration(milliseconds: 180),
-                      curve: Curves.easeOutCubic,
-                      top: 18,
-                      right: _selectedEntry == null ? -390 : 18,
-                      bottom: 18,
-                      width: 360,
-                      child: IgnorePointer(
-                        ignoring: _selectedEntry == null,
-                        child: AnimatedOpacity(
-                          duration: const Duration(milliseconds: 140),
-                          opacity: _selectedEntry == null ? 0 : 1,
-                          child: _selectedEntry == null
-                              ? const SizedBox.shrink()
-                              : _TimetableDetailCard(
-                                  entry: _selectedEntry!,
-                                  onClose: () =>
-                                      setState(() => _selectedEntry = null),
-                                  onStart: () => _startEntry(_selectedEntry!),
-                                  onSwitchTherapist: () =>
-                                      _switchEntryTherapist(_selectedEntry!),
-                                ),
+                      const SizedBox(height: 12),
+                      _ViewToggle(view: _view, onChanged: _onViewChanged),
+                    ],
+                    if (_view == 'timetable') ...[
+                      if (!fullscreen) const SizedBox(height: 10),
+                      _TimetableControls(
+                        mode: _mode,
+                        controller: _search,
+                        onModeChanged: _onModeChanged,
+                        resources: modeResources,
+                        entries: _entries,
+                        selectedDate: _selectedDate,
+                        selectedIds: _selectedResourceIds,
+                        filterExpanded: _resourceFilterExpanded,
+                        onToggleFilter: () => setState(
+                          () => _resourceFilterExpanded =
+                              !_resourceFilterExpanded,
                         ),
+                        onToggleResource: _toggleResourceSelection,
+                        onClearResources: () =>
+                            setState(_selectedResourceIds.clear),
+                        fullscreen: fullscreen,
+                        onToggleFullscreen: () => _setFullscreen(!fullscreen),
                       ),
-                    ),
-                ],
+                    ],
+                  ],
+                ),
               ),
-            ),
-          ],
+              Expanded(
+                child: RefreshIndicator(
+                  onRefresh: _loadTimetable,
+                  notificationPredicate: (notification) =>
+                      notification.metrics.axis == Axis.vertical,
+                  child: _view == 'overview'
+                      ? _TimetableOverview(
+                          loading: _loading,
+                          error: _error,
+                          entries: _entries,
+                          therapists: _therapists,
+                          rooms: _rooms,
+                          roomUnits: _roomUnits,
+                          selectedDate: _selectedDate,
+                          onTapEntry: _showEntry,
+                          onOpenTimetable: _openTimetable,
+                        )
+                      : _buildBody(isTabletLayout, entries, resources),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -953,6 +1028,7 @@ class _TimetableEntry {
     }
     return actualStart.add(Duration(minutes: scheduledServiceMinutes));
   }
+
   int get serviceStartMinutes {
     final actualStart = actualStartedAt?.toLocal();
     if (actualStart == null) return startMinutes;
@@ -1100,8 +1176,8 @@ class _TimetableEntry {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
     if (started == null || ended == null) return '';
-    return '${DateFormat('h:mm a').format(started)} - '
-        '${DateFormat('h:mm a').format(ended)}';
+    return '${DateFormat('HH:mm').format(started)} - '
+        '${DateFormat('HH:mm').format(ended)}';
   }
 
   String get operationalTimeRange =>
@@ -1110,10 +1186,10 @@ class _TimetableEntry {
       : timeRange;
   String get actualStartLabel => actualStartedAt == null
       ? 'Not started'
-      : DateFormat('h:mm a').format(actualStartedAt!.toLocal());
+      : DateFormat('HH:mm').format(actualStartedAt!.toLocal());
   String get actualCompletedLabel => actualCompletedAt == null
       ? 'Not completed'
-      : DateFormat('h:mm a').format(actualCompletedAt!.toLocal());
+      : DateFormat('HH:mm').format(actualCompletedAt!.toLocal());
   String? get actualServiceCompletionLabel {
     if (actualCompletedAt != null) return 'Completed $actualCompletedLabel';
     return null;
@@ -1121,7 +1197,7 @@ class _TimetableEntry {
 
   String get durationLabel => '$timeRange ($durationMinutes min)';
   String get cleanupUntilLabel => bufferAfterMinutes <= 0
-      ? 'No cleanup buffer'
+      ? ''
       : 'Cleanup until ${_clockLabel(_minutesToTime(cleanupEndMinutes))} '
             '(+$bufferAfterMinutes min)';
   String get blockDurationLabel => bufferAfterMinutes <= 0
@@ -1887,7 +1963,7 @@ class _OverviewStatCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: const Color(0xFFE6EAEF)),
       ),
@@ -3747,6 +3823,8 @@ class _TimetableControls extends StatefulWidget {
   final VoidCallback onToggleFilter;
   final ValueChanged<String> onToggleResource;
   final VoidCallback onClearResources;
+  final bool fullscreen;
+  final VoidCallback onToggleFullscreen;
 
   const _TimetableControls({
     required this.mode,
@@ -3760,6 +3838,8 @@ class _TimetableControls extends StatefulWidget {
     required this.onToggleFilter,
     required this.onToggleResource,
     required this.onClearResources,
+    required this.fullscreen,
+    required this.onToggleFullscreen,
   });
 
   @override
@@ -3814,6 +3894,11 @@ class _TimetableControlsState extends State<_TimetableControls> {
           expanded: widget.filterExpanded,
           selectedCount: widget.selectedIds.length,
           onTap: widget.resources.isEmpty ? null : widget.onToggleFilter,
+          compact: narrow,
+        );
+        final fullscreenButton = _FullscreenButton(
+          fullscreen: widget.fullscreen,
+          onTap: widget.onToggleFullscreen,
         );
         final filterPanel = _ResourceFilterPanel(
           mode: widget.mode,
@@ -3838,6 +3923,8 @@ class _TimetableControlsState extends State<_TimetableControls> {
                     Expanded(child: modes),
                     const SizedBox(width: 8),
                     filterButton,
+                    const SizedBox(width: 8),
+                    fullscreenButton,
                     const SizedBox(width: 8),
                     IconButton.filledTonal(
                       onPressed: () {
@@ -3869,6 +3956,8 @@ class _TimetableControlsState extends State<_TimetableControls> {
                 Expanded(child: search),
                 const SizedBox(width: 10),
                 filterButton,
+                const SizedBox(width: 10),
+                fullscreenButton,
               ],
             ),
             if (widget.filterExpanded) ...[
@@ -3886,68 +3975,102 @@ class _FilterMenuButton extends StatelessWidget {
   final bool expanded;
   final int selectedCount;
   final VoidCallback? onTap;
+  final bool compact;
 
   const _FilterMenuButton({
     required this.expanded,
     required this.selectedCount,
     required this.onTap,
+    this.compact = false,
   });
 
   @override
   Widget build(BuildContext context) {
     final hasSelection = selectedCount > 0;
-    return Material(
-      color: hasSelection
-          ? _timetableAccent.withValues(alpha: 0.1)
-          : Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-        side: BorderSide(
-          color: hasSelection ? _timetableAccent : const Color(0xFFD5DEE8),
+    return Tooltip(
+      message: 'Filter timetable',
+      child: Material(
+        color: hasSelection
+            ? _timetableAccent.withValues(alpha: 0.1)
+            : Colors.white,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(
+            color: hasSelection ? _timetableAccent : const Color(0xFFD5DEE8),
+          ),
         ),
-      ),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: SizedBox(
-          height: 48,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.tune_rounded,
-                  size: 19,
-                  color: hasSelection
-                      ? _timetableAccent
-                      : const Color(0xFF334155),
-                ),
-                const SizedBox(width: 7),
-                Text(
-                  hasSelection ? 'Filter ($selectedCount)' : 'Filter',
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w800,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(12),
+          child: SizedBox(
+            height: 48,
+            child: Padding(
+              padding: EdgeInsets.symmetric(horizontal: compact ? 10 : 12),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.tune_rounded,
+                    size: 19,
                     color: hasSelection
                         ? _timetableAccent
                         : const Color(0xFF334155),
                   ),
-                ),
-                const SizedBox(width: 4),
-                Icon(
-                  expanded
-                      ? Icons.keyboard_arrow_up_rounded
-                      : Icons.keyboard_arrow_down_rounded,
-                  size: 19,
-                  color: hasSelection
-                      ? _timetableAccent
-                      : const Color(0xFF64748B),
-                ),
-              ],
+                  if (!compact) ...[
+                    const SizedBox(width: 7),
+                    Text(
+                      hasSelection ? 'Filter ($selectedCount)' : 'Filter',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w800,
+                        color: hasSelection
+                            ? _timetableAccent
+                            : const Color(0xFF334155),
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      expanded
+                          ? Icons.keyboard_arrow_up_rounded
+                          : Icons.keyboard_arrow_down_rounded,
+                      size: 19,
+                      color: hasSelection
+                          ? _timetableAccent
+                          : const Color(0xFF64748B),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _FullscreenButton extends StatelessWidget {
+  final bool fullscreen;
+  final VoidCallback onTap;
+
+  const _FullscreenButton({
+    required this.fullscreen,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton.outlined(
+      onPressed: onTap,
+      icon: Icon(
+        fullscreen ? Icons.fullscreen_exit_rounded : Icons.fullscreen_rounded,
+      ),
+      tooltip: fullscreen ? 'Exit full screen' : 'Full screen',
+      style: IconButton.styleFrom(
+        fixedSize: const Size(48, 48),
+        foregroundColor: const Color(0xFF334155),
+        side: const BorderSide(color: Color(0xFFD5DEE8)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       ),
     );
   }
@@ -4069,10 +4192,20 @@ class _ResourceTimetableGrid extends StatefulWidget {
 class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
   static const double hourWidth = 136.0;
   static const double minuteWidth = hourWidth / 60;
-  static const double laneHeight = 84;
-  static const double laneGap = 8;
-  static const double rowTopPad = 14;
-  static const double rowBottomPad = 14;
+  static const double _baseLaneHeight = 84;
+  static const double _baseLaneGap = 8;
+  static const double _baseRowPad = 14;
+
+  double get _verticalScale {
+    final presetScale = context.uiScale.timetableScale;
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    return presetScale > textScale ? presetScale : textScale;
+  }
+
+  double get laneHeight => _baseLaneHeight * _verticalScale;
+  double get laneGap => _baseLaneGap * _verticalScale;
+  double get rowTopPad => _baseRowPad * _verticalScale;
+  double get rowBottomPad => _baseRowPad * _verticalScale;
 
   late final ScrollController _scrollController;
   bool _scrolled = false;
@@ -4247,6 +4380,10 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
                                   canvasEndMinute: canvasEndMinute,
                                   openMinute: widget.openMinute,
                                   closeMinute: widget.closeMinute,
+                                  laneHeight: laneHeight,
+                                  laneGap: laneGap,
+                                  topPad: rowTopPad,
+                                  minuteWidth: minuteWidth,
                                   onTap: widget.onTap,
                                   isLast: i == widget.resources.length - 1,
                                 ),
@@ -4454,6 +4591,10 @@ class _ResourceRowTimeline extends StatelessWidget {
   final int canvasEndMinute;
   final int openMinute;
   final int closeMinute;
+  final double laneHeight;
+  final double laneGap;
+  final double topPad;
+  final double minuteWidth;
   final ValueChanged<_TimetableEntry> onTap;
   final bool isLast;
 
@@ -4466,14 +4607,13 @@ class _ResourceRowTimeline extends StatelessWidget {
     required this.canvasEndMinute,
     required this.openMinute,
     required this.closeMinute,
+    required this.laneHeight,
+    required this.laneGap,
+    required this.topPad,
+    required this.minuteWidth,
     required this.onTap,
     required this.isLast,
   });
-
-  static const double laneHeight = _ResourceTimetableGridState.laneHeight;
-  static const double laneGap = _ResourceTimetableGridState.laneGap;
-  static const double topPad = _ResourceTimetableGridState.rowTopPad;
-  static const double minuteWidth = _ResourceTimetableGridState.minuteWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -4524,7 +4664,6 @@ class _ResourceRowTimeline extends StatelessWidget {
           ))
             _FreeAvailabilitySegment(
               segment: segment,
-              closeMinute: closeMinute,
               canvasStartMinute: canvasStartMinute,
               minuteWidth: minuteWidth,
               top: topPad,
@@ -4726,7 +4865,7 @@ class _ResourceAppointmentBlock extends StatelessWidget {
             ),
           )
         : serviceWidth >= 130
-        ? _meridiemRangeLabel(
+        ? _compactTimeRangeLabel(
             entry.operationalStartTime,
             entry.operationalEndTime,
           )
@@ -4874,18 +5013,25 @@ class _ResourceAppointmentBlock extends StatelessWidget {
                           ? 4
                           : 3,
                     ),
-                    Text(
-                      timeLabel,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: small
-                            ? 11.5
-                            : medium
-                            ? 12
-                            : 12.5,
-                        fontWeight: FontWeight.w700,
-                        color: const Color(0xFF4B5563),
+                    SizedBox(
+                      width: double.infinity,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          timeLabel,
+                          maxLines: 1,
+                          softWrap: false,
+                          style: TextStyle(
+                            fontSize: small
+                                ? 11.5
+                                : medium
+                                ? 12
+                                : 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: const Color(0xFF4B5563),
+                          ),
+                        ),
                       ),
                     ),
                   ],
@@ -4965,7 +5111,6 @@ class _BufferBlock extends StatelessWidget {
 
 class _FreeAvailabilitySegment extends StatelessWidget {
   final _ScheduleSegment segment;
-  final int closeMinute;
   final int canvasStartMinute;
   final double minuteWidth;
   final double top;
@@ -4976,7 +5121,6 @@ class _FreeAvailabilitySegment extends StatelessWidget {
 
   const _FreeAvailabilitySegment({
     required this.segment,
-    required this.closeMinute,
     required this.canvasStartMinute,
     required this.minuteWidth,
     required this.top,
@@ -4990,61 +5134,24 @@ class _FreeAvailabilitySegment extends StatelessWidget {
   Widget build(BuildContext context) {
     final isPastGap =
         selectedBeforeToday || (selectedToday && segment.end <= nowMinutes);
-    final visibleStart =
-        selectedToday &&
-            nowMinutes > segment.start &&
-            nowMinutes < segment.end
-        ? nowMinutes
-        : segment.start;
-    if (visibleStart >= segment.end) return const SizedBox.shrink();
-    final left = (visibleStart - canvasStartMinute) * minuteWidth;
-    final width = (segment.end - visibleStart) * minuteWidth;
+    final left = (segment.start - canvasStartMinute) * minuteWidth;
+    final width = (segment.end - segment.start) * minuteWidth;
     if (width < 8) return const SizedBox.shrink();
-    final finalSlotAvailable =
-        segment.isFinalAfterBusy &&
-        selectedToday &&
-        nowMinutes >= segment.start;
-    final isBoundedGap = segment.end < closeMinute;
-    final shouldLabel = !isPastGap && segment.afterBusy && width >= 72;
+    final shouldLabel =
+        segment.isFinalAfterBusy && !isPastGap && width >= 72;
     final useCompactLabel = width < 150;
     final labelTime = _clockLabel(
-      _minutesToTime(
-        segment.isFinalAfterBusy ? segment.labelStart : segment.end,
-      ),
+      _minutesToTime(segment.labelStart),
     );
-    final label = finalSlotAvailable
-        ? 'Free'
-        : segment.isFinalAfterBusy
-        ? useCompactLabel
-              ? 'Free after\n$labelTime'
-              : 'Free after $labelTime'
-        : isBoundedGap
-        ? useCompactLabel
-              ? 'Free until\n$labelTime'
-              : 'Free until $labelTime'
-        : '';
-    final showSubtitle =
-        shouldLabel &&
-        width >= 150 &&
-        (!segment.isFinalAfterBusy || finalSlotAvailable);
-    final subtitle = isBoundedGap
-        ? '${_clockLabel(_minutesToTime(visibleStart))} - ${_clockLabel(_minutesToTime(segment.end))}'
-        : 'Available';
-    final alignLabelStart =
-        segment.isFinalAfterBusy && !finalSlotAvailable && !useCompactLabel;
+    final label = useCompactLabel
+        ? 'Free after\n$labelTime'
+        : 'Free after $labelTime';
     return Positioned(
       left: left,
       top: top,
       width: width,
       height: height,
       child: Container(
-        alignment: alignLabelStart
-            ? Alignment.centerLeft
-            : Alignment.center,
-        padding: EdgeInsets.symmetric(
-          horizontal: alignLabelStart ? 14 : 8,
-          vertical: 8,
-        ),
         decoration: BoxDecoration(
           color: const Color(0xFFF7FFFC),
           borderRadius: BorderRadius.circular(10),
@@ -5054,39 +5161,38 @@ class _FreeAvailabilitySegment extends StatelessWidget {
           ),
         ),
         child: shouldLabel
-            ? Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                crossAxisAlignment: alignLabelStart
-                    ? CrossAxisAlignment.start
-                    : CrossAxisAlignment.center,
+            ? Stack(
                 children: [
-                  Text(
-                    label,
-                    textAlign: alignLabelStart
-                        ? TextAlign.left
-                        : TextAlign.center,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: Color(0xFF166534),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w800,
-                      height: 1.2,
-                    ),
-                  ),
-                  if (showSubtitle) ...[
-                    const SizedBox(height: 3),
-                    Text(
-                      subtitle,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Color(0xFF475569),
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    top: 0,
+                    bottom: 0,
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 8,
+                      ),
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            label,
+                            textAlign: TextAlign.left,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Color(0xFF166534),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              height: 1.2,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
-                  ],
+                  ),
                 ],
               )
             : const SizedBox.shrink(),
@@ -5254,14 +5360,12 @@ class _ScheduleSegment {
   final int start;
   final int end;
   final int labelStart;
-  final bool afterBusy;
   final bool isFinalAfterBusy;
 
   const _ScheduleSegment(
     this.start,
     this.end, {
     int? labelStart,
-    this.afterBusy = false,
     this.isFinalAfterBusy = false,
   }) : labelStart = labelStart ?? start;
 }
@@ -5298,7 +5402,6 @@ List<_ScheduleSegment> _freeSegments(
           cursor,
           segment.start,
           labelStart: labelCursor,
-          afterBusy: passedBusy,
         ),
       );
     }
@@ -5314,7 +5417,6 @@ List<_ScheduleSegment> _freeSegments(
         cursor,
         closeMinute,
         labelStart: labelCursor,
-        afterBusy: passedBusy,
         isFinalAfterBusy: passedBusy,
       ),
     );
@@ -6169,7 +6271,7 @@ class _MobileTimelineEntryCard extends StatelessWidget {
         ),
         const SizedBox(width: 8),
         Text(
-          _meridiemRangeLabel(
+          _compactTimeRangeLabel(
             entry.operationalStartTime,
             entry.operationalEndTime,
           ),
@@ -6239,7 +6341,7 @@ class _MobileTimelineEntryCard extends StatelessWidget {
               _MobileMetaLine(
                 icon: Icons.schedule_outlined,
                 label:
-                    '${_meridiemRangeLabel(entry.operationalStartTime, entry.operationalEndTime)}  -  $_resourceLabel',
+                    '${_compactTimeRangeLabel(entry.operationalStartTime, entry.operationalEndTime)}  -  $_resourceLabel',
               ),
             ],
           ),
@@ -6381,7 +6483,7 @@ class _MobileTimelineCollapsedBand extends StatelessWidget {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     Text(
-                      '${_meridiemRangeLabel(_minutesToTime(startMinutes), _minutesToTime(endMinutes))} collapsed',
+                      '${_compactTimeRangeLabel(_minutesToTime(startMinutes), _minutesToTime(endMinutes))} collapsed',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -6478,7 +6580,7 @@ class _MobileNowMarker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = DateFormat('h:mm a').format(DateTime.now());
+    final label = DateFormat('HH:mm').format(DateTime.now());
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -7217,65 +7319,13 @@ class _TimetableTherapistSwitchDialogState
   }
 }
 
-class _TimetableDetailSheet extends StatelessWidget {
-  final _TimetableEntry entry;
-  final Future<bool> Function()? onStart;
-  final Future<bool> Function()? onSwitchTherapist;
-
-  const _TimetableDetailSheet({
-    required this.entry,
-    this.onStart,
-    this.onSwitchTherapist,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final height = MediaQuery.of(context).size.height;
-    final maxHeight = height * 0.82;
-    final style = _statusStyle(entry);
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.bottomCenter,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxHeight, maxWidth: 420),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: 44,
-                  height: 5,
-                  margin: const EdgeInsets.only(bottom: 8),
-                  decoration: BoxDecoration(
-                    color: style.color.withValues(alpha: 0.22),
-                    borderRadius: BorderRadius.circular(99),
-                  ),
-                ),
-                Flexible(
-                  child: _TimetableDetailCard(
-                    entry: entry,
-                    onClose: () => Navigator.pop(context),
-                    onStart: onStart,
-                    onSwitchTherapist: onSwitchTherapist,
-                    compact: true,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _TimetableDetailCard extends StatefulWidget {
   final _TimetableEntry entry;
   final VoidCallback onClose;
   final Future<bool> Function()? onStart;
   final Future<bool> Function()? onSwitchTherapist;
   final bool compact;
+  final bool edgeToEdge;
 
   const _TimetableDetailCard({
     required this.entry,
@@ -7283,6 +7333,7 @@ class _TimetableDetailCard extends StatefulWidget {
     this.onStart,
     this.onSwitchTherapist,
     this.compact = false,
+    this.edgeToEdge = false,
   });
 
   @override
@@ -7303,49 +7354,80 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
   Widget build(BuildContext context) {
     final entry = widget.entry;
     final style = _statusStyle(entry);
+    final accent = entry.isWalkIn ? const Color(0xFF0F8A5F) : style.color;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final horizontalPadding = widget.compact
+        ? screenWidth < 360
+              ? 12.0
+              : 18.0
+        : 16.0;
     return Container(
-      padding: EdgeInsets.all(widget.compact ? 20 : 22),
+      width: double.infinity,
+      height: widget.compact || widget.edgeToEdge ? double.infinity : null,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x26000000),
-            blurRadius: 24,
-            offset: Offset(0, 10),
-          ),
-        ],
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Row(
-              children: [
-                _PanelStatusBadge(
-                  label: entry.operationalStatus,
-                  color: style.color,
-                ),
-                const Spacer(),
-                IconButton(
-                  onPressed: widget.onClose,
-                  icon: const Icon(Icons.close),
-                  tooltip: 'Close',
+        borderRadius: BorderRadius.circular(
+          widget.compact || widget.edgeToEdge ? 0 : 8,
+        ),
+        boxShadow: widget.compact || widget.edgeToEdge
+            ? null
+            : const [
+                BoxShadow(
+                  color: Color(0x1F000000),
+                  blurRadius: 22,
+                  offset: Offset(0, 8),
                 ),
               ],
-            ),
-            const SizedBox(height: 12),
+      ),
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          horizontalPadding,
+          widget.compact ? 8 : 16,
+          horizontalPadding,
+          widget.compact ? 24 : 16,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (widget.compact)
+              Row(
+                children: [
+                  IconButton(
+                    onPressed: widget.onClose,
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      size: 20,
+                    ),
+                    tooltip: 'Back',
+                  ),
+                  Expanded(
+                    child: Text(
+                      entry.isWalkIn
+                          ? 'Booking Details'
+                          : 'Appointment Details',
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 17,
+                        fontWeight: FontWeight.w900,
+                        color: context.appText,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 48, height: 48),
+                ],
+              ),
             Row(
               children: [
                 CircleAvatar(
-                  radius: 28,
-                  backgroundColor: style.color.withValues(alpha: 0.78),
+                  radius: widget.compact ? 29 : 25,
+                  backgroundColor: accent,
                   child: Text(
                     _initials(entry.customerName),
                     style: const TextStyle(
                       color: Colors.white,
-                      fontSize: 20,
+                      fontSize: 21,
                       fontWeight: FontWeight.w900,
                     ),
                   ),
@@ -7357,143 +7439,104 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
                     children: [
                       Text(
                         entry.customerName,
-                        style: const TextStyle(
-                          fontSize: 19,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF111827),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: widget.compact ? 20 : 18,
+                          fontWeight: FontWeight.w900,
+                          color: context.appText,
                         ),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         entry.customerPhone.isEmpty ? '-' : entry.customerPhone,
-                        style: const TextStyle(
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
                           fontSize: 13,
-                          color: Color(0xFF6B7280),
+                          color: context.appMuted,
                           fontWeight: FontWeight.w600,
                         ),
                       ),
                     ],
                   ),
                 ),
+                if (!widget.compact)
+                  IconButton(
+                    onPressed: widget.onClose,
+                    icon: const Icon(Icons.close_rounded),
+                    tooltip: 'Close',
+                  ),
               ],
             ),
-            const SizedBox(height: 22),
-            _DetailRow(
-              icon: Icons.spa_outlined,
-              label: 'Service',
-              title: entry.serviceName,
-              subtitle: entry.typeLabel,
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: [
+                _PanelStatusBadge(
+                  label: entry.operationalStatus,
+                  color: style.color,
+                ),
+                _TimetablePaymentBadge(paymentStatus: entry.paymentStatus),
+                _TimetableDetailChip(
+                  label: entry.isWalkIn ? 'Walk-in' : 'Appointment',
+                  color: entry.isWalkIn
+                      ? const Color(0xFF2563EB)
+                      : const Color(0xFF7C3AED),
+                ),
+              ],
             ),
-            _DetailRow(
-              icon: Icons.person_outline,
-              label: 'Therapist',
-              title: entry.staffName,
-            ),
-            _DetailRow(
-              icon: Icons.meeting_room_outlined,
-              label: 'Room / Zone',
-              title: entry.roomDisplayName,
-            ),
-            _DetailRow(
-              icon: Icons.calendar_today_outlined,
-              label: 'Date',
-              title: DateFormat('EEEE, d MMMM yyyy').format(entry.selectedDate),
-            ),
-            _DetailRow(
-              icon: Icons.schedule_outlined,
-              label: 'Booked time',
-              title: entry.bookedTimeRange,
-              subtitle: entry.bufferAfterMinutes > 0
-                  ? entry.cleanupUntilLabel
-                  : null,
-            ),
-            if (entry.actualStartedAt != null)
-              _DetailRow(
-                icon: Icons.play_circle_outline,
-                label: 'Actual service time',
-                title: entry.actualServiceTimeRange,
-                subtitle:
-                    'Service duration: ${_compactDurationLabel(entry.scheduledServiceMinutes)}',
+            const SizedBox(height: 14),
+            _TimetableTimingCard(entry: entry),
+            const SizedBox(height: 18),
+            Text(
+              'Guest Services',
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w900,
+                color: context.appText,
               ),
-            _DetailRow(
-              icon: Icons.payments_outlined,
-              label: 'Price',
-              title: entry.priceLabel,
             ),
+            const SizedBox(height: 10),
+            _TimetableServiceDetailCard(entry: entry, accent: accent),
+            _TimetableGrandTotal(total: entry.price),
             if (entry.hasPayment) ...[
-              const Divider(height: 26),
-              _DetailRow(
-                icon: Icons.receipt_long_outlined,
-                label: 'Receipt',
-                title: entry.receiptNumber,
-              ),
-              _DetailRow(
-                icon: Icons.credit_card_outlined,
-                label: 'Payment',
-                title: entry.paymentMethod.isEmpty
-                    ? 'Paid'
-                    : entry.paymentMethod,
-                subtitle: entry.paymentStatus.isEmpty
+              const SizedBox(height: 10),
+              _TimetableReceiptCard(
+                entry: entry,
+                onTap: entry.receiptNumber.isEmpty
                     ? null
-                    : entry.paymentStatus.toUpperCase(),
-              ),
-              _DetailRow(
-                icon: Icons.account_balance_wallet_outlined,
-                label: 'Paid',
-                title: entry.paidLabel,
+                    : () => showTransactionOrderDetailSheet(
+                        context,
+                        receiptNumber: entry.receiptNumber,
+                      ),
               ),
             ],
+            const SizedBox(height: 18),
             if (entry.canStartService || entry.canSwitchTherapist) ...[
-              const Divider(height: 26),
               if (entry.canStartService)
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: FilledButton.icon(
-                    onPressed: _saving ? null : () => _run(widget.onStart),
-                    icon: _saving
-                        ? const SizedBox(
-                            width: 17,
-                            height: 17,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Icon(Icons.play_arrow_rounded),
-                    label: const Text('Start Service'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: _timetableAccent,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
+                _TimetableDetailAction(
+                  icon: entry.isWalkIn
+                      ? Icons.play_arrow_rounded
+                      : Icons.login_rounded,
+                  label: entry.isWalkIn ? 'Start Service' : 'Check In',
+                  color: const Color(0xFF15803D),
+                  filled: true,
+                  loading: _saving,
+                  onPressed: _saving ? null : () => _run(widget.onStart),
                 ),
+              if (entry.canStartService && entry.canSwitchTherapist)
+                const SizedBox(height: 10),
               if (entry.canSwitchTherapist)
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: OutlinedButton.icon(
-                    onPressed: _saving
-                        ? null
-                        : () => _run(widget.onSwitchTherapist),
-                    icon: _saving
-                        ? const SizedBox(
-                            width: 17,
-                            height: 17,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.swap_horiz_rounded),
-                    label: const Text('Switch Therapist'),
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: _timetableAccent,
-                      side: const BorderSide(color: _timetableAccent),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                  ),
+                _TimetableDetailAction(
+                  icon: Icons.swap_horiz_rounded,
+                  label: 'Switch Therapist',
+                  color: const Color(0xFF0F766E),
+                  loading: _saving,
+                  onPressed: _saving
+                      ? null
+                      : () => _run(widget.onSwitchTherapist),
                 ),
             ],
           ],
@@ -7529,65 +7572,543 @@ class _PanelStatusBadge extends StatelessWidget {
   }
 }
 
-class _DetailRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String title;
-  final String? subtitle;
+class _TimetablePaymentBadge extends StatelessWidget {
+  final String paymentStatus;
 
-  const _DetailRow({
+  const _TimetablePaymentBadge({required this.paymentStatus});
+
+  @override
+  Widget build(BuildContext context) {
+    final paid = paymentStatus.toLowerCase() == 'paid';
+    final color = paid ? const Color(0xFF059669) : const Color(0xFFD97706);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            paid ? Icons.check_circle_outline : Icons.schedule_rounded,
+            size: 14,
+            color: color,
+          ),
+          const SizedBox(width: 5),
+          Text(
+            paid ? 'Paid' : 'Unpaid',
+            style: TextStyle(
+              color: color,
+              fontSize: 12,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableDetailChip extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _TimetableDetailChip({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          color: color,
+          fontSize: 12,
+          fontWeight: FontWeight.w900,
+        ),
+      ),
+    );
+  }
+}
+
+class _TimetableTimingCard extends StatelessWidget {
+  final _TimetableEntry entry;
+
+  const _TimetableTimingCard({required this.entry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              children: [
+                _TimetableTimingLine(
+                  icon: Icons.calendar_today_outlined,
+                  text: DateFormat(
+                    'EEE, d MMMM yyyy',
+                  ).format(entry.selectedDate),
+                ),
+                const SizedBox(height: 10),
+                _TimetableTimingLine(
+                  icon: Icons.schedule_outlined,
+                  text:
+                      '${entry.bookedTimeRange} - ${_compactDurationLabel(entry.scheduledServiceMinutes)}',
+                ),
+              ],
+            ),
+          ),
+          if (entry.actualStartedAt != null)
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              decoration: const BoxDecoration(
+                color: Color(0xFFF0FDF7),
+                borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
+              ),
+              child: _TimetableTimingLine(
+                icon: Icons.play_circle_outline_rounded,
+                text: 'Actual service time: ${entry.actualServiceTimeRange}',
+                color: const Color(0xFF0F8A5F),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableTimingLine extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final Color color;
+
+  const _TimetableTimingLine({
     required this.icon,
-    required this.label,
-    required this.title,
-    this.subtitle,
+    required this.text,
+    this.color = const Color(0xFF475569),
   });
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 16),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: color),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              color: color,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TimetableServiceDetailCard extends StatelessWidget {
+  final _TimetableEntry entry;
+  final Color accent;
+
+  const _TimetableServiceDetailCard({
+    required this.entry,
+    required this.accent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 12),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Icon(icon, color: const Color(0xFF4B5563), size: 20),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  label,
-                  style: const TextStyle(
-                    color: Color(0xFF6B7280),
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
+                Container(
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: accent.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(8),
                   ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  title.isEmpty ? '-' : title,
-                  style: const TextStyle(
-                    color: Color(0xFF111827),
-                    fontSize: 14,
-                    fontWeight: FontWeight.w800,
-                  ),
-                ),
-                if (subtitle != null) ...[
-                  const SizedBox(height: 2),
-                  Text(
-                    subtitle!,
-                    style: const TextStyle(
-                      color: Color(0xFF6B7280),
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
+                  child: Text(
+                    '1',
+                    style: TextStyle(
+                      color: accent,
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
-                ],
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Guest 1 - ${entry.customerName}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                          color: context.appText,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        entry.serviceCount > 1
+                            ? '${entry.serviceName} (${entry.serviceCount} services)'
+                            : entry.serviceName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: context.appMuted,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                      const SizedBox(height: 7),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 5,
+                        children: [
+                          _TimetableServiceMeta(
+                            icon: Icons.person_outline,
+                            text: entry.staffName,
+                          ),
+                          _TimetableServiceMeta(
+                            icon: Icons.meeting_room_outlined,
+                            text: entry.roomDisplayName,
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(height: 1, color: Color(0xFFE5E7EB)),
+          Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const Text(
+                  'Pricing',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Color(0xFF0F8A5F),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _TimetablePriceRow(label: 'Service total', amount: entry.price),
+                const Divider(height: 18, color: Color(0xFFE5E7EB)),
+                _TimetablePriceRow(
+                  label: 'Total',
+                  amount: entry.price,
+                  emphasized: true,
+                ),
               ],
             ),
           ),
         ],
       ),
+    );
+  }
+}
+
+class _TimetableServiceMeta extends StatelessWidget {
+  final IconData icon;
+  final String text;
+
+  const _TimetableServiceMeta({required this.icon, required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 14, color: const Color(0xFF64748B)),
+        const SizedBox(width: 4),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 170),
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              fontSize: 11,
+              color: Color(0xFF64748B),
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _TimetablePriceRow extends StatelessWidget {
+  final String label;
+  final double amount;
+  final bool emphasized;
+
+  const _TimetablePriceRow({
+    required this.label,
+    required this.amount,
+    this.emphasized = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              label,
+              style: TextStyle(
+                fontSize: emphasized ? 12.5 : 11.5,
+                color: emphasized
+                    ? const Color(0xFF111827)
+                    : const Color(0xFF64748B),
+                fontWeight: emphasized ? FontWeight.w900 : FontWeight.w600,
+              ),
+            ),
+          ),
+          Text(
+            'RM ${amount.toStringAsFixed(2)}',
+            style: TextStyle(
+              fontSize: emphasized ? 13 : 11.5,
+              color: emphasized
+                  ? const Color(0xFF0F8A5F)
+                  : const Color(0xFF475569),
+              fontWeight: emphasized ? FontWeight.w900 : FontWeight.w700,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableGrandTotal extends StatelessWidget {
+  final double total;
+
+  const _TimetableGrandTotal({required this.total});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        children: [
+          const Text(
+            'Grand Total',
+            style: TextStyle(
+              fontSize: 13,
+              color: Color(0xFF475569),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  'RM ${total.toStringAsFixed(2)}',
+                  maxLines: 1,
+                  style: const TextStyle(
+                    fontSize: 20,
+                    color: Color(0xFF0F8A5F),
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableReceiptCard extends StatelessWidget {
+  final _TimetableEntry entry;
+  final VoidCallback? onTap;
+
+  const _TimetableReceiptCard({required this.entry, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: context.appSurface,
+      borderRadius: BorderRadius.circular(8),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(8),
+        child: Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: context.appBorder),
+          ),
+          child: Row(
+            children: [
+              const Icon(
+                Icons.receipt_long_outlined,
+                size: 25,
+                color: Color(0xFF475569),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Payment & Receipt',
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: Color(0xFF111827),
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      'Paid via ${_timetablePaymentLabel(entry.paymentMethod)} - ${entry.paidLabel}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11.5,
+                        color: Color(0xFF64748B),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (entry.receiptNumber.isNotEmpty) ...[
+                      const SizedBox(height: 2),
+                      Text(
+                        'Receipt: ${entry.receiptNumber}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          color: Color(0xFF64748B),
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (onTap != null) ...[
+                const SizedBox(width: 8),
+                const Icon(
+                  Icons.chevron_right_rounded,
+                  color: Color(0xFF94A3B8),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _TimetableDetailAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final bool filled;
+  final bool loading;
+  final VoidCallback? onPressed;
+
+  const _TimetableDetailAction({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.loading,
+    required this.onPressed,
+    this.filled = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final shape = RoundedRectangleBorder(
+      borderRadius: BorderRadius.circular(8),
+    );
+    final buttonIcon = loading
+        ? SizedBox(
+            width: 17,
+            height: 17,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: filled ? Colors.white : color,
+            ),
+          )
+        : Icon(icon, size: 19);
+    return SizedBox(
+      width: double.infinity,
+      height: 48,
+      child: filled
+          ? FilledButton.icon(
+              onPressed: onPressed,
+              icon: buttonIcon,
+              label: Text(label),
+              style: FilledButton.styleFrom(
+                backgroundColor: color,
+                shape: shape,
+                textStyle: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            )
+          : OutlinedButton.icon(
+              onPressed: onPressed,
+              icon: buttonIcon,
+              label: Text(label),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: color,
+                side: BorderSide(color: color),
+                shape: shape,
+                textStyle: const TextStyle(fontWeight: FontWeight.w900),
+              ),
+            ),
     );
   }
 }
@@ -7612,7 +8133,7 @@ class _TimetableSettingsSheet extends StatelessWidget {
           margin: const EdgeInsets.all(14),
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: context.appSurfaceRaised,
             borderRadius: BorderRadius.circular(20),
             boxShadow: const [
               BoxShadow(
@@ -7848,6 +8369,25 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
   );
 }
 
+String _timetablePaymentLabel(String value) {
+  switch (value.trim().toLowerCase()) {
+    case 'qr_code':
+      return 'QR Code';
+    case 'credit_card':
+    case 'card':
+      return 'Credit Card';
+    case 'debit_card':
+      return 'Debit Card';
+    case 'cash':
+      return 'Cash';
+    case 'billplz':
+    case 'online':
+      return 'Online';
+    default:
+      return value.trim().isEmpty ? 'Payment recorded' : value.trim();
+  }
+}
+
 String _initials(String value) {
   final parts = value
       .trim()
@@ -8047,34 +8587,19 @@ int? _minutesFromSelectedDate(DateTime? value, DateTime selectedDate) {
 
 String _clockLabel(String time) {
   final minutes = _timeToMinutes(time);
-  final hour = minutes ~/ 60;
+  final hour = (minutes ~/ 60) % 24;
   final minute = minutes % 60;
-  return DateFormat('h:mm a').format(DateTime(2026, 1, 1, hour, minute));
+  return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
 }
 
 String _shortClockLabel(String time) {
-  final minutes = _timeToMinutes(time);
-  final hour = minutes ~/ 60;
-  final minute = minutes % 60;
-  return DateFormat('h:mm').format(DateTime(2026, 1, 1, hour, minute));
+  return _clockLabel(time);
 }
 
-/// Renders a start-end range with AM/PM markers, dropping the leading
-/// marker when both ends share the same period (e.g. "3:22 - 4:22 PM")
-/// so the range stays compact instead of repeating "PM" twice.
-String _meridiemRangeLabel(String start, String end) {
-  final startMinutes = _timeToMinutes(start) % (24 * 60);
-  final endMinutes = _timeToMinutes(end) % (24 * 60);
-  final startPeriod = startMinutes < 720 ? 'AM' : 'PM';
-  final endPeriod = endMinutes < 720 ? 'AM' : 'PM';
-  final startDigits = _shortClockLabel(start);
-  final endDigits = _shortClockLabel(end);
-  if (startPeriod == endPeriod) {
-    return '$startDigits - $endDigits $endPeriod';
-  }
-  return '$startDigits $startPeriod - $endDigits $endPeriod';
-}
+String _compactTimeRangeLabel(String start, String end) =>
+    '${_clockLabel(start)} - ${_clockLabel(end)}';
 
 String _hourLabel(int hour) {
-  return DateFormat('ha').format(DateTime(2026, 1, 1, hour)).toLowerCase();
+  final normalized = hour % 24;
+  return '${normalized.toString().padLeft(2, '0')}:00';
 }

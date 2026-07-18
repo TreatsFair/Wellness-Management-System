@@ -39,7 +39,7 @@
       <section class="booking-intro">
         <p class="eyebrow">Reserve your time to unwind</p>
         <h1>Your moment of calm,<br /><em>beautifully planned.</em></h1>
-        <p>Choose your preferred outlet, treatment and time. We’ll take care of the rest.</p>
+        <p>Plan treatments for one or more guests, then reserve one shared time.</p>
       </section>
 
       <div class="mobile-progress" aria-live="polite">
@@ -62,11 +62,11 @@
         </button>
         <i></i>
         <button class="step" data-step-target="2" type="button" disabled>
-          <span>2</span><b>Treatment</b>
+          <span>2</span><b>Guests & Masseurs</b>
         </button>
         <i></i>
         <button class="step" data-step-target="3" type="button" disabled>
-          <span>3</span><b>Therapist</b>
+          <span>3</span><b>Treatments</b>
         </button>
         <i></i>
         <button class="step" data-step-target="4" type="button" disabled>
@@ -74,7 +74,7 @@
         </button>
         <i></i>
         <button class="step" data-step-target="5" type="button" disabled>
-          <span>5</span><b>Details</b>
+          <span>5</span><b>Billing</b>
         </button>
       </nav>
 
@@ -101,7 +101,7 @@
                     <small>Kuala Lumpur</small>
                     <strong>Kepong · Taman Wahyu</strong>
                     <span>50G, Jalan Seri Utara 1, Taman Wahyu</span>
-                    <span class="card-meta">11:00 AM – 11:00 PM</span>
+                    <span class="card-meta" data-outlet-hours>11:00 AM – 11:00 PM</span>
                   </span>
                 </span>
               </button>
@@ -117,7 +117,7 @@
                     <small>Kuala Lumpur</small>
                     <strong>Setapak · PV128</strong>
                     <span>G13-A, PV128, Jalan Genting Kelang</span>
-                    <span class="card-meta">10:30 AM – 11:00 PM</span>
+                    <span class="card-meta" data-outlet-hours>10:30 AM – 12:00 AM</span>
                   </span>
                 </span>
               </button>
@@ -128,51 +128,40 @@
             <div class="panel-heading">
               <div>
                 <span class="section-number">02</span>
-                <h2>Choose your treatment</h2>
+                <h2>How many guests are coming?</h2>
               </div>
-              <p>Add one or more treatments and expand each card for more information.</p>
+              <p>Choose your group size.</p>
             </div>
+            <div class="pax-picker" id="pax-picker" role="radiogroup" aria-label="Number of guests"></div>
+            <p class="pax-hint" id="pax-hint">Groups share one visit time — every guest starts together.</p>
 
-            <div class="service-list" id="service-options"></div>
+            <div class="guest-names" id="guest-names">
+              <div class="guest-names-heading">
+                <h3>Guest Details</h3>
+                <span>Preferences are subject to therapist availability.</span>
+              </div>
+              <div class="guest-preview" id="guest-preview" aria-label="Guest details"></div>
+            </div>
+            <p class="preference-warning" id="preference-warning" hidden></p>
           </section>
 
           <section class="booking-panel" data-panel="3" hidden>
             <div class="panel-heading">
               <div>
                 <span class="section-number">03</span>
-                <h2>Choose your therapist preference</h2>
+                <h2>Choose each treatment</h2>
               </div>
-              <p>We will match your preference with an eligible available therapist.</p>
+              <p>Select one treatment for every guest.</p>
             </div>
 
-            <fieldset class="preference-fieldset">
-              <legend>Therapist preference</legend>
-              <div class="preference-grid" id="therapist-options">
-                <button class="preference-card" type="button" data-therapist="No preference">
-                  <span class="avatar avatar-any">
-                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 19v-1.5A3.5 3.5 0 0 0 12.5 14h-5A3.5 3.5 0 0 0 4 17.5V19m14-8a3 3 0 1 0 0-6m2 14v-1.5a3.5 3.5 0 0 0-2.5-3.35M10 10a3 3 0 1 0-6 0 3 3 0 0 0 6 0Z" /></svg>
-                  </span>
-                  <span><strong>No preference</strong><small>Best availability · Recommended</small></span>
-                  <span class="radio-mark"></span>
-                </button>
-                <button class="preference-card" type="button" data-therapist="Female therapist">
-                  <span class="avatar">F</span>
-                  <span><strong>Female therapist</strong><small>Assign any available female therapist</small></span>
-                  <span class="radio-mark"></span>
-                </button>
-                <button class="preference-card" type="button" data-therapist="Male therapist">
-                  <span class="avatar">M</span>
-                  <span><strong>Male therapist</strong><small>Assign any available male therapist</small></span>
-                  <span class="radio-mark"></span>
-                </button>
-              </div>
-            </fieldset>
-
-            <label class="field therapist-comment">
-              <span>Specific therapist request <small>Optional</small></span>
-              <textarea id="therapist-comment" rows="4" placeholder="If you know the therapist's name, write it here. We will try our best to accommodate your request."></textarea>
-              <small>Requests remain subject to the therapist’s schedule and service eligibility.</small>
+            <label class="same-toggle" id="same-treatment-row" hidden>
+              <input type="checkbox" id="same-treatment-checkbox" />
+              <i aria-hidden="true"></i>
+              <span><strong>Same treatment for everyone</strong><small>Pick once and it applies to all guests.</small></span>
             </label>
+            <div class="guest-tabs" id="treatment-guest-tabs" role="tablist" aria-label="Choose guest"></div>
+            <p class="active-guest-label" id="treatment-guest-heading"></p>
+            <div class="service-list" id="service-options"></div>
           </section>
 
           <section class="booking-panel" data-panel="4" hidden>
@@ -181,7 +170,7 @@
                 <span class="section-number">04</span>
                 <h2>Choose your date and time</h2>
               </div>
-              <p>Available dates and times will later come from the outlet’s live schedule.</p>
+              <p>Only times that can accommodate the whole group are shown.</p>
             </div>
 
             <div class="date-time-selection">
@@ -204,7 +193,7 @@
             <div class="panel-heading">
               <div>
                 <span class="section-number">05</span>
-                <h2>A few final details</h2>
+                <h2>Billing and contact</h2>
               </div>
               <p>Your confirmation will be sent to the details below.</p>
             </div>
@@ -268,15 +257,15 @@
             </div>
             <dl class="review-details">
               <div><dt>Outlet</dt><dd id="review-outlet">&mdash;</dd></div>
-              <div><dt>Treatment</dt><dd id="review-services">&mdash;</dd></div>
-              <div><dt>Therapist</dt><dd id="review-therapist">&mdash;</dd></div>
+              <div><dt>Guests</dt><dd id="review-guests">1 guest</dd></div>
               <div><dt>Date & time</dt><dd id="review-datetime">&mdash;</dd></div>
             </dl>
+            <div class="review-guest-list" id="review-guest-list"></div>
             <div class="review-total">
               <span><small>Estimated duration</small><b id="review-duration">0 minutes</b></span>
               <span><small>Total payable</small><strong id="review-total">RM 0</strong></span>
             </div>
-            <p class="review-note">Your selected time will be held for 15 minutes when you continue to Billplz payment.</p>
+            <p class="review-note">Your selected time will be held for 10 minutes when you continue to Billplz payment.</p>
           </article>
         </aside>
       </div>

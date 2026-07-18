@@ -211,8 +211,9 @@ class AppointmentRepository {
       bookedEndAt: appointmentUpdates['bookedEndAt']?.toString(),
       endTime: appointmentUpdates['endTime']?.toString(),
       endAt: appointmentUpdates['endAt']?.toString(),
-      allowLateExtensionOverlap:
-          asBool(appointmentUpdates['allowLateExtensionOverlap']),
+      allowLateExtensionOverlap: asBool(
+        appointmentUpdates['allowLateExtensionOverlap'],
+      ),
       counterStaffId: transactionValues['counterStaffId']?.toString(),
       counterStaffName: transactionValues['counterStaffName']?.toString(),
       servicePrice: asDouble(transactionValues['servicePrice']),
@@ -235,15 +236,71 @@ class AppointmentRepository {
   Future<Map<String, dynamic>> startAppointment(
     String id, {
     DateTime? startedAt,
+    DateTime? expectedEndAt,
+    bool allowLateExtensionOverlap = false,
   }) async {
     final result = await _table.client.rpc(
       'start_appointment_service',
       params: {
         'p_appointment_id': id,
         'p_started_at': (startedAt ?? DateTime.now()).toUtc().toIso8601String(),
+        'p_expected_end_at': expectedEndAt?.toUtc().toIso8601String(),
+        'p_allow_late_extension_overlap': allowLateExtensionOverlap,
       },
     );
     return _firstResultMap(result);
+  }
+
+  Future<Map<String, dynamic>> checkInPaidAppointmentWithAddOn({
+    required String appointmentId,
+    required List<Map<String, dynamic>> addOnServiceItems,
+    required Map<String, dynamic> appointmentUpdates,
+    required Map<String, dynamic> transactionValues,
+  }) async {
+    final result = await PaymentService.checkInPaidAppointmentWithAddOn(
+      appointmentId: appointmentId,
+      addOnServiceItems: addOnServiceItems,
+      endTime: appointmentUpdates['endTime']?.toString(),
+      endAt: appointmentUpdates['endAt']?.toString(),
+      allowLateExtensionOverlap: asBool(
+        appointmentUpdates['allowLateExtensionOverlap'],
+      ),
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+    );
+    if (!result.success) throw Exception(result.message);
+    return {
+      'appointmentId': result.appointmentId,
+      'transactionId': result.transactionId,
+    };
+  }
+
+  Future<Map<String, dynamic>> payAppointmentAddOns({
+    required String appointmentId,
+    required List<Map<String, dynamic>> addOnServiceItems,
+    required Map<String, dynamic> transactionValues,
+  }) async {
+    final result = await PaymentService.payAppointmentAddOns(
+      appointmentId: appointmentId,
+      addOnServiceItems: addOnServiceItems,
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+    );
+    if (!result.success) throw Exception(result.message);
+    return {
+      'appointmentId': result.appointmentId,
+      'transactionId': result.transactionId,
+    };
   }
 
   Future<Map<String, dynamic>> adjustServiceEnd(
@@ -261,13 +318,93 @@ class AppointmentRepository {
   }
 
   Future<void> startAppointmentGroup(
+    String appointmentGroupId,
     Iterable<String> appointmentIds, {
     DateTime? startedAt,
+    Map<String, DateTime?> expectedEndAtByAppointment = const {},
+    Map<String, bool> allowLateExtensionOverlapByAppointment = const {},
   }) async {
     final timestamp = startedAt ?? DateTime.now();
-    for (final id in appointmentIds) {
-      await startAppointment(id, startedAt: timestamp);
-    }
+    final ids = appointmentIds.toList();
+    await _table.client.rpc(
+      'start_appointment_group_service',
+      params: {
+        'p_appointment_group_id': appointmentGroupId,
+        'p_appointment_ids': ids,
+        'p_started_at': timestamp.toUtc().toIso8601String(),
+        'p_expected_end_by_appointment': {
+          for (final id in ids)
+            if (expectedEndAtByAppointment[id] != null)
+              id: expectedEndAtByAppointment[id]!.toUtc().toIso8601String(),
+        },
+        'p_allow_overlap_by_appointment': {
+          for (final id in ids)
+            id: allowLateExtensionOverlapByAppointment[id] ?? false,
+        },
+      },
+    );
+  }
+
+  Future<Map<String, dynamic>> checkInPaidAppointmentGroupWithAddOn({
+    required String appointmentGroupId,
+    required List<String> appointmentIds,
+    required Map<String, List<Map<String, dynamic>>> addOnItemsByAppointment,
+    required Map<String, Map<String, dynamic>> appointmentUpdatesById,
+    required Map<String, dynamic> transactionValues,
+  }) async {
+    final perAppointmentUpdates = <String, Map<String, dynamic>>{
+      for (final entry in appointmentUpdatesById.entries)
+        entry.key: {
+          if (entry.value['endTime'] != null)
+            'end_time': entry.value['endTime'],
+          if (entry.value['endAt'] != null) 'end_at': entry.value['endAt'],
+          if (entry.value['allowLateExtensionOverlap'] == true)
+            'allow_late_extension_overlap': true,
+        },
+    };
+    final result = await PaymentService.checkInPaidAppointmentGroupWithAddOn(
+      appointmentGroupId: appointmentGroupId,
+      appointmentIds: appointmentIds,
+      addOnItemsByAppointment: addOnItemsByAppointment,
+      perAppointmentUpdates: perAppointmentUpdates,
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+    );
+    if (!result.success) throw Exception(result.message);
+    return {
+      'appointmentGroupId': result.appointmentGroupId,
+      'transactionId': result.transactionId,
+    };
+  }
+
+  Future<Map<String, dynamic>> payAppointmentGroupAddOns({
+    required String appointmentGroupId,
+    required List<String> appointmentIds,
+    required Map<String, List<Map<String, dynamic>>> addOnItemsByAppointment,
+    required Map<String, dynamic> transactionValues,
+  }) async {
+    final result = await PaymentService.payAppointmentGroupAddOns(
+      appointmentGroupId: appointmentGroupId,
+      appointmentIds: appointmentIds,
+      addOnItemsByAppointment: addOnItemsByAppointment,
+      counterStaffId: transactionValues['counterStaffId']?.toString(),
+      counterStaffName: transactionValues['counterStaffName']?.toString(),
+      servicePrice: asDouble(transactionValues['servicePrice']),
+      sstAmount: asDouble(transactionValues['sstAmount']),
+      totalAmount: asDouble(transactionValues['totalAmount']),
+      paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
+      receiptNumber: asString(transactionValues['receiptNumber']),
+    );
+    if (!result.success) throw Exception(result.message);
+    return {
+      'appointmentGroupId': result.appointmentGroupId,
+      'transactionId': result.transactionId,
+    };
   }
 
   Future<Map<String, dynamic>> switchTherapist({
@@ -396,7 +533,8 @@ class AppointmentRepository {
             'booked_start_at': entry.value['bookedStartAt'],
           if (entry.value['bookedEndAt'] != null)
             'booked_end_at': entry.value['bookedEndAt'],
-          if (entry.value['endTime'] != null) 'end_time': entry.value['endTime'],
+          if (entry.value['endTime'] != null)
+            'end_time': entry.value['endTime'],
           if (entry.value['endAt'] != null) 'end_at': entry.value['endAt'],
           if (entry.value['allowLateExtensionOverlap'] == true)
             'allow_late_extension_overlap': true,

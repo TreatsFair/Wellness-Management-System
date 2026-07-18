@@ -179,3 +179,5 @@ grant execute on function public.create_staff_walkin_with_payment(
   text, text, text, uuid, text, numeric, numeric, text, text, text, boolean,
   text, uuid
 ) to authenticated;
+
+;

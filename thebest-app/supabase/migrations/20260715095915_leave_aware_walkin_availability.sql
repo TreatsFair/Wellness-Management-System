@@ -179,3 +179,5 @@ revoke all on function public.check_booking_availability(date, time, time, uuid,
 grant execute on function public.check_booking_availability(date, time, time, uuid, uuid, uuid, uuid) to authenticated;
 revoke all on function public.get_walkin_therapist_availability(date, time, integer) from public, anon;
 grant execute on function public.get_walkin_therapist_availability(date, time, integer) to authenticated;
+
+;
