@@ -13,6 +13,7 @@ import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+import '../../data/services/supabase_table_service.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -314,6 +315,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
+  final _serviceCategoryTable = SupabaseTableService('service_categories');
   final _commissionRepository = CommissionRepository();
   final _businessSettingsRepository = BusinessSettingsRepository();
 
@@ -338,6 +340,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   // Data
   List<_WalkInService> _services = [];
+  List<String> _serviceCategories = const ['Services', 'Add-ons', 'Packages'];
   List<_WalkInTherapist> _therapists = [];
   List<_WalkInZone> _zones = [];
   List<RoomUnitAvailability> _roomUnits = [];
@@ -424,8 +427,33 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         }
       }
 
+      var categoryRows = const <Map<String, dynamic>>[];
+      try {
+        categoryRows = await _serviceCategoryTable.list(orderBy: 'name');
+      } catch (_) {
+        // Existing service records still provide a safe category fallback.
+      }
+      const coreCategories = ['Services', 'Add-ons', 'Packages'];
+      final categorySet = <String>{
+        ...coreCategories,
+        ...categoryRows
+            .where(_isActiveDoc)
+            .map((row) => row['name']?.toString().trim() ?? ''),
+        ...services.map((service) => service.category.trim()),
+      }..removeWhere((category) => category.isEmpty);
+      final customCategories =
+          categorySet
+              .where((category) => !coreCategories.contains(category))
+              .toList()
+            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      final categories = [...coreCategories, ...customCategories];
+
       setState(() {
         _services = services;
+        _serviceCategories = categories;
+        if (!categories.contains(_serviceTab)) {
+          _serviceTab = categories.first;
+        }
         _serviceLoadError = null;
       });
     } catch (e) {
@@ -1665,45 +1693,48 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Widget _buildServiceSection() {
-    final tabs = ['Services', 'Packages', 'Add-ons'];
+    final tabs = _serviceCategories;
     final filtered = _services.where((s) => s.category == _serviceTab).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Tabs
-        Row(
-          children: tabs
-              .map(
-                (tab) => GestureDetector(
-                  onTap: () => setState(() => _serviceTab = tab),
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 20, bottom: 12),
-                    child: Column(
-                      children: [
-                        Text(
-                          tab,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: _serviceTab == tab
-                                ? const Color(0xFF1B6B72)
-                                : const Color(0xFF9E9E9E),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: tabs
+                .map(
+                  (tab) => GestureDetector(
+                    onTap: () => setState(() => _serviceTab = tab),
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 20, bottom: 12),
+                      child: Column(
+                        children: [
+                          Text(
+                            tab,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: _serviceTab == tab
+                                  ? const Color(0xFF1B6B72)
+                                  : const Color(0xFF9E9E9E),
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
-                        if (_serviceTab == tab)
-                          Container(
-                            height: 2,
-                            width: 40,
-                            color: const Color(0xFF1B6B72),
-                          ),
-                      ],
+                          const SizedBox(height: 4),
+                          if (_serviceTab == tab)
+                            Container(
+                              height: 2,
+                              width: 40,
+                              color: const Color(0xFF1B6B72),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              )
-              .toList(),
+                )
+                .toList(),
+          ),
         ),
         if (filtered.isEmpty || _serviceLoadError != null) ...[
           _ServiceEmptyState(tab: _serviceTab, error: _serviceLoadError),

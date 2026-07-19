@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
@@ -12,9 +13,12 @@ import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/auth_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
+import '../../data/repositories/notification_repository.dart';
 import '../../data/repositories/profile_repository.dart';
 import '../../data/repositories/settings_repository.dart';
+import '../../data/repositories/transaction_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/app_toast.dart';
 import '../appointments/appointment_screen.dart';
 import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
@@ -315,12 +319,210 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<_DashboardOtherCard> _tabletOtherOrder = [..._defaultOtherOrder];
   List<_DashboardOtherCard> _phoneOtherOrder = [..._defaultOtherOrder];
 
+  final _notificationRepository = NotificationRepository();
+  final _transactionRepository = TransactionRepository();
+  int _unreadNotifications = 0;
+  RealtimeChannel? _notificationChannel;
+  List<Map<String, dynamic>> _todayAppointmentsCache = [];
+  List<AppNotification> _startingSoon = [];
+  final Set<String> _startingSoonNotified = {};
+  Timer? _startingSoonTimer;
+
   @override
   void initState() {
     super.initState();
     _loadBusinessSettings();
     _loadDashboardData();
     unawaited(_loadDashboardOrders());
+    unawaited(_refreshUnreadNotifications());
+    _subscribeToNotifications();
+    OutletContext.activeOutletId.addListener(_onOutletChangedForNotifications);
+    _startingSoonTimer = Timer.periodic(
+      const Duration(minutes: 1),
+      (_) => _refreshStartingSoon(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _startingSoonTimer?.cancel();
+    OutletContext.activeOutletId.removeListener(
+      _onOutletChangedForNotifications,
+    );
+    final channel = _notificationChannel;
+    _notificationChannel = null;
+    if (channel != null) {
+      unawaited(_notificationRepository.unsubscribe(channel));
+    }
+    super.dispose();
+  }
+
+  // ── Notifications ────────────────────────────────────────────────
+
+  void _onOutletChangedForNotifications() {
+    _startingSoonNotified.clear();
+    _startingSoon = [];
+    _subscribeToNotifications();
+    unawaited(_refreshUnreadNotifications());
+  }
+
+  void _subscribeToNotifications() {
+    final previous = _notificationChannel;
+    if (previous != null) {
+      unawaited(_notificationRepository.unsubscribe(previous));
+    }
+    _notificationChannel = _notificationRepository.subscribeToInserts(
+      _onNotificationInsert,
+    );
+  }
+
+  Future<void> _refreshUnreadNotifications() async {
+    try {
+      final count = await _notificationRepository.unreadCount();
+      if (!mounted) return;
+      setState(() => _unreadNotifications = count);
+    } catch (_) {
+      // The notifications table may not exist yet (migration 077 pending);
+      // the dashboard must keep working without it.
+    }
+  }
+
+  void _onNotificationInsert(AppNotification notification) {
+    if (!mounted) return;
+    setState(() => _unreadNotifications += 1);
+    _showNotificationToast(notification);
+    // New online bookings and cancellations change today's numbers.
+    unawaited(_loadDashboardData(showSpinner: false));
+  }
+
+  void _showNotificationToast(AppNotification notification) {
+    if (!mounted) return;
+    AppToast.notice(
+      context,
+      title: notification.title,
+      message: notification.body,
+      icon: _notificationIconFor(notification.type),
+      accentColor: _notificationAccentFor(notification.type),
+      actionLabel: notification.hasOpenableTarget ? 'View' : null,
+      onAction: notification.hasOpenableTarget
+          ? () => _openNotificationTarget(notification)
+          : null,
+    );
+  }
+
+  void _refreshStartingSoon() {
+    if (!mounted) return;
+    final now = DateTime.now();
+    final nowMinutes = now.hour * 60 + now.minute;
+    final soon = <AppNotification>[];
+    for (final data in _todayAppointmentsCache) {
+      final status = _asString(data['status']).toLowerCase();
+      if (status != 'confirmed') continue;
+      final id = _asString(data['id']);
+      if (id.isEmpty) continue;
+      final start = _timeToMinutes(_asString(data['startTime']));
+      final minutesAway = start - nowMinutes;
+      if (minutesAway < 0 || minutesAway > 10) continue;
+      final serviceName = _asString(data['serviceName'], 'Appointment');
+      final startLabel = _timeLabel(_asString(data['startTime']));
+      final timingTitle = minutesAway == 0
+          ? 'Appointment starting now'
+          : 'Appointment in $minutesAway minute${minutesAway == 1 ? '' : 's'}';
+      final notification = AppNotification(
+        id: 'soon-$id',
+        type: AppNotification.startingSoonType,
+        title: timingTitle,
+        body: '$serviceName at $startLabel',
+        appointmentId: id,
+        createdAt: now,
+      );
+      soon.add(notification);
+      if (_startingSoonNotified.add(id)) {
+        _showNotificationToast(notification);
+      }
+    }
+    setState(() => _startingSoon = soon);
+  }
+
+  Future<void> _openNotificationTarget(AppNotification notification) async {
+    if (!mounted) return;
+    if (notification.type != AppNotification.startingSoonType) {
+      unawaited(_notificationRepository.markRead(notification.id));
+    }
+    // Failed/expired online-payment notifications point to a booking hold.
+    // There is no hold-detail screen, so mark them read without pretending
+    // that a generic appointment screen is their destination.
+    if (!notification.hasOpenableTarget) {
+      unawaited(_refreshUnreadNotifications());
+      return;
+    }
+    final role = _currentUserRole;
+    if (notification.linksToTransaction) {
+      try {
+        final transaction = await _transactionRepository.getTransaction(
+          notification.transactionId,
+        );
+        final receiptNumber = _asString(transaction?['receiptNumber']);
+        if (!mounted) return;
+        if (receiptNumber.isNotEmpty) {
+          await showTransactionOrderDetailSheet(
+            context,
+            receiptNumber: receiptNumber,
+          );
+        } else {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => SalesHistoryScreen(userRole: role),
+            ),
+          );
+        }
+      } catch (_) {
+        if (!mounted) return;
+        await Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => SalesHistoryScreen(userRole: role),
+          ),
+        );
+      }
+    } else {
+      DateTime? initialDate;
+      if (notification.appointmentId.isNotEmpty) {
+        try {
+          final row = await _appointmentRepository.getAppointment(
+            notification.appointmentId,
+          );
+          initialDate = _asDateTime(row?['date']);
+        } catch (_) {
+          initialDate = null;
+        }
+      }
+      if (!mounted) return;
+      await Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => AppointmentsScreen(
+            userRole: role,
+            initialDate: initialDate,
+          ),
+        ),
+      );
+    }
+    unawaited(_refreshUnreadNotifications());
+    unawaited(_loadDashboardData(showSpinner: false));
+  }
+
+  Future<void> _openNotificationCenter() async {
+    await showDialog<void>(
+      context: context,
+      builder: (context) => _NotificationDialog(
+        repository: _notificationRepository,
+        startingSoon: _startingSoon,
+        onOpenTarget: _openNotificationTarget,
+      ),
+    );
+    unawaited(_refreshUnreadNotifications());
   }
 
   bool _isTablet(BuildContext context) =>
@@ -455,8 +657,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return _dashboardRepository.loadByIds(collection, ids);
   }
 
-  Future<void> _loadDashboardData() async {
-    if (mounted) {
+  Future<void> _loadDashboardData({bool showSpinner = true}) async {
+    if (mounted && showSpinner) {
       setState(() {
         _isLoadingDashboardData = true;
         _dashboardError = null;
@@ -687,8 +889,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
           therapists: therapistStatuses,
           recentTransactions: recentTransactions,
         );
+        _todayAppointmentsCache = todayAppointments;
         _isLoadingDashboardData = false;
       });
+      _refreshStartingSoon();
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -798,12 +1002,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final uid = _authRepository.currentUser?.id;
     if (!_isCurrentUserAdmin || uid == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Only admins can edit business settings'),
-          backgroundColor: Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
+      AppToast.error(
+        context,
+        'Only admins can edit business settings',
+        title: 'Not allowed',
       );
       return;
     }
@@ -865,22 +1067,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
         );
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Business settings updated'),
-          backgroundColor: Color(0xFF1B6B72),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.success(context, 'Business settings updated');
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Unable to save business settings: $e'),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.error(context, 'Unable to save business settings: $e');
     }
   }
 
@@ -927,6 +1117,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 dashboardData: _dashboardData,
                 isLoadingDashboard: _isLoadingDashboardData,
                 dashboardError: _dashboardError,
+                notificationCount: _unreadNotifications + _startingSoon.length,
+                onOpenNotifications: _openNotificationCenter,
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
@@ -943,6 +1135,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 dashboardData: _dashboardData,
                 isLoadingDashboard: _isLoadingDashboardData,
                 dashboardError: _dashboardError,
+                notificationCount: _unreadNotifications + _startingSoon.length,
+                onOpenNotifications: _openNotificationCenter,
                 onRefreshDashboard: _loadDashboardData,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
@@ -967,6 +1161,8 @@ class _TabletLayout extends StatelessWidget {
   final _DashboardData dashboardData;
   final bool isLoadingDashboard;
   final String? dashboardError;
+  final int notificationCount;
+  final VoidCallback onOpenNotifications;
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
@@ -983,6 +1179,8 @@ class _TabletLayout extends StatelessWidget {
     required this.dashboardData,
     required this.isLoadingDashboard,
     required this.dashboardError,
+    required this.notificationCount,
+    required this.onOpenNotifications,
     required this.onRefreshDashboard,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
@@ -1115,7 +1313,8 @@ class _TabletLayout extends StatelessWidget {
           email: email,
           role: role,
           isLoadingSettings: isLoadingSettings,
-          transactions: dashboardData.recentTransactions,
+          notificationCount: notificationCount,
+          onOpenNotifications: onOpenNotifications,
           onOpenSettings: onOpenSettings,
           onSwitchOutlet: onSwitchOutlet,
         ),
@@ -1266,7 +1465,8 @@ class _DashboardTopBar extends StatelessWidget {
   final String email;
   final String role;
   final bool isLoadingSettings;
-  final List<_TransactionSummary> transactions;
+  final int notificationCount;
+  final VoidCallback onOpenNotifications;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
 
@@ -1275,7 +1475,8 @@ class _DashboardTopBar extends StatelessWidget {
     required this.email,
     required this.role,
     required this.isLoadingSettings,
-    required this.transactions,
+    required this.notificationCount,
+    required this.onOpenNotifications,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
   });
@@ -1292,12 +1493,6 @@ class _DashboardTopBar extends StatelessWidget {
     );
   }
 
-  void _openNotifications(BuildContext context) {
-    showDialog<void>(
-      context: context,
-      builder: (context) => _NotificationDialog(transactions: transactions),
-    );
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -1354,8 +1549,8 @@ class _DashboardTopBar extends StatelessWidget {
           _RolePill(role: role, isLoading: isLoadingSettings),
           const SizedBox(width: AppSpacing.sm),
           IconButton.outlined(
-            onPressed: () => _openNotifications(context),
-            tooltip: 'Recent sales',
+            onPressed: onOpenNotifications,
+            tooltip: 'Notifications',
             style: IconButton.styleFrom(
               side: BorderSide(color: context.appBorder),
               shape: RoundedRectangleBorder(
@@ -1363,8 +1558,8 @@ class _DashboardTopBar extends StatelessWidget {
               ),
             ),
             icon: Badge(
-              isLabelVisible: transactions.isNotEmpty,
-              label: Text('${transactions.length}'),
+              isLabelVisible: notificationCount > 0,
+              label: Text('$notificationCount'),
               child: const Icon(Icons.notifications_none_outlined),
             ),
           ),
@@ -1771,6 +1966,8 @@ class _PhoneLayout extends StatelessWidget {
   final _DashboardData dashboardData;
   final bool isLoadingDashboard;
   final String? dashboardError;
+  final int notificationCount;
+  final VoidCallback onOpenNotifications;
   final Future<void> Function() onRefreshDashboard;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
@@ -1787,6 +1984,8 @@ class _PhoneLayout extends StatelessWidget {
     required this.dashboardData,
     required this.isLoadingDashboard,
     required this.dashboardError,
+    required this.notificationCount,
+    required this.onOpenNotifications,
     required this.onRefreshDashboard,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
@@ -1910,7 +2109,8 @@ class _PhoneLayout extends StatelessWidget {
             email: email,
             role: role,
             isLoadingSettings: isLoadingSettings,
-            transactions: dashboardData.recentTransactions,
+            notificationCount: notificationCount,
+            onOpenNotifications: onOpenNotifications,
             onOpenSettings: onOpenSettings,
             onSwitchOutlet: onSwitchOutlet,
           ),
@@ -2909,95 +3109,433 @@ class _RolePill extends StatelessWidget {
   }
 }
 
-class _NotificationDialog extends StatelessWidget {
-  final List<_TransactionSummary> transactions;
+class _NotificationDialog extends StatefulWidget {
+  final NotificationRepository repository;
+  final List<AppNotification> startingSoon;
+  final Future<void> Function(AppNotification) onOpenTarget;
 
-  const _NotificationDialog({required this.transactions});
+  const _NotificationDialog({
+    required this.repository,
+    required this.startingSoon,
+    required this.onOpenTarget,
+  });
+
+  @override
+  State<_NotificationDialog> createState() => _NotificationDialogState();
+}
+
+class _NotificationDialogState extends State<_NotificationDialog> {
+  static const _pageSize = 30;
+
+  List<AppNotification> _items = [];
+  bool _loading = true;
+  bool _hasMore = false;
+  int _limit = _pageSize;
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    try {
+      final items = await widget.repository.getNotifications(limit: _limit);
+      if (!mounted) return;
+      setState(() {
+        _items = items;
+        _hasMore = items.length >= _limit;
+        _loading = false;
+        _error = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.toString();
+      });
+    }
+  }
+
+  Future<void> _loadMore() async {
+    _limit += _pageSize;
+    await _load();
+  }
+
+  Future<void> _markAllRead() async {
+    try {
+      await widget.repository.markAllRead();
+    } catch (_) {}
+    await _load();
+  }
+
+  Future<void> _openTarget(AppNotification notification) async {
+    if (!notification.hasOpenableTarget) {
+      await widget.repository.markRead(notification.id);
+      await _load();
+      return;
+    }
+    Navigator.of(context).pop();
+    await widget.onOpenTarget(notification);
+  }
 
   @override
   Widget build(BuildContext context) {
+    final feed = [...widget.startingSoon, ..._items];
+    final feedRows = _notificationFeedRows(feed);
+    final unread = _items.where((n) => n.isUnread).length;
+
+    final screen = MediaQuery.of(context).size;
+    final isPhone = screen.width < 520;
+    final availableHeight = screen.height - (isPhone ? 32 : 48);
+    final dialogHeight = availableHeight
+        .clamp(360.0, isPhone ? 620.0 : 560.0)
+        .toDouble();
+
     return Dialog(
-      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      insetPadding: isPhone
+          ? const EdgeInsets.symmetric(horizontal: 10, vertical: 16)
+          : const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 620, maxHeight: 680),
+      child: SizedBox(
+        width: 620,
+        height: dialogHeight,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 18, 18, 22),
+          padding: EdgeInsets.fromLTRB(isPhone ? 12 : 18, 14, isPhone ? 12 : 18, 20),
           child: Column(
-            mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    alignment: Alignment.center,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Color(0xFFE0F3F1),
+                    ),
+                    child: const Icon(
+                      Icons.notifications_none_outlined,
+                      color: Color(0xFF1B6B72),
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Notifications',
+                          style: TextStyle(
+                            fontSize: 19,
+                            fontWeight: FontWeight.bold,
+                            color: context.appText,
+                          ),
+                        ),
+                        Text(
+                          unread > 0 ? '$unread unread' : 'All caught up',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            color: Color(0xFF9E9E9E),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (unread > 0)
+                    TextButton(
+                      onPressed: _markAllRead,
+                      child: const Text(
+                        'Mark all read',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
                   IconButton(
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close),
-                    color: const Color(0xFF1E88E5),
+                    color: const Color(0xFF9E9E9E),
+                    tooltip: 'Close',
                   ),
-                  const Spacer(),
                 ],
               ),
-              const SizedBox(height: 4),
-              Center(
-                child: Container(
-                  width: 82,
-                  height: 82,
-                  alignment: Alignment.center,
-                  decoration: const BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: Color(0xFFE0F3F1),
-                  ),
-                  child: const Icon(
-                    Icons.notifications_none_outlined,
-                    color: Color(0xFF1B6B72),
-                    size: 38,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 18),
-              const Center(
-                child: Text(
-                  'Recent Transactions',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 28,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 6),
-              Center(
-                child: Text(
-                  transactions.isEmpty
-                      ? 'No paid transactions yet'
-                      : '${transactions.length} recent transactions',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFF9E9E9E),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 24),
-              Flexible(
-                child: ScrollConfiguration(
-                  behavior: const _NoScrollbarScrollBehavior(),
-                  child: ListView.separated(
-                    shrinkWrap: true,
-                    padding: EdgeInsets.zero,
-                    itemCount: transactions.isEmpty ? 1 : transactions.length,
-                    separatorBuilder: (_, _) => const SizedBox(height: 12),
-                    itemBuilder: (context, index) {
-                      if (transactions.isEmpty) {
-                        return const _NotificationEmptyState();
-                      }
-                      return _TransactionTile(transaction: transactions[index]);
-                    },
-                  ),
-                ),
+              const SizedBox(height: 14),
+              Expanded(
+                child: _loading && _items.isEmpty
+                    ? const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 48),
+                        child: Center(child: CircularProgressIndicator()),
+                      )
+                    : _error != null && feed.isEmpty
+                    ? Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        child: Text(
+                          'Unable to load notifications: $_error',
+                          style: const TextStyle(
+                            fontSize: 13,
+                            color: Color(0xFFB45309),
+                          ),
+                        ),
+                      )
+                    : feed.isEmpty
+                    ? const _NotificationEmptyState()
+                    : ScrollConfiguration(
+                        behavior: const _NoScrollbarScrollBehavior(),
+                        child: ListView.separated(
+                          shrinkWrap: true,
+                          padding: EdgeInsets.zero,
+                          itemCount: feedRows.length + (_hasMore ? 1 : 0),
+                          separatorBuilder: (_, _) =>
+                              const SizedBox(height: 10),
+                          itemBuilder: (context, index) {
+                            if (index >= feedRows.length) {
+                              return Center(
+                                child: TextButton(
+                                  onPressed: _loading ? null : _loadMore,
+                                  child: Text(
+                                    _loading
+                                        ? 'Loading...'
+                                        : 'View older notifications',
+                                    style: const TextStyle(
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            }
+                            final row = feedRows[index];
+                            final notification = row.notification;
+                            if (notification == null) {
+                              return _NotificationSectionLabel(
+                                label: row.sectionLabel!,
+                              );
+                            }
+                            return _NotificationTile(
+                              notification: notification,
+                              onTap: () => _openTarget(notification),
+                            );
+                          },
+                        ),
+                      ),
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationFeedRow {
+  final String? sectionLabel;
+  final AppNotification? notification;
+
+  const _NotificationFeedRow.section(this.sectionLabel)
+    : notification = null;
+
+  const _NotificationFeedRow.item(this.notification) : sectionLabel = null;
+}
+
+List<_NotificationFeedRow> _notificationFeedRows(
+  List<AppNotification> notifications,
+) {
+  final rows = <_NotificationFeedRow>[];
+  String? currentSection;
+  for (final notification in notifications) {
+    final section = _notificationSectionFor(notification.createdAt);
+    if (section != currentSection) {
+      currentSection = section;
+      rows.add(_NotificationFeedRow.section(section));
+    }
+    rows.add(_NotificationFeedRow.item(notification));
+  }
+  return rows;
+}
+
+String _notificationSectionFor(DateTime value) {
+  final date = value.toLocal();
+  final now = DateTime.now();
+  final today = DateTime(now.year, now.month, now.day);
+  final day = DateTime(date.year, date.month, date.day);
+  final difference = today.difference(day).inDays;
+  if (difference == 0) return 'Today';
+  if (difference == 1) return 'Yesterday';
+  return DateFormat('EEEE, d MMMM').format(date);
+}
+
+IconData _notificationIconFor(String type) => switch (type) {
+  'new_online_appointment' => Icons.event_available_outlined,
+  'online_payment_received' || 'payment_received' => Icons.payments_outlined,
+  'appointment_checked_in' => Icons.login_rounded,
+  'payment_failed' => Icons.error_outline,
+  'payment_expired' => Icons.timer_off_outlined,
+  'appointment_cancelled' => Icons.event_busy_outlined,
+  'appointment_voided' => Icons.block_outlined,
+  'refund_completed' => Icons.undo_outlined,
+  'transaction_review' => Icons.rate_review_outlined,
+  AppNotification.startingSoonType => Icons.schedule_outlined,
+  _ => Icons.notifications_none_outlined,
+};
+
+Color _notificationAccentFor(String type) => switch (type) {
+  'payment_failed' ||
+  'payment_expired' ||
+  'appointment_cancelled' ||
+  'appointment_voided' => const Color(0xFFC62828),
+  'transaction_review' || 'refund_completed' => const Color(0xFFB45309),
+  'online_payment_received' || 'payment_received' => const Color(0xFF15803D),
+  'appointment_checked_in' => const Color(0xFF2563EB),
+  AppNotification.startingSoonType => const Color(0xFF7C3AED),
+  _ => const Color(0xFF1B6B72),
+};
+
+class _NotificationSectionLabel extends StatelessWidget {
+  final String label;
+
+  const _NotificationSectionLabel({required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 2),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w800,
+          color: context.appMuted,
+          letterSpacing: 0.2,
+        ),
+      ),
+    );
+  }
+}
+
+class _NotificationTile extends StatelessWidget {
+  final AppNotification notification;
+  final VoidCallback? onTap;
+
+  const _NotificationTile({required this.notification, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = _notificationAccentFor(notification.type);
+    final timeLabel = DateFormat(
+      'd MMM, h:mm a',
+    ).format(notification.createdAt);
+
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: notification.isUnread
+              ? Color.alphaBlend(
+                  accent.withValues(alpha: 0.08),
+                  context.appSurfaceRaised,
+                )
+              : context.appSurfaceRaised,
+          border: Border.all(
+            color: notification.isUnread
+                ? accent.withValues(alpha: 0.35)
+                : context.appBorder,
+          ),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: 38,
+              height: 38,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: accent.withValues(alpha: 0.12),
+              ),
+              child: Icon(
+                _notificationIconFor(notification.type),
+                size: 20,
+                color: accent,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          notification.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14.5,
+                            fontWeight: notification.isUnread
+                                ? FontWeight.w700
+                                : FontWeight.w600,
+                            color: context.appText,
+                          ),
+                        ),
+                      ),
+                      if (notification.isUnread)
+                        Container(
+                          width: 8,
+                          height: 8,
+                          margin: const EdgeInsets.only(left: 8, top: 4),
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: accent,
+                          ),
+                        ),
+                    ],
+                  ),
+                  if (notification.body.isNotEmpty) ...[
+                    const SizedBox(height: 3),
+                    Text(
+                      notification.body,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 13,
+                        color: context.appMuted,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 6),
+                  Text(
+                    notification.type == AppNotification.startingSoonType
+                        ? 'Now'
+                        : timeLabel,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: context.appMuted,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            if (notification.hasOpenableTarget)
+              const Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Icon(
+                  Icons.chevron_right,
+                  size: 18,
+                  color: Color(0xFF9E9E9E),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -3018,100 +3556,13 @@ class _NotificationEmptyState extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
       ),
       child: Text(
-        'Completed payments will appear here.',
+        'Online bookings, payments, cancellations, and refunds will appear here.',
         textAlign: TextAlign.center,
         style: TextStyle(
           fontSize: 13,
           color: context.appMuted,
           fontWeight: FontWeight.w600,
         ),
-      ),
-    );
-  }
-}
-
-class _TransactionTile extends StatelessWidget {
-  final _TransactionSummary transaction;
-
-  const _TransactionTile({required this.transaction});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: context.appSurfaceRaised,
-        border: Border.all(color: context.appBorder),
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _IconBox(
-            icon: Icons.shopping_cart_outlined,
-            bg: const Color(0xFFE0F3F1),
-            color: const Color(0xFF1B6B72),
-            size: 40,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  transaction.customerName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  transaction.serviceName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFF5F6B7A),
-                  ),
-                ),
-                if (transaction.therapistName != '-') ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    'By ${transaction.therapistName}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: Color(0xFF5F6B7A),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 12),
-                Text(
-                  '${transaction.date}  -  ${transaction.time}',
-                  style: const TextStyle(
-                    fontSize: 14,
-                    color: Color(0xFF5F6B7A),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 12),
-          Text(
-            'RM ${transaction.amount.toStringAsFixed(0)}',
-            style: const TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w600,
-              color: Color(0xFF1B6B72),
-            ),
-          ),
-        ],
       ),
     );
   }
@@ -3192,13 +3643,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
       });
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.toString()),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.error(context, e.toString());
     }
   }
 
@@ -3261,13 +3706,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
       Navigator.of(context, rootNavigator: true).pop();
     } on AuthRepositoryException catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(e.message),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.error(context, e.message);
     }
   }
 
@@ -3370,7 +3809,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                     ),
                     const SizedBox(height: 8),
                     const Text(
-                      'Timetable lines follow these hours. Orders and services can still run after closing.',
+                      'Timetable lines follow these hours. For an overnight close, enter the next-day time (for example, 02:30 means 2:30 AM the following day).',
                       style: TextStyle(fontSize: 13, color: Color(0xFF5F6B7A)),
                     ),
                     const SizedBox(height: 24),

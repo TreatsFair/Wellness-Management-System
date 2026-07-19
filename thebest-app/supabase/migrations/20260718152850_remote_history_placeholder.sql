@@ -1,0 +1,4 @@
+-- Production already records this migration version as applied.
+-- This no-op file reconciles the local migration directory without rewriting
+-- production migration history. The original SQL is already reflected in the
+-- live schema.

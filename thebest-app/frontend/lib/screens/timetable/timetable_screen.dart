@@ -608,9 +608,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
         );
 
         if (compact) {
-          return Scaffold(
-            body: SafeArea(child: details),
-          );
+          return Scaffold(body: SafeArea(child: details));
         }
 
         final drawerWidth = DetailDrawerLayout.widthFor(screenWidth);
@@ -625,9 +623,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
           child: Padding(
             padding: EdgeInsets.symmetric(
               vertical: verticalMargin,
-            ).copyWith(
-              right: DetailDrawerLayout.rightMargin,
-            ),
+            ).copyWith(right: DetailDrawerLayout.rightMargin),
             child: Material(
               color: routeContext.appSurface,
               elevation: 14,
@@ -878,6 +874,8 @@ class _TimetableEntry {
   final String paymentMethod;
   final String paymentStatus;
   final double paidAmount;
+  final double paidServicePrice;
+  final double paidSstAmount;
   final DateTime selectedDate;
   final int lateGraceMinutes;
   final int delayWarningMinutes;
@@ -910,6 +908,8 @@ class _TimetableEntry {
     required this.paymentMethod,
     required this.paymentStatus,
     required this.paidAmount,
+    required this.paidServicePrice,
+    required this.paidSstAmount,
     required this.selectedDate,
     required this.lateGraceMinutes,
     required this.delayWarningMinutes,
@@ -975,6 +975,8 @@ class _TimetableEntry {
       paymentMethod: asString(transaction?['paymentMethod']),
       paymentStatus: asString(row['paymentStatus'], 'unpaid'),
       paidAmount: asDouble(transaction?['totalAmount']),
+      paidServicePrice: asDouble(transaction?['servicePrice']),
+      paidSstAmount: asDouble(transaction?['sstAmount']),
       selectedDate: selectedDate,
       lateGraceMinutes: lateGraceMinutes,
       delayWarningMinutes: delayWarningMinutes,
@@ -1021,10 +1023,6 @@ class _TimetableEntry {
     final completedAt = actualCompletedAt?.toLocal();
     if (completedAt != null && completedAt.isAfter(actualStart)) {
       return completedAt;
-    }
-    final expectedEnd = endAt?.toLocal();
-    if (expectedEnd != null && expectedEnd.isAfter(actualStart)) {
-      return expectedEnd;
     }
     return actualStart.add(Duration(minutes: scheduledServiceMinutes));
   }
@@ -2477,44 +2475,50 @@ class _TimetableOverview extends StatelessWidget {
       ),
     );
 
-    Widget inProgressSection({int? cap, bool useSheetForViewAll = false}) {
+    Widget inProgressContent({int? cap, bool useSheetForViewAll = false}) {
       final visible = cap == null ? inProgress : inProgress.take(cap).toList();
       final hidden = inProgress.length - visible.length;
-      return _OverviewPanel(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _OverviewSectionHeader(
-              title: 'In Progress Now (${inProgress.length})',
-              onViewAll: useSheetForViewAll && inProgress.isNotEmpty
-                  ? showAllInProgress
-                  : () => onOpenTimetable('staff'),
-            ),
-            const SizedBox(height: 10),
-            if (inProgress.isEmpty)
-              const _OverviewEmptyHint(
-                icon: Icons.timelapse_outlined,
-                message: 'No services are in progress right now.',
-              )
-            else ...[
-              for (var i = 0; i < visible.length; i++) ...[
-                _OverviewInProgressCard(
-                  entry: visible[i],
-                  selectedToday: selectedToday,
-                  nowMinutes: nowMinutes,
-                  onTap: () => onTapEntry(visible[i]),
-                ),
-                if (i != visible.length - 1) const SizedBox(height: 8),
-              ],
-              if (hidden > 0) ...[
-                const SizedBox(height: 8),
-                _OverviewMoreRow(count: hidden, onTap: showAllInProgress),
-              ],
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _OverviewSectionHeader(
+            title: 'In Progress Now (${inProgress.length})',
+            onViewAll: useSheetForViewAll && inProgress.isNotEmpty
+                ? showAllInProgress
+                : () => onOpenTimetable('staff'),
+          ),
+          const SizedBox(height: 10),
+          if (inProgress.isEmpty)
+            const _OverviewEmptyHint(
+              icon: Icons.timelapse_outlined,
+              message: 'No services are in progress right now.',
+            )
+          else ...[
+            for (var i = 0; i < visible.length; i++) ...[
+              _OverviewInProgressCard(
+                entry: visible[i],
+                selectedToday: selectedToday,
+                nowMinutes: nowMinutes,
+                onTap: () => onTapEntry(visible[i]),
+              ),
+              if (i != visible.length - 1) const SizedBox(height: 8),
+            ],
+            if (hidden > 0) ...[
+              const SizedBox(height: 8),
+              _OverviewMoreRow(count: hidden, onTap: showAllInProgress),
             ],
           ],
-        ),
+        ],
       );
     }
+
+    Widget inProgressSection({int? cap, bool useSheetForViewAll = false}) =>
+        _OverviewPanel(
+          child: inProgressContent(
+            cap: cap,
+            useSheetForViewAll: useSheetForViewAll,
+          ),
+        );
 
     Widget freeTherapistsSection() => _OverviewPanel(
       child: Column(
@@ -2536,7 +2540,7 @@ class _TimetableOverview extends StatelessWidget {
                 const gap = 10.0;
                 final columns = (chipConstraints.maxWidth / 190).floor().clamp(
                   1,
-                  4,
+                  6,
                 );
                 final width =
                     (chipConstraints.maxWidth - gap * (columns - 1)) / columns;
@@ -2599,61 +2603,93 @@ class _TimetableOverview extends StatelessWidget {
         ),
       );
 
-      Widget roomUnitRow(_TimetableRoom zone) {
-        final units = roomUnits.where((unit) => unit.zoneId == zone.id).toList()
-          ..sort((a, b) => a.unitNumber.compareTo(b.unitNumber));
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            const gap = 8.0;
-            final width = (constraints.maxWidth - gap * 2) / 3;
-            return Row(
+      String zoneHeading(_TimetableRoom zone) {
+        final name = zone.name.toLowerCase();
+        if (name.contains('ground')) return 'Ground Massage Rooms';
+        if (name.contains('upper')) return 'Upper Massage Rooms';
+        return zone.name;
+      }
+
+      // These grids must not measure themselves with a LayoutBuilder: this
+      // panel sits inside an IntrinsicHeight (see the tablet layout below), and
+      // LayoutBuilder cannot report intrinsic dimensions. Doing so throws in
+      // debug and silently collapses the whole overview to zero height in
+      // release. Flex the columns instead of computing pixel widths.
+      Widget flexGrid({
+        required int columns,
+        required double gap,
+        required List<Widget> cells,
+      }) {
+        final rows = <Widget>[];
+        for (var start = 0; start < cells.length; start += columns) {
+          final slice = cells.skip(start).take(columns).toList();
+          rows.add(
+            Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                for (var i = 0; i < units.length; i++) ...[
-                  if (i > 0) const SizedBox(width: gap),
-                  SizedBox(
-                    width: width,
-                    child: _OverviewRoomUnitCard(
-                      zone: zone,
-                      unit: units[i],
-                      entries: entries,
-                      nowMinutes: nowMinutes,
-                      selectedToday: selectedToday,
-                    ),
+                for (var i = 0; i < columns; i++) ...[
+                  if (i > 0) SizedBox(width: gap),
+                  Expanded(
+                    child: i < slice.length
+                        ? slice[i]
+                        : const SizedBox.shrink(),
                   ),
                 ],
               ],
-            );
-          },
+            ),
+          );
+        }
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 0; i < rows.length; i++) ...[
+              if (i > 0) SizedBox(height: gap),
+              rows[i],
+            ],
+          ],
         );
       }
 
-      Widget capacityZoneRow() => LayoutBuilder(
-        builder: (context, constraints) {
-          const gap = 10.0;
-          final width = (constraints.maxWidth - gap) / 2;
-          return Wrap(
-            spacing: gap,
-            runSpacing: gap,
-            children: [
-              for (final room in capacityZones)
-                SizedBox(
-                  width: width,
-                  child: _OverviewZoneCard(
-                    room: room,
-                    compact: true,
-                    occupied: entries
-                        .where(
-                          (entry) =>
-                              entry.roomId == room.id &&
-                              entry.isHappeningNow(now),
-                        )
-                        .length,
-                  ),
+      Widget roomUnitRow(_TimetableRoom zone, String heading) {
+        final units = roomUnits.where((unit) => unit.zoneId == zone.id).toList()
+          ..sort((a, b) => a.unitNumber.compareTo(b.unitNumber));
+        return flexGrid(
+          columns: 3,
+          gap: 8,
+          cells: [
+            for (final unit in units)
+              _OverviewRoomUnitCard(
+                unit: unit,
+                displayName: _dedupeZoneLabel(
+                  _dedupeZoneLabel(unit.name, heading),
+                  zone.name,
                 ),
-            ],
-          );
-        },
+                entries: entries,
+                nowMinutes: nowMinutes,
+                selectedToday: selectedToday,
+              ),
+          ],
+        );
+      }
+
+      Widget capacityZoneRow() => flexGrid(
+        columns: 2,
+        gap: 10,
+        cells: [
+          for (final room in capacityZones)
+            _OverviewZoneCard(
+              room: room,
+              displayName: _dedupeZoneLabel(room.name, 'Foot Zones'),
+              compact: true,
+              occupied: entries
+                  .where(
+                    (entry) =>
+                        entry.roomId == room.id && entry.isHappeningNow(now),
+                  )
+                  .length,
+            ),
+        ],
       );
 
       return _OverviewPanel(
@@ -2672,14 +2708,11 @@ class _TimetableOverview extends StatelessWidget {
               )
             else ...[
               for (var i = 0; i < zonesWithUnits.length; i++) ...[
-                groupLabel(
-                  zonesWithUnits[i].name.toLowerCase().contains('ground')
-                      ? 'Ground Massage Rooms'
-                      : zonesWithUnits[i].name.toLowerCase().contains('upper')
-                      ? 'Upper Massage Rooms'
-                      : zonesWithUnits[i].name,
+                groupLabel(zoneHeading(zonesWithUnits[i])),
+                roomUnitRow(
+                  zonesWithUnits[i],
+                  zoneHeading(zonesWithUnits[i]),
                 ),
-                roomUnitRow(zonesWithUnits[i]),
                 if (i != zonesWithUnits.length - 1 || capacityZones.isNotEmpty)
                   const SizedBox(height: 12),
               ],
@@ -2693,56 +2726,75 @@ class _TimetableOverview extends StatelessWidget {
       );
     }
 
-    Widget upNextSection({int? cap}) {
+    Widget upNextContent({int? cap}) {
       final visible = cap == null ? upNext : upNext.take(cap).toList();
       final hidden = upNext.length - visible.length;
-      return _OverviewPanel(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            _OverviewSectionHeader(
-              title: 'Up Next (${upNext.length})',
-              onViewAll: () => onOpenTimetable('staff'),
-            ),
-            const SizedBox(height: 10),
-            if (upNext.isEmpty)
-              const _OverviewEmptyHint(
-                icon: Icons.event_available_outlined,
-                message: 'No upcoming bookings for this day.',
-              )
-            else
-              _OverviewContainedList(
-                itemCount: visible.length,
-                itemBuilder: (index) => _OverviewUpNextRow(
-                  entry: visible[index],
-                  selectedToday: selectedToday,
-                  nowMinutes: nowMinutes,
-                  onTap: () => onTapEntry(visible[index]),
-                ),
-                trailingBuilder: hidden > 0
-                    ? () => _OverviewMoreRow(
-                        count: hidden,
-                        onTap: () => showMore(
-                          'Up Next',
-                          upNext,
-                          (sheetContext, entry) => _OverviewUpNextRow(
-                            entry: entry,
-                            selectedToday: selectedToday,
-                            nowMinutes: nowMinutes,
-                            onTap: () {
-                              Navigator.of(sheetContext).pop();
-                              onTapEntry(entry);
-                            },
-                          ),
-                          contained: true,
-                        ),
-                      )
-                    : null,
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _OverviewSectionHeader(
+            title: 'Up Next (${upNext.length})',
+            onViewAll: () => onOpenTimetable('staff'),
+          ),
+          const SizedBox(height: 10),
+          if (upNext.isEmpty)
+            const _OverviewEmptyHint(
+              icon: Icons.event_available_outlined,
+              message: 'No upcoming bookings for this day.',
+            )
+          else
+            _OverviewContainedList(
+              itemCount: visible.length,
+              itemBuilder: (index) => _OverviewUpNextRow(
+                entry: visible[index],
+                selectedToday: selectedToday,
+                nowMinutes: nowMinutes,
+                onTap: () => onTapEntry(visible[index]),
               ),
-          ],
-        ),
+              trailingBuilder: hidden > 0
+                  ? () => _OverviewMoreRow(
+                      count: hidden,
+                      onTap: () => showMore(
+                        'Up Next',
+                        upNext,
+                        (sheetContext, entry) => _OverviewUpNextRow(
+                          entry: entry,
+                          selectedToday: selectedToday,
+                          nowMinutes: nowMinutes,
+                          onTap: () {
+                            Navigator.of(sheetContext).pop();
+                            onTapEntry(entry);
+                          },
+                        ),
+                        contained: true,
+                      ),
+                    )
+                  : null,
+            ),
+        ],
       );
     }
+
+    Widget upNextSection({int? cap}) =>
+        _OverviewPanel(child: upNextContent(cap: cap));
+
+    // Both halves sit tight under each other and the panel takes its height
+    // from the row (see IntrinsicHeight below), so an empty In Progress list no
+    // longer strands a gap above Up Next.
+    Widget compactScheduleSection() => _OverviewPanel(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          inProgressContent(cap: 2),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 16),
+            child: Divider(height: 1, color: Color(0xFFE2E8F0)),
+          ),
+          upNextContent(cap: 2),
+        ],
+      ),
+    );
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2761,27 +2813,47 @@ class _TimetableOverview extends StatelessWidget {
             ],
           );
         }
+        final useCompactSchedule = inProgress.length <= 2;
         return SingleChildScrollView(
           padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
           child: Column(
             children: [
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: inProgressSection(cap: 3)),
-                  const SizedBox(width: 16),
-                  Expanded(child: zonesSection()),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(child: upNextSection(cap: 4)),
-                  const SizedBox(width: 16),
-                  Expanded(child: freeTherapistsSection()),
-                ],
-              ),
+              if (useCompactSchedule) ...[
+                // IntrinsicHeight lets the schedule panel take its height from
+                // whichever column is naturally taller instead of a fixed
+                // figure, so the row shrinks on quiet days and grows on busy
+                // ones without leaving dead space.
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Expanded(child: compactScheduleSection()),
+                      const SizedBox(width: 16),
+                      Expanded(child: zonesSection()),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 16),
+                freeTherapistsSection(),
+              ] else ...[
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: inProgressSection(cap: 3)),
+                    const SizedBox(width: 16),
+                    Expanded(child: zonesSection()),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(child: upNextSection(cap: 4)),
+                    const SizedBox(width: 16),
+                    Expanded(child: freeTherapistsSection()),
+                  ],
+                ),
+              ],
             ],
           ),
         );
@@ -3358,16 +3430,46 @@ class _StatusDot extends StatelessWidget {
   }
 }
 
+/// Zone cards already sit under a group heading that names the zone, so a card
+/// label repeating that heading is noise. Removes the heading phrase (and its
+/// singular form) from [label], keeping [label] untouched if nothing survives.
+String _dedupeZoneLabel(String label, String heading) {
+  final trimmedHeading = heading.trim();
+  if (trimmedHeading.isEmpty) return label;
+  final phrases = <String>{
+    trimmedHeading,
+    if (trimmedHeading.endsWith('s'))
+      trimmedHeading.substring(0, trimmedHeading.length - 1),
+  };
+  var result = label;
+  var matched = '';
+  for (final phrase in phrases) {
+    final pattern = RegExp(RegExp.escape(phrase), caseSensitive: false);
+    if (pattern.hasMatch(result)) matched = phrase;
+    result = result.replaceAll(pattern, ' ');
+  }
+  result = result.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (result.isEmpty) return label;
+  // A zone named "Ground Body Massage Rooms" would otherwise reduce its
+  // "Ground Body Massage Room 1" unit to a bare "1", so keep the noun the
+  // number belongs to.
+  if (!result.contains(RegExp(r'[A-Za-z]'))) {
+    final noun = matched.split(RegExp(r'\s+')).last;
+    return noun.isEmpty ? label : '$noun $result';
+  }
+  return result;
+}
+
 class _OverviewRoomUnitCard extends StatelessWidget {
-  final _TimetableRoom zone;
   final _TimetableRoomUnit unit;
+  final String displayName;
   final List<_TimetableEntry> entries;
   final int nowMinutes;
   final bool selectedToday;
 
   const _OverviewRoomUnitCard({
-    required this.zone,
     required this.unit,
+    required this.displayName,
     required this.entries,
     required this.nowMinutes,
     required this.selectedToday,
@@ -3436,7 +3538,7 @@ class _OverviewRoomUnitCard extends StatelessWidget {
               const SizedBox(width: 7),
               Expanded(
                 child: Text(
-                  unit.name,
+                  displayName,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
@@ -3447,17 +3549,6 @@ class _OverviewRoomUnitCard extends StatelessWidget {
                 ),
               ),
             ],
-          ),
-          const SizedBox(height: 6),
-          Text(
-            zone.name,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: const TextStyle(
-              fontSize: 10.5,
-              fontWeight: FontWeight.w700,
-              color: Color(0xFF64748B),
-            ),
           ),
           const SizedBox(height: 6),
           Row(
@@ -3493,12 +3584,14 @@ class _OverviewRoomUnitCard extends StatelessWidget {
 
 class _OverviewZoneCard extends StatelessWidget {
   final _TimetableRoom room;
+  final String? displayName;
   final int occupied;
   final bool compact;
 
   const _OverviewZoneCard({
     required this.room,
     required this.occupied,
+    this.displayName,
     this.compact = false,
   });
 
@@ -3541,7 +3634,7 @@ class _OverviewZoneCard extends StatelessWidget {
             height: compact ? 28 : 34,
             child: Center(
               child: Text(
-                room.name,
+                displayName ?? room.name,
                 maxLines: 2,
                 textAlign: TextAlign.center,
                 overflow: TextOverflow.ellipsis,
@@ -4053,10 +4146,7 @@ class _FullscreenButton extends StatelessWidget {
   final bool fullscreen;
   final VoidCallback onTap;
 
-  const _FullscreenButton({
-    required this.fullscreen,
-    required this.onTap,
-  });
+  const _FullscreenButton({required this.fullscreen, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -4847,7 +4937,10 @@ class _ResourceAppointmentBlock extends StatelessWidget {
         (entry.serviceEndMinutes - canvasStartMinute) * minuteWidth;
     final bufferWidth = cleanupMinutes * minuteWidth;
     final large = serviceWidth >= 154;
-    final medium = serviceWidth >= 108 && serviceWidth < 154;
+    // Keep the size bands contiguous. The previous 96-107px gap matched no
+    // layout at all, so cards in that range silently lost their service line
+    // (most visible with the Large accessibility scale).
+    final medium = serviceWidth >= 96 && serviceWidth < 154;
     final small = serviceWidth < 96;
     final showTinyIcon = serviceWidth >= 76;
     final displayName = small
@@ -4967,20 +5060,7 @@ class _ResourceAppointmentBlock extends StatelessWidget {
                         ),
                       ],
                     ),
-                    if (!small && large && entry.isInProgress) ...[
-                      const SizedBox(height: 3),
-                      Text(
-                        'In Progress',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w900,
-                          color: style.color,
-                        ),
-                      ),
-                    ],
-                    if (!small && large && !entry.isInProgress) ...[
+                    if (!small && large) ...[
                       const SizedBox(height: 3),
                       Text(
                         serviceLabel,
@@ -5137,15 +5217,14 @@ class _FreeAvailabilitySegment extends StatelessWidget {
     final left = (segment.start - canvasStartMinute) * minuteWidth;
     final width = (segment.end - segment.start) * minuteWidth;
     if (width < 8) return const SizedBox.shrink();
-    final shouldLabel =
-        segment.isFinalAfterBusy && !isPastGap && width >= 72;
+    final shouldLabel = segment.isFinalAfterBusy && !isPastGap && width >= 72;
     final useCompactLabel = width < 150;
-    final labelTime = _clockLabel(
-      _minutesToTime(segment.labelStart),
-    );
-    final label = useCompactLabel
-        ? 'Free after\n$labelTime'
-        : 'Free after $labelTime';
+    final labelTime = _clockLabel(_minutesToTime(segment.labelStart));
+    final label = segment.followsInProgress
+        ? useCompactLabel
+              ? 'Free after\n$labelTime'
+              : 'Free after $labelTime'
+        : 'Available';
     return Positioned(
       left: left,
       top: top,
@@ -5361,12 +5440,14 @@ class _ScheduleSegment {
   final int end;
   final int labelStart;
   final bool isFinalAfterBusy;
+  final bool followsInProgress;
 
   const _ScheduleSegment(
     this.start,
     this.end, {
     int? labelStart,
     this.isFinalAfterBusy = false,
+    this.followsInProgress = false,
   }) : labelStart = labelStart ?? start;
 }
 
@@ -5385,6 +5466,7 @@ List<_ScheduleSegment> _freeSegments(
                 openMinute,
                 closeMinute,
               ),
+              followsInProgress: entry.isInProgress,
             ),
           )
           .where((segment) => segment.end > segment.start)
@@ -5395,19 +5477,19 @@ List<_ScheduleSegment> _freeSegments(
   var cursor = openMinute;
   var labelCursor = openMinute;
   var passedBusy = false;
+  var trailingBusyInProgress = false;
   for (final segment in busy) {
     if (segment.start > cursor) {
       free.add(
-        _ScheduleSegment(
-          cursor,
-          segment.start,
-          labelStart: labelCursor,
-        ),
+        _ScheduleSegment(cursor, segment.start, labelStart: labelCursor),
       );
     }
     if (segment.end > cursor) {
       cursor = segment.end;
+      trailingBusyInProgress = segment.followsInProgress;
       if (segment.labelStart > labelCursor) labelCursor = segment.labelStart;
+    } else if (segment.end == cursor && segment.followsInProgress) {
+      trailingBusyInProgress = true;
     }
     passedBusy = true;
   }
@@ -5418,6 +5500,7 @@ List<_ScheduleSegment> _freeSegments(
         closeMinute,
         labelStart: labelCursor,
         isFinalAfterBusy: passedBusy,
+        followsInProgress: trailingBusyInProgress,
       ),
     );
   }
@@ -7342,6 +7425,63 @@ class _TimetableDetailCard extends StatefulWidget {
 
 class _TimetableDetailCardState extends State<_TimetableDetailCard> {
   bool _saving = false;
+  BusinessRuleSettings? _businessSettings;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadBusinessSettings();
+  }
+
+  Future<void> _loadBusinessSettings() async {
+    try {
+      final settings = await BusinessSettingsRepository().getActiveSettings();
+      if (!mounted) return;
+      setState(() => _businessSettings = settings);
+    } catch (_) {
+      // Leave the breakdown off — the card still shows the stored price.
+    }
+  }
+
+  /// Pricing shown in the popup.
+  ///
+  /// Once a bill exists the transaction is the source of truth — it is what the
+  /// customer actually paid, and it is what History and the receipt display.
+  /// `appointments.total_price` is *not* usable here: walk-ins store it net of
+  /// SST, so an inclusive outlet would render RM 113.21 for a RM 120 sale.
+  ///
+  /// Before payment there is no transaction, so fall back to the booked price
+  /// and project SST for exclusive outlets only — inclusive outlets already
+  /// carry the tax inside that figure.
+  PriceBreakdown? get _pricingBreakdown {
+    final entry = widget.entry;
+    final settings = _businessSettings;
+    final paid = entry.hasPayment && entry.paidAmount > 0;
+
+    // Inclusive outlets (PV128): the customer-facing figure already contains
+    // the tax, so show it whole with no split.
+    if (settings == null || !settings.sstEnabled || settings.isInclusive) {
+      if (!paid) return null;
+      return PriceBreakdown(
+        servicePrice: entry.paidAmount,
+        sstAmount: 0,
+        totalAmount: entry.paidAmount,
+      );
+    }
+
+    // Exclusive outlets (Taman Wahyu): service price plus SST on top.
+    if (paid) {
+      return PriceBreakdown(
+        servicePrice: entry.paidServicePrice > 0
+            ? entry.paidServicePrice
+            : entry.paidAmount - entry.paidSstAmount,
+        sstAmount: entry.paidSstAmount,
+        totalAmount: entry.paidAmount,
+      );
+    }
+    final projected = settings.priceBreakdown(entry.price);
+    return projected.sstAmount > 0 ? projected : null;
+  }
 
   Future<void> _run(Future<bool> Function()? action) async {
     if (_saving || action == null) return;
@@ -7499,8 +7639,15 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
               ),
             ),
             const SizedBox(height: 10),
-            _TimetableServiceDetailCard(entry: entry, accent: accent),
-            _TimetableGrandTotal(total: entry.price),
+            _TimetableServiceDetailCard(
+              entry: entry,
+              accent: accent,
+              sstBreakdown: _pricingBreakdown,
+              sstLabel: _businessSettings?.sstLabel ?? 'SST',
+            ),
+            _TimetableGrandTotal(
+              total: _pricingBreakdown?.totalAmount ?? entry.price,
+            ),
             if (entry.hasPayment) ...[
               const SizedBox(height: 10),
               _TimetableReceiptCard(
@@ -7726,9 +7873,15 @@ class _TimetableServiceDetailCard extends StatelessWidget {
   final _TimetableEntry entry;
   final Color accent;
 
+  /// Non-null only for SST-exclusive outlets; null keeps the original layout.
+  final PriceBreakdown? sstBreakdown;
+  final String sstLabel;
+
   const _TimetableServiceDetailCard({
     required this.entry,
     required this.accent,
+    this.sstBreakdown,
+    this.sstLabel = 'SST',
   });
 
   @override
@@ -7830,11 +7983,19 @@ class _TimetableServiceDetailCard extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 8),
-                _TimetablePriceRow(label: 'Service total', amount: entry.price),
+                _TimetablePriceRow(
+                  label: 'Service total',
+                  amount: sstBreakdown?.servicePrice ?? entry.price,
+                ),
+                if (sstBreakdown != null && sstBreakdown!.sstAmount > 0)
+                  _TimetablePriceRow(
+                    label: sstLabel,
+                    amount: sstBreakdown!.sstAmount,
+                  ),
                 const Divider(height: 18, color: Color(0xFFE5E7EB)),
                 _TimetablePriceRow(
                   label: 'Total',
-                  amount: entry.price,
+                  amount: sstBreakdown?.totalAmount ?? entry.price,
                   emphasized: true,
                 ),
               ],
@@ -7956,7 +8117,7 @@ class _TimetableGrandTotal extends StatelessWidget {
                   'RM ${total.toStringAsFixed(2)}',
                   maxLines: 1,
                   style: const TextStyle(
-                    fontSize: 20,
+                    fontSize: 17,
                     color: Color(0xFF0F8A5F),
                     fontWeight: FontWeight.w900,
                   ),

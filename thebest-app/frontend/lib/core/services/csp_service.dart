@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../utils/error_message.dart';
+
 class CspTimeSlot {
   const CspTimeSlot({
     required this.startTime,
@@ -7,6 +9,11 @@ class CspTimeSlot {
     required this.classification,
     required this.score,
     required this.reason,
+    this.roomAvailableSlots = 0,
+    this.previousBlockEnd,
+    this.nextBlockStart,
+    this.gapBeforeMinutes,
+    this.gapAfterMinutes,
   });
 
   factory CspTimeSlot.fromMap(Map<String, dynamic> row) {
@@ -17,6 +24,21 @@ class CspTimeSlot {
           row['classification']?.toString() ?? row['status']?.toString() ?? '',
       score: _asInt(row['score']),
       reason: row['reason']?.toString() ?? '',
+      roomAvailableSlots: _asInt(
+        row['room_available_slots'] ?? row['roomAvailableSlots'],
+      ),
+      previousBlockEnd: _nullableCleanTime(
+        row['previous_block_end'] ?? row['previousBlockEnd'],
+      ),
+      nextBlockStart: _nullableCleanTime(
+        row['next_block_start'] ?? row['nextBlockStart'],
+      ),
+      gapBeforeMinutes: _nullableInt(
+        row['gap_before_minutes'] ?? row['gapBeforeMinutes'],
+      ),
+      gapAfterMinutes: _nullableInt(
+        row['gap_after_minutes'] ?? row['gapAfterMinutes'],
+      ),
     );
   }
 
@@ -25,9 +47,44 @@ class CspTimeSlot {
   final String classification;
   final int score;
   final String reason;
+  final int roomAvailableSlots;
+  final String? previousBlockEnd;
+  final String? nextBlockStart;
+  final int? gapBeforeMinutes;
+  final int? gapAfterMinutes;
 
   bool get isAvailable => classification != 'unavailable';
   bool get isRecommended => classification == 'recommended';
+}
+
+class CspScheduleBlock {
+  const CspScheduleBlock({
+    required this.startTime,
+    required this.endTime,
+    required this.blockedUntil,
+    required this.kind,
+    required this.label,
+  });
+
+  factory CspScheduleBlock.fromMap(Map<String, dynamic> row) {
+    return CspScheduleBlock(
+      startTime: _cleanTime(row['start_time'] ?? row['startTime']),
+      endTime: _cleanTime(row['end_time'] ?? row['endTime']),
+      blockedUntil: _cleanTime(
+        row['blocked_until'] ?? row['blockedUntil'] ?? row['end_time'],
+      ),
+      kind: row['kind']?.toString() ?? 'appointment',
+      label: row['label']?.toString() ?? 'Booked service',
+    );
+  }
+
+  final String startTime;
+  final String endTime;
+  final String blockedUntil;
+  final String kind;
+  final String label;
+
+  bool get hasCleanup => blockedUntil != endTime;
 }
 
 class CspValidationResult {
@@ -107,7 +164,10 @@ class CspCreateResult {
   final String? errorCode;
   final String? errorMessage;
 
-  String get message => errorMessage ?? errorCode ?? 'CSP validation failed';
+  String get message => friendlyBookingErrorMessage(
+    errorMessage ?? errorCode,
+    fallback: 'CSP validation failed',
+  );
 }
 
 class StaffWalkInHoldResult {
@@ -138,8 +198,10 @@ class StaffWalkInHoldResult {
   final String? errorMessage;
   final DateTime? expiresAt;
 
-  String get message =>
-      errorMessage ?? errorCode ?? 'Unable to reserve this therapist';
+  String get message => friendlyBookingErrorMessage(
+    errorMessage ?? errorCode,
+    fallback: 'Unable to reserve this therapist',
+  );
 }
 
 class WalkInTherapistAvailability {
@@ -281,19 +343,53 @@ class CspService {
     required String therapistId,
     required String roomId,
     required int duration,
+    int bufferAfterMinutes = 0,
+    String? excludeId,
+  }) async {
+    Object? rows;
+    try {
+      rows = await _client.rpc(
+        'get_available_slots',
+        params: {
+          'p_date': date,
+          'p_therapist_id': therapistId,
+          'p_room_id': roomId,
+          'p_duration': duration,
+          'p_exclude_id': _nullIfBlank(excludeId),
+          'p_buffer_after_minutes': bufferAfterMinutes,
+        },
+      );
+    } catch (error) {
+      if (!_isMissingRpc(error)) rethrow;
+      // Deployment-safe fallback while migration 081 is not yet live.
+      rows = await _client.rpc(
+        'get_available_slots',
+        params: {
+          'p_date': date,
+          'p_therapist_id': therapistId,
+          'p_room_id': roomId,
+          'p_duration': duration,
+          'p_exclude_id': _nullIfBlank(excludeId),
+        },
+      );
+    }
+    return _asMapList(rows).map(CspTimeSlot.fromMap).toList();
+  }
+
+  static Future<List<CspScheduleBlock>> getStaffBookingScheduleContext({
+    required String date,
+    required String therapistId,
     String? excludeId,
   }) async {
     final rows = await _client.rpc(
-      'get_available_slots',
+      'get_staff_booking_schedule_context',
       params: {
         'p_date': date,
         'p_therapist_id': therapistId,
-        'p_room_id': roomId,
-        'p_duration': duration,
         'p_exclude_id': _nullIfBlank(excludeId),
       },
     );
-    return _asMapList(rows).map(CspTimeSlot.fromMap).toList();
+    return _asMapList(rows).map(CspScheduleBlock.fromMap).toList();
   }
 
   static Future<CspValidationResult> validateSlot({
@@ -588,6 +684,13 @@ int _asInt(Object? value) {
   return int.tryParse(value?.toString() ?? '') ?? 0;
 }
 
+int? _nullableInt(Object? value) {
+  if (value == null) return null;
+  if (value is int) return value;
+  if (value is num) return value.round();
+  return int.tryParse(value.toString());
+}
+
 String? _nullableCleanTime(Object? value) {
   if (value == null) return null;
   final raw = value.toString();
@@ -599,4 +702,14 @@ String _cleanTime(Object? value) {
   final raw = value?.toString() ?? '';
   if (raw.length >= 5) return raw.substring(0, 5);
   return raw;
+}
+
+bool _isMissingRpc(Object error) {
+  if (error is! PostgrestException) return false;
+  final code = error.code?.toUpperCase() ?? '';
+  final message = error.message.toLowerCase();
+  return code == 'PGRST202' ||
+      code == '42883' ||
+      message.contains('could not find the function') ||
+      message.contains('does not exist');
 }

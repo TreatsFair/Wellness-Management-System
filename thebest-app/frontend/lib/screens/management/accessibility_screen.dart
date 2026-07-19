@@ -2,16 +2,15 @@ import 'package:flutter/material.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/theme/app_theme.dart';
+import '../../widgets/management_catalogue_shell.dart';
 
-TextStyle _sectionTitle(BuildContext context) => Theme.of(context)
-    .textTheme
-    .titleLarge!
-    .copyWith(fontWeight: FontWeight.w800);
+TextStyle _sectionTitle(BuildContext context) => Theme.of(
+  context,
+).textTheme.titleLarge!.copyWith(fontWeight: FontWeight.w800);
 
-TextStyle _headingStyle(BuildContext context) => Theme.of(context)
-    .textTheme
-    .titleMedium!
-    .copyWith(fontWeight: FontWeight.w800);
+TextStyle _headingStyle(BuildContext context) => Theme.of(
+  context,
+).textTheme.titleMedium!.copyWith(fontWeight: FontWeight.w800);
 
 TextStyle _bodyStyle(BuildContext context) =>
     Theme.of(context).textTheme.bodyMedium!;
@@ -21,8 +20,17 @@ TextStyle _captionStyle(BuildContext context) => Theme.of(context)
     .bodySmall!
     .copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant);
 
-class AccessibilityScreen extends StatelessWidget {
+enum _AccessibilitySection { preferences, preview }
+
+class AccessibilityScreen extends StatefulWidget {
   const AccessibilityScreen({super.key});
+
+  @override
+  State<AccessibilityScreen> createState() => _AccessibilityScreenState();
+}
+
+class _AccessibilityScreenState extends State<AccessibilityScreen> {
+  _AccessibilitySection _section = _AccessibilitySection.preferences;
 
   @override
   Widget build(BuildContext context) {
@@ -30,84 +38,117 @@ class AccessibilityScreen extends StatelessWidget {
     return ValueListenableBuilder<AccessibilityPreferences>(
       valueListenable: controller,
       builder: (context, preferences, _) {
-        final isDefault =
-            preferences == const AccessibilityPreferences();
-        return Scaffold(
-          backgroundColor: Theme.of(context).scaffoldBackgroundColor,
-          appBar: AppBar(
-            title: const Text('Accessibility'),
-            actions: [
-              IconButton(
-                onPressed: isDefault ? null : controller.reset,
-                icon: const Icon(Icons.restart_alt_rounded),
-                tooltip: 'Reset to Standard',
+        final isDefault = preferences == const AccessibilityPreferences();
+        final showingPreferences =
+            _section == _AccessibilitySection.preferences;
+        return ManagementCatalogueShell(
+          moduleTitle: 'Accessibility',
+          moduleSubtitle: 'Appearance, interface size and text scaling',
+          contentTitle: showingPreferences
+              ? 'Display preferences'
+              : 'Live interface preview',
+          itemCountLabel: showingPreferences
+              ? 'Changes save automatically on this device'
+              : '${preferences.preset.label} size · ${preferences.themePreference.label} appearance',
+          primaryAction: CataloguePrimaryButton(
+            icon: Icons.restart_alt_rounded,
+            label: 'Reset',
+            onPressed: isDefault ? null : controller.reset,
+          ),
+          navigation: ListView(
+            padding: const EdgeInsets.all(12),
+            children: [
+              _navigationTile(
+                section: _AccessibilitySection.preferences,
+                icon: Icons.tune_rounded,
+                title: 'Display preferences',
+                subtitle: 'Theme, size and text scaling',
               ),
-              const SizedBox(width: 8),
+              _navigationTile(
+                section: _AccessibilitySection.preview,
+                icon: Icons.preview_outlined,
+                title: 'Live preview',
+                subtitle: 'Check cards, fields and actions',
+              ),
             ],
           ),
-          body: LayoutBuilder(
-            builder: (context, constraints) {
-              final sideBySide = constraints.maxWidth >= 880;
-              final pagePadding = constraints.maxWidth < 420 ? 16.0 : 24.0;
-              return ListView(
-                padding: EdgeInsets.fromLTRB(
-                  pagePadding,
-                  24,
-                  pagePadding,
-                  32,
+          mobileNavigation: CatalogueMobileNavigation(
+            children: [
+              CatalogueNavigationChip(
+                label: 'Preferences',
+                selected: showingPreferences,
+                onTap: () => setState(
+                  () => _section = _AccessibilitySection.preferences,
                 ),
-                children: [
-                  Center(
-                    child: ConstrainedBox(
-                      constraints: const BoxConstraints(maxWidth: 980),
-                      child: sideBySide
-                          ? Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                SizedBox(
-                                  width: 360,
-                                  child: _AccessibilitySettings(
-                                    preferences: preferences,
-                                    onThemeSelected:
-                                        controller.setThemePreference,
-                                    onPresetSelected: controller.setPreset,
-                                    onSystemScaleChanged:
-                                        controller.setFollowSystemTextScale,
-                                  ),
-                                ),
-                                const SizedBox(width: 32),
-                                Expanded(
-                                  child: _AccessibilityPreviewSection(
-                                    preset: preferences.preset,
-                                  ),
-                                ),
-                              ],
-                            )
-                          : Column(
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
-                              children: [
-                                _AccessibilitySettings(
-                                  preferences: preferences,
-                                  onThemeSelected:
-                                      controller.setThemePreference,
-                                  onPresetSelected: controller.setPreset,
-                                  onSystemScaleChanged:
-                                      controller.setFollowSystemTextScale,
-                                ),
-                                const SizedBox(height: 32),
-                                _AccessibilityPreviewSection(
-                                  preset: preferences.preset,
-                                ),
-                              ],
-                            ),
-                    ),
+              ),
+              CatalogueNavigationChip(
+                label: 'Live preview',
+                selected: !showingPreferences,
+                onTap: () =>
+                    setState(() => _section = _AccessibilitySection.preview),
+              ),
+            ],
+          ),
+          content: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 880),
+                  child: _AccessibilitySurface(
+                    child: showingPreferences
+                        ? _AccessibilitySettings(
+                            preferences: preferences,
+                            onThemeSelected: controller.setThemePreference,
+                            onPresetSelected: controller.setPreset,
+                            onSystemScaleChanged:
+                                controller.setFollowSystemTextScale,
+                          )
+                        : _AccessibilityPreviewSection(
+                            preset: preferences.preset,
+                          ),
                   ),
-                ],
-              );
-            },
+                ),
+              ),
+            ],
           ),
         );
       },
+    );
+  }
+
+  Widget _navigationTile({
+    required _AccessibilitySection section,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+  }) => CatalogueSidebarTile(
+    icon: icon,
+    title: title,
+    subtitle: subtitle,
+    count: null,
+    selected: _section == section,
+    onTap: () => setState(() => _section = section),
+  );
+}
+
+class _AccessibilitySurface extends StatelessWidget {
+  const _AccessibilitySurface({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border.all(color: scheme.outlineVariant),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: child,
     );
   }
 }
@@ -176,10 +217,7 @@ class _ThemeSelector extends StatelessWidget {
   final AppThemePreference selected;
   final ValueChanged<AppThemePreference> onSelected;
 
-  const _ThemeSelector({
-    required this.selected,
-    required this.onSelected,
-  });
+  const _ThemeSelector({required this.selected, required this.onSelected});
 
   @override
   Widget build(BuildContext context) {
@@ -277,10 +315,7 @@ class _PresetSelector extends StatelessWidget {
   final UiScalePreset selected;
   final ValueChanged<UiScalePreset> onSelected;
 
-  const _PresetSelector({
-    required this.selected,
-    required this.onSelected,
-  });
+  const _PresetSelector({required this.selected, required this.onSelected});
 
   @override
   Widget build(BuildContext context) {
@@ -408,10 +443,7 @@ class _SystemFontSetting extends StatelessWidget {
   final bool value;
   final ValueChanged<bool> onChanged;
 
-  const _SystemFontSetting({
-    required this.value,
-    required this.onChanged,
-  });
+  const _SystemFontSetting({required this.value, required this.onChanged});
 
   @override
   Widget build(BuildContext context) {
@@ -448,10 +480,7 @@ class _SystemFontSetting extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      'Use system text size',
-                      style: _headingStyle(context),
-                    ),
+                    Text('Use system text size', style: _headingStyle(context)),
                     const SizedBox(height: 2),
                     Text(
                       'Recommended for device accessibility settings.',
@@ -560,11 +589,7 @@ class _AccessibilityPreview extends StatelessWidget {
                 if (stack) {
                   return Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      note,
-                      const SizedBox(height: 10),
-                      action,
-                    ],
+                    children: [note, const SizedBox(height: 10), action],
                   );
                 }
                 return Row(
@@ -592,9 +617,7 @@ class _PreviewAppointmentHeader extends StatelessWidget {
     final scheme = Theme.of(context).colorScheme;
     final dark = Theme.of(context).brightness == Brightness.dark;
     final success = dark ? const Color(0xFF73D99A) : AppColors.success;
-    final successSoft = dark
-        ? const Color(0xFF173D2A)
-        : AppColors.successSoft;
+    final successSoft = dark ? const Color(0xFF173D2A) : AppColors.successSoft;
     final status = Container(
       constraints: BoxConstraints(minHeight: metrics.badgeHeight),
       padding: const EdgeInsets.symmetric(horizontal: 10),
@@ -647,10 +670,7 @@ class _PreviewAppointmentHeader extends StatelessWidget {
                   ],
                   Text('Foot Massage', style: _headingStyle(context)),
                   const SizedBox(height: 3),
-                  Text(
-                    'Hung - 10:30 to 11:30',
-                    style: _bodyStyle(context),
-                  ),
+                  Text('Hung - 10:30 to 11:30', style: _bodyStyle(context)),
                   const SizedBox(height: 6),
                   const Wrap(
                     spacing: 10,
@@ -669,10 +689,7 @@ class _PreviewAppointmentHeader extends StatelessWidget {
                 ],
               ),
             ),
-            if (!narrow) ...[
-              const SizedBox(width: 8),
-              status,
-            ],
+            if (!narrow) ...[const SizedBox(width: 8), status],
           ],
         );
       },

@@ -85,6 +85,7 @@ thebest-app/supabase/.temp/
 .claude/skills/
 .codex/
 claude.md
+agents.md
 # =========================================================
 # Ad-hoc local dev/preview scratch files
 # =========================================================
@@ -99,3 +100,5 @@ flutter_web_*.err.log
 
 project_guide
 docs/
+# Playwright MCP browser snapshots
+.playwright-mcp/

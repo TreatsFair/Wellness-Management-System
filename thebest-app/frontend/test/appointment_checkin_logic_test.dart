@@ -2,6 +2,20 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:frontend/screens/appointments/appointment_checkin_logic.dart';
 
 void main() {
+  test('appointment total uses the tax-inclusive amount actually charged', () {
+    expect(
+      appointmentChargedTotal(scheduledAmount: 113.21, paidAmount: 120),
+      120,
+    );
+  });
+
+  test('appointment total falls back to scheduled amount before payment', () {
+    expect(
+      appointmentChargedTotal(scheduledAmount: 120, paidAmount: 0),
+      120,
+    );
+  });
+
   test('prepaid booking identifies only newly added services', () {
     final additions = appointmentAddOnItems(
       currentItems: const [

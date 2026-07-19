@@ -42,8 +42,18 @@ class DashboardRepository {
     return _customers.list(orderBy: 'name');
   }
 
-  Future<List<Map<String, dynamic>>> listTherapists() {
-    return _therapists.list(orderBy: 'name');
+  Future<List<Map<String, dynamic>>> listTherapists() async {
+    final rows = await _therapists.list(orderBy: 'name');
+    rows.sort((left, right) {
+      final orderComparison = asInt(
+        left['displayOrder'],
+      ).compareTo(asInt(right['displayOrder']));
+      if (orderComparison != 0) return orderComparison;
+      return asString(
+        left['name'],
+      ).toLowerCase().compareTo(asString(right['name']).toLowerCase());
+    });
+    return rows;
   }
 
   Future<List<Map<String, dynamic>>> recentTransactions({int limit = 8}) {

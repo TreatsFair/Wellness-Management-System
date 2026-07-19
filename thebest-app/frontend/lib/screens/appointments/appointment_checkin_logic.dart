@@ -1,3 +1,13 @@
+/// Appointment details should show the amount actually collected whenever a
+/// paid transaction exists. [scheduledAmount] can be the pre-SST service net
+/// in exclusive-tax mode, so it is only the fallback for unpaid appointments.
+double appointmentChargedTotal({
+  required double scheduledAmount,
+  required double paidAmount,
+}) {
+  return paidAmount > 0.005 ? paidAmount : scheduledAmount;
+}
+
 List<Map<String, dynamic>> appointmentAddOnItems({
   required List<Map<String, dynamic>> currentItems,
   required List<Map<String, dynamic>> paidItems,
@@ -88,6 +98,18 @@ List<Map<String, dynamic>> _itemsNotCoveredBy({
   for (final item in currentItems) {
     final id = serviceItemId(item);
     final remaining = coveredCounts[id] ?? 0;
+    final isExplicitAddOn =
+        item['lineType']?.toString().trim().toLowerCase() == 'add_on';
+
+    // An explicit add-on remains part of the appointment's add-on history
+    // after payment so the UI can keep showing it as paid and locked. Consume
+    // its matching paid item, but do not remove it from the display list.
+    // The unpaid calculation uses markAsAddOn=false and still removes it.
+    if (markAsAddOn && isExplicitAddOn) {
+      if (remaining > 0) coveredCounts[id] = remaining - 1;
+      remainingItems.add({...item, 'lineType': 'add_on'});
+      continue;
+    }
     if (remaining > 0) {
       coveredCounts[id] = remaining - 1;
       continue;

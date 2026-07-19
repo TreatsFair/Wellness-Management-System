@@ -1,7 +1,13 @@
 import 'package:flutter/material.dart';
 
 import '../../core/outlets/outlet_context.dart';
+import '../../core/theme/app_theme.dart';
 import '../../data/repositories/online_booking_repository.dart';
+import '../../widgets/adaptive_detail_surface.dart';
+import '../../widgets/app_toast.dart';
+import '../../widgets/management_catalogue_shell.dart';
+
+enum _OnlineBookingSection { rules, services, closures }
 
 class OnlineBookingScreen extends StatefulWidget {
   const OnlineBookingScreen({super.key});
@@ -12,13 +18,16 @@ class OnlineBookingScreen extends StatefulWidget {
 
 class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   final _repository = OnlineBookingRepository();
-  String _outletId = OutletContext.activeOutletId.value;
+  final _settingsKey = GlobalKey<_SettingsPaneState>();
+  late final String _outletId;
   Map<String, dynamic>? _data;
   bool _loading = true;
+  _OnlineBookingSection _section = _OnlineBookingSection.rules;
 
   @override
   void initState() {
     super.initState();
+    _outletId = OutletContext.activeOutletId.value;
     _load();
   }
 
@@ -35,9 +44,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
     } catch (error) {
       if (!mounted) return;
       setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Unable to load online booking: $error')),
-      );
+      AppToast.error(context, 'Unable to load online booking: $error');
     }
   }
 
@@ -47,114 +54,158 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   @override
   Widget build(BuildContext context) {
     final outlet = OutletContext.outletById(_outletId);
-    return DefaultTabController(
-      length: 3,
-      child: Scaffold(
-        backgroundColor: const Color(0xFFF6F3EE),
-        appBar: AppBar(
-          title: const Text(
-            'Online Booking',
-            style: TextStyle(fontWeight: FontWeight.w800),
-          ),
-          backgroundColor: Colors.white,
-          foregroundColor: const Color(0xFF201A12),
-          actions: [
-            Padding(
-              padding: const EdgeInsets.only(right: 16),
-              child: DropdownButtonHideUnderline(
-                child: DropdownButton<String>(
-                  value: _outletId,
-                  items: OutletContext.outlets
-                      .map(
-                        (item) => DropdownMenuItem(
-                          value: item.id,
-                          child: Text(item.name),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: (value) {
-                    if (value == null) return;
-                    setState(() => _outletId = value);
-                    OutletContext.select(value);
-                    _load();
-                  },
-                ),
-              ),
-            ),
-          ],
-          bottom: const TabBar(
-            labelColor: Color(0xFFB7790B),
-            tabs: [
-              Tab(text: 'Outlet rules'),
-              Tab(text: 'Public services'),
-              Tab(text: 'Closures'),
-            ],
-          ),
-        ),
-        body: _loading
-            ? const Center(child: CircularProgressIndicator())
-            : _data == null
-            ? Center(
-                child: FilledButton(
-                  onPressed: _load,
-                  child: const Text('Retry'),
-                ),
-              )
-            : TabBarView(
-                children: [
-                  _SettingsPane(
-                    key: ValueKey(_outletId),
-                    outletName: outlet.name,
-                    initial: Map<String, dynamic>.from(
-                      _data!['settings'] as Map,
-                    ),
-                    businessSettings: Map<String, dynamic>.from(
-                      _data!['businessSettings'] as Map,
-                    ),
-                    onSave: (values) async {
-                      await _repository.saveSettings(_outletId, values);
-                      await _load();
-                    },
-                  ),
-                  _ServicesPane(
-                    catalogue: _list('catalogue'),
-                    services: _list('services'),
-                    rooms: _list('rooms'),
-                    roomLinks: _list('roomLinks'),
-                    hours: _list('hours'),
-                    onEdit: (item) => _editService(item),
-                    onDelete: (id) async {
-                      await _repository.deleteService(id);
-                      await _load();
-                    },
-                  ),
-                  _ClosuresPane(
-                    outletId: _outletId,
-                    closures: _list('closures'),
-                    onAdd: (value) async {
-                      await _repository.addClosure(value);
-                      await _load();
-                    },
-                    onDelete: (id) async {
-                      await _repository.deleteClosure(id);
-                      await _load();
-                    },
-                  ),
-                ],
-              ),
+    final catalogue = _list('catalogue');
+    final closures = _list('closures');
+    final contentTitle = switch (_section) {
+      _OnlineBookingSection.rules => 'Outlet rules',
+      _OnlineBookingSection.services => 'Public services',
+      _OnlineBookingSection.closures => 'Closures',
+    };
+    final countLabel = switch (_section) {
+      _OnlineBookingSection.rules => '${outlet.name} public booking controls',
+      _OnlineBookingSection.services =>
+        '${catalogue.where((item) => item['enabled'] == true).length} live · ${catalogue.length} configured',
+      _OnlineBookingSection.closures =>
+        '${closures.length} blackout ${closures.length == 1 ? 'period' : 'periods'}',
+    };
+    final primaryAction = switch (_section) {
+      _OnlineBookingSection.rules => CataloguePrimaryButton(
+        icon: Icons.save_outlined,
+        label: 'Save Rules',
+        onPressed: _loading ? null : () => _settingsKey.currentState?._save(),
       ),
+      _OnlineBookingSection.services => CataloguePrimaryButton(
+        icon: Icons.add,
+        label: 'Add Public Service',
+        onPressed: () => _editService(null),
+      ),
+      _OnlineBookingSection.closures => CataloguePrimaryButton(
+        icon: Icons.add,
+        label: 'Add Closure',
+        onPressed: _addClosure,
+      ),
+    };
+
+    return ManagementCatalogueShell(
+      moduleTitle: 'Online Booking',
+      moduleSubtitle: 'Public availability and catalogue',
+      contentTitle: contentTitle,
+      itemCountLabel: countLabel,
+      primaryAction: primaryAction,
+      navigation: _navigation(catalogue.length, closures.length),
+      mobileNavigation: _mobileNavigation(),
+      content: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _data == null
+          ? Center(
+              child: FilledButton.icon(
+                onPressed: _load,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Retry'),
+              ),
+            )
+          : switch (_section) {
+              _OnlineBookingSection.rules => _SettingsPane(
+                key: _settingsKey,
+                outletName: outlet.name,
+                initial: Map<String, dynamic>.from(_data!['settings'] as Map),
+                businessSettings: Map<String, dynamic>.from(
+                  _data!['businessSettings'] as Map,
+                ),
+                onSave: (values) async {
+                  await _repository.saveSettings(_outletId, values);
+                  await _load();
+                },
+              ),
+              _OnlineBookingSection.services => _ServicesPane(
+                catalogue: catalogue,
+                services: _list('services'),
+                rooms: _list('rooms'),
+                roomLinks: _list('roomLinks'),
+                hours: _list('hours'),
+                onView: _viewService,
+              ),
+              _OnlineBookingSection.closures => _ClosuresPane(
+                closures: closures,
+                onView: _viewClosure,
+              ),
+            },
     );
   }
 
+  Widget _navigation(int serviceCount, int closureCount) => ListView(
+    padding: const EdgeInsets.all(12),
+    children: [
+      _navigationTile(
+        section: _OnlineBookingSection.rules,
+        icon: Icons.tune_rounded,
+        title: 'Outlet rules',
+        subtitle: 'Hours and booking policies',
+      ),
+      _navigationTile(
+        section: _OnlineBookingSection.services,
+        icon: Icons.public_outlined,
+        title: 'Public services',
+        subtitle: 'Published service details',
+        count: serviceCount,
+      ),
+      _navigationTile(
+        section: _OnlineBookingSection.closures,
+        icon: Icons.event_busy_outlined,
+        title: 'Closures',
+        subtitle: 'Blackout dates and times',
+        count: closureCount,
+      ),
+    ],
+  );
+
+  Widget _navigationTile({
+    required _OnlineBookingSection section,
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    int? count,
+  }) => CatalogueSidebarTile(
+    icon: icon,
+    title: title,
+    subtitle: subtitle,
+    count: count,
+    selected: _section == section,
+    onTap: () => setState(() => _section = section),
+  );
+
+  Widget _mobileNavigation() => CatalogueMobileNavigation(
+    children: [
+      for (final section in _OnlineBookingSection.values)
+        CatalogueNavigationChip(
+          label: switch (section) {
+            _OnlineBookingSection.rules => 'Outlet rules',
+            _OnlineBookingSection.services => 'Public services',
+            _OnlineBookingSection.closures => 'Closures',
+          },
+          selected: _section == section,
+          onTap: () => setState(() => _section = section),
+        ),
+    ],
+  );
+
   Future<void> _editService(Map<String, dynamic>? item) async {
-    final result = await showDialog<_ServiceDraft>(
+    final result = await showAdaptiveDetailSurface<_ServiceDraft>(
       context: context,
-      builder: (_) => _OnlineServiceDialog(
+      builder: (drawerContext, isFullScreen) => _OnlineServiceDialog(
         item: item,
         services: _list('services'),
         rooms: _list('rooms'),
         roomLinks: _list('roomLinks'),
         hours: _list('hours'),
+        isFullScreen: isFullScreen,
+        onDelete: item == null
+            ? null
+            : () async {
+                await _repository.deleteService(item['id'].toString());
+                if (drawerContext.mounted) Navigator.pop(drawerContext);
+                await _load();
+              },
       ),
     );
     if (result == null) return;
@@ -166,6 +217,174 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
       hours: result.hours,
     );
     await _load();
+  }
+
+  Future<void> _viewService(Map<String, dynamic> item) async {
+    final internal = _list(
+      'services',
+    ).where((service) => service['id'] == item['service_id']).firstOrNull;
+    final edit = await showAdaptiveDetailSurface<bool>(
+      context: context,
+      builder: (drawerContext, isFullScreen) =>
+          ManagementCatalogueDetailSurface(
+            title: item['public_name']?.toString().trim().isNotEmpty == true
+                ? item['public_name'].toString()
+                : 'Draft public service',
+            subtitle: item['enabled'] == true ? 'Live online' : 'Not published',
+            isFullScreen: isFullScreen,
+            footer: CatalogueDetailEditButton(
+              label: 'Edit Public Service',
+              onPressed: () => Navigator.pop(drawerContext, true),
+            ),
+            child: _PublicServiceDetails(item: item, internal: internal),
+          ),
+    );
+    if (edit == true && mounted) await _editService(item);
+  }
+
+  Future<void> _addClosure() async {
+    final date = await showDatePicker(
+      context: context,
+      firstDate: DateTime.now(),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      initialDate: DateTime.now().add(const Duration(days: 1)),
+    );
+    if (date == null || !mounted) return;
+    var fullDay = true;
+    final start = TextEditingController(text: '11:00');
+    final end = TextEditingController(text: '12:00');
+    final reason = TextEditingController();
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setLocal) => AlertDialog(
+          title: const Text('Add closure'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Close the full day'),
+                  value: fullDay,
+                  onChanged: (value) => setLocal(() => fullDay = value),
+                ),
+                if (!fullDay) ...[
+                  _field(start, 'From', '11:00'),
+                  const SizedBox(height: 10),
+                  _field(end, 'Until', '12:00'),
+                ],
+                const SizedBox(height: 12),
+                _field(reason, 'Internal reason', 'Maintenance, holiday…'),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Add'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (accepted == true) {
+      await _repository.addClosure({
+        'outlet_id': _outletId,
+        'closure_date':
+            '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
+        'is_full_day': fullDay,
+        'start_time': fullDay ? null : start.text.trim(),
+        'end_time': fullDay ? null : end.text.trim(),
+        'internal_reason': reason.text.trim(),
+      });
+      await _load();
+    }
+    start.dispose();
+    end.dispose();
+    reason.dispose();
+  }
+
+  Future<void> _viewClosure(Map<String, dynamic> closure) async {
+    final manage = await showAdaptiveDetailSurface<bool>(
+      context: context,
+      builder: (drawerContext, isFullScreen) =>
+          ManagementCatalogueDetailSurface(
+            title: closure['closure_date'].toString(),
+            subtitle: closure['is_full_day'] == true
+                ? 'Full-day closure'
+                : 'Partial closure',
+            isFullScreen: isFullScreen,
+            footer: CatalogueDetailEditButton(
+              label: 'Manage Closure',
+              onPressed: () => Navigator.pop(drawerContext, true),
+            ),
+            child: _ClosureDetails(closure: closure),
+          ),
+    );
+    if (manage == true && mounted) await _manageClosure(closure);
+  }
+
+  Future<void> _manageClosure(Map<String, dynamic> closure) async {
+    await showAdaptiveDetailSurface<void>(
+      context: context,
+      builder: (drawerContext, isFullScreen) => ManagementCatalogueDetailSurface(
+        title: 'Manage Closure',
+        subtitle: closure['closure_date'].toString(),
+        isFullScreen: isFullScreen,
+        footer: OutlinedButton(
+          onPressed: () => Navigator.pop(drawerContext),
+          child: const Text('Close'),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _ClosureDetails(closure: closure),
+            const SizedBox(height: 18),
+            _DangerZone(
+              title: 'Remove closure',
+              description:
+                  'This date or time will become bookable again if normal availability allows it.',
+              buttonLabel: 'Remove Closure',
+              onPressed: () async {
+                final confirmed = await showDialog<bool>(
+                  context: drawerContext,
+                  builder: (dialogContext) => AlertDialog(
+                    title: const Text('Remove this closure?'),
+                    content: const Text(
+                      'Customers may be able to book this period again.',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('Cancel'),
+                      ),
+                      FilledButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Theme.of(
+                            dialogContext,
+                          ).colorScheme.error,
+                        ),
+                        child: const Text('Remove'),
+                      ),
+                    ],
+                  ),
+                );
+                if (confirmed != true) return;
+                await _repository.deleteClosure(closure['id'].toString());
+                if (drawerContext.mounted) Navigator.pop(drawerContext);
+                await _load();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -188,11 +407,7 @@ class _SettingsPane extends StatefulWidget {
 class _SettingsPaneState extends State<_SettingsPane> {
   final form = GlobalKey<FormState>();
   late bool enabled, therapistSelection, sameDayBooking;
-  late final TextEditingController open,
-      close,
-      notice,
-      interval,
-      bookingWindow;
+  late final TextEditingController open, close, notice, interval, bookingWindow;
   bool saving = false;
 
   String _businessTime(String key) {
@@ -281,11 +496,8 @@ class _SettingsPaneState extends State<_SettingsPane> {
       prefixIcon: Icon(icon),
       border: const OutlineInputBorder(),
     ),
-    validator: (value) => _numberValidator(
-      value,
-      minimum: minimum,
-      maximum: maximum,
-    ),
+    validator: (value) =>
+        _numberValidator(value, minimum: minimum, maximum: maximum),
   );
 
   Future<void> _save() async {
@@ -331,164 +543,154 @@ class _SettingsPaneState extends State<_SettingsPane> {
     child: ListView(
       padding: const EdgeInsets.all(20),
       children: [
-      _card(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              widget.outletName,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Public booking stays offline until this switch and at least one complete service are enabled.',
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Online booking enabled'),
-              value: enabled,
-              onChanged: (v) => setState(() => enabled = v),
-            ),
-          ],
-        ),
-      ),
-      const SizedBox(height: 16),
-      _card(
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              'Public hours',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 6),
-            Text(
-              'Outlet operating hours: ${_businessTime('open_time')} - ${_businessTime('close_time')}. '
-              'These come from Business Settings and are shown on the public outlet card.',
-              style: const TextStyle(color: Color(0xFF536274), height: 1.4),
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Public opening and closing only limit when customers can book online. '
-              'They may be narrower than the outlet hours and do not change the timetable. '
-              'A closing time of 00:00 means midnight at the end of the day.',
-              style: TextStyle(color: Color(0xFF536274), height: 1.4),
-            ),
-            const SizedBox(height: 12),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final opening = _field(
-                  open,
-                  'Public opening',
-                  '11:00',
-                  validator: _timeValidator,
-                );
-                final closing = _field(
-                  close,
-                  'Public closing',
-                  '22:00',
-                  validator: _timeValidator,
-                );
-                if (constraints.maxWidth < 460) {
-                  return Column(
-                    children: [
-                      opening,
-                      const SizedBox(height: 12),
-                      closing,
-                    ],
-                  );
-                }
-                return Row(
-                  children: [
-                    Expanded(child: opening),
-                    const SizedBox(width: 12),
-                    Expanded(child: closing),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 12),
-            _field(
-              notice,
-              'Minimum advance notice (minutes)',
-              '60',
-              number: true,
-              validator: (value) => _numberValidator(
-                value,
-                minimum: 0,
-                maximum: 10080,
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                widget.outletName,
+                style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                ),
               ),
-            ),
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 16),
-              child: Divider(height: 1),
-            ),
-            const Text(
-              'Scheduling',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-            ),
-            const SizedBox(height: 12),
-            LayoutBuilder(
-              builder: (context, constraints) {
-                final startInterval = _numberField(
-                  controller: interval,
-                  label: 'Start interval',
-                  unit: 'minutes',
-                  icon: Icons.schedule_outlined,
-                  minimum: 5,
-                  maximum: 120,
-                );
-                final horizon = _numberField(
-                  controller: bookingWindow,
-                  label: 'Booking window',
-                  unit: 'days',
-                  icon: Icons.date_range_outlined,
-                  minimum: 1,
-                  maximum: 90,
-                );
-                if (constraints.maxWidth < 460) {
-                  return Column(
+              const SizedBox(height: 6),
+              const Text(
+                'Public booking stays offline until this switch and at least one complete service are enabled.',
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Online booking enabled'),
+                value: enabled,
+                onChanged: (v) => setState(() => enabled = v),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 16),
+        _card(
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Public hours',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Outlet operating hours: ${_businessTime('open_time')} - ${_businessTime('close_time')}. '
+                'These come from Business Settings and are shown on the public outlet card.',
+                style: const TextStyle(color: Color(0xFF536274), height: 1.4),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'Public opening and closing only limit when customers can book online. '
+                'They may be narrower than the outlet hours and do not change the timetable. '
+                'A closing time of 00:00 means midnight at the end of the day.',
+                style: TextStyle(color: Color(0xFF536274), height: 1.4),
+              ),
+              const SizedBox(height: 12),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final opening = _field(
+                    open,
+                    'Public opening',
+                    '11:00',
+                    validator: _timeValidator,
+                  );
+                  final closing = _field(
+                    close,
+                    'Public closing',
+                    '22:00',
+                    validator: _timeValidator,
+                  );
+                  if (constraints.maxWidth < 460) {
+                    return Column(
+                      children: [opening, const SizedBox(height: 12), closing],
+                    );
+                  }
+                  return Row(
                     children: [
-                      startInterval,
-                      const SizedBox(height: 12),
-                      horizon,
+                      Expanded(child: opening),
+                      const SizedBox(width: 12),
+                      Expanded(child: closing),
                     ],
                   );
-                }
-                return Row(
-                  children: [
-                    Expanded(child: startInterval),
-                    const SizedBox(width: 12),
-                    Expanded(child: horizon),
-                  ],
-                );
-              },
-            ),
-            const SizedBox(height: 8),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              secondary: const Icon(Icons.today_outlined),
-              title: const Text('Allow same-day bookings'),
-              subtitle: const Text('Minimum advance notice still applies'),
-              value: sameDayBooking,
-              onChanged: (value) => setState(() => sameDayBooking = value),
-            ),
-            SwitchListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('Allow therapist gender preference'),
-              subtitle: const Text('Names are never shown publicly'),
-              value: therapistSelection,
-              onChanged: (v) => setState(() => therapistSelection = v),
-            ),
-          ],
+                },
+              ),
+              const SizedBox(height: 12),
+              _field(
+                notice,
+                'Minimum advance notice (minutes)',
+                '60',
+                number: true,
+                validator: (value) =>
+                    _numberValidator(value, minimum: 0, maximum: 10080),
+              ),
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Divider(height: 1),
+              ),
+              const Text(
+                'Scheduling',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+              ),
+              const SizedBox(height: 12),
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final startInterval = _numberField(
+                    controller: interval,
+                    label: 'Start interval',
+                    unit: 'minutes',
+                    icon: Icons.schedule_outlined,
+                    minimum: 5,
+                    maximum: 120,
+                  );
+                  final horizon = _numberField(
+                    controller: bookingWindow,
+                    label: 'Booking window',
+                    unit: 'days',
+                    icon: Icons.date_range_outlined,
+                    minimum: 1,
+                    maximum: 90,
+                  );
+                  if (constraints.maxWidth < 460) {
+                    return Column(
+                      children: [
+                        startInterval,
+                        const SizedBox(height: 12),
+                        horizon,
+                      ],
+                    );
+                  }
+                  return Row(
+                    children: [
+                      Expanded(child: startInterval),
+                      const SizedBox(width: 12),
+                      Expanded(child: horizon),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                secondary: const Icon(Icons.today_outlined),
+                title: const Text('Allow same-day bookings'),
+                subtitle: const Text('Minimum advance notice still applies'),
+                value: sameDayBooking,
+                onChanged: (value) => setState(() => sameDayBooking = value),
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Allow therapist gender preference'),
+                subtitle: const Text('Names are never shown publicly'),
+                value: therapistSelection,
+                onChanged: (v) => setState(() => therapistSelection = v),
+              ),
+            ],
+          ),
         ),
-      ),
-      const SizedBox(height: 20),
-      FilledButton.icon(
-        onPressed: saving ? null : _save,
-        icon: const Icon(Icons.save_outlined),
-        label: Text(saving ? 'Saving…' : 'Save outlet rules'),
-      ),
       ],
     ),
   );
@@ -501,38 +703,14 @@ class _ServicesPane extends StatelessWidget {
     required this.rooms,
     required this.roomLinks,
     required this.hours,
-    required this.onEdit,
-    required this.onDelete,
+    required this.onView,
   });
   final List<Map<String, dynamic>> catalogue, services, rooms, roomLinks, hours;
-  final void Function(Map<String, dynamic>?) onEdit;
-  final Future<void> Function(String) onDelete;
+  final void Function(Map<String, dynamic>) onView;
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.all(20),
     children: [
-      Row(
-        children: [
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Public catalogue',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-                ),
-                Text('Only complete, enabled listings appear online.'),
-              ],
-            ),
-          ),
-          FilledButton.icon(
-            onPressed: () => onEdit(null),
-            icon: const Icon(Icons.add),
-            label: const Text('Add service'),
-          ),
-        ],
-      ),
-      const SizedBox(height: 16),
       if (catalogue.isEmpty)
         _card(
           const Padding(
@@ -548,34 +726,50 @@ class _ServicesPane extends StatelessWidget {
         return Padding(
           padding: const EdgeInsets.only(bottom: 12),
           child: _card(
-            ListTile(
-              contentPadding: const EdgeInsets.all(10),
-              leading: CircleAvatar(
-                backgroundColor: live
-                    ? const Color(0xFFFFE0A3)
-                    : Colors.grey.shade200,
-                child: Icon(
-                  live ? Icons.public : Icons.public_off,
-                  color: const Color(0xFF9A6500),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => onView(item),
+                borderRadius: BorderRadius.circular(10),
+                child: ListTile(
+                  minTileHeight: context.managementCatalogueListHeight,
+                  contentPadding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  leading: CircleAvatar(
+                    backgroundColor: live
+                        ? context.appColors.primary.withValues(alpha: 0.12)
+                        : context.appCanvas,
+                    child: Icon(
+                      live ? Icons.public : Icons.public_off,
+                      color: live
+                          ? context.appColors.primary
+                          : context.appMuted,
+                    ),
+                  ),
+                  title: Text(
+                    (item['public_name'] as String?)?.trim().isNotEmpty == true
+                        ? item['public_name']
+                        : 'Draft public service',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: context.appText,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  subtitle: Text(
+                    '${internal?['name'] ?? 'Missing internal service'} · ${internal?['duration'] ?? 0} min · RM ${item['display_price'] ?? 0}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: context.appMuted),
+                  ),
+                  trailing: Icon(
+                    Icons.chevron_right_rounded,
+                    color: context.appMuted,
+                  ),
                 ),
-              ),
-              title: Text(
-                (item['public_name'] as String?)?.trim().isNotEmpty == true
-                    ? item['public_name']
-                    : 'Draft public service',
-                style: const TextStyle(fontWeight: FontWeight.w700),
-              ),
-              subtitle: Text(
-                '${internal?['name'] ?? 'Missing internal service'} · ${internal?['duration'] ?? 0} min · Full payment RM ${item['display_price'] ?? 0}',
-              ),
-              trailing: PopupMenuButton<String>(
-                onSelected: (v) => v == 'edit'
-                    ? onEdit(item)
-                    : onDelete(item['id'].toString()),
-                itemBuilder: (_) => const [
-                  PopupMenuItem(value: 'edit', child: Text('Edit')),
-                  PopupMenuItem(value: 'delete', child: Text('Delete')),
-                ],
               ),
             ),
           ),
@@ -583,6 +777,238 @@ class _ServicesPane extends StatelessWidget {
       }),
     ],
   );
+}
+
+class _PublicServiceDetails extends StatelessWidget {
+  const _PublicServiceDetails({required this.item, required this.internal});
+
+  final Map<String, dynamic> item;
+  final Map<String, dynamic>? internal;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _OnlineDetailCard(
+        icon: item['enabled'] == true ? Icons.public : Icons.public_off,
+        title: 'Publishing',
+        children: [
+          _DetailLine(
+            label: 'Status',
+            value: item['enabled'] == true ? 'Live online' : 'Not published',
+          ),
+          _DetailLine(
+            label: 'Public price',
+            value: item['show_price'] == false
+                ? 'Hidden'
+                : 'RM ${item['display_price'] ?? 0}',
+          ),
+          _DetailLine(
+            label: 'Display order',
+            value: '${item['display_order'] ?? 0}',
+            last: true,
+          ),
+        ],
+      ),
+      const SizedBox(height: 12),
+      _OnlineDetailCard(
+        icon: Icons.link_outlined,
+        title: 'Linked service',
+        children: [
+          _DetailLine(
+            label: 'Internal service',
+            value: internal?['name']?.toString() ?? 'Missing service',
+          ),
+          _DetailLine(
+            label: 'Treatment time',
+            value: '${internal?['duration'] ?? 0} min',
+          ),
+          _DetailLine(
+            label: 'Cleanup buffer',
+            value: '${internal?['buffer_after_minutes'] ?? 0} min',
+            last: true,
+          ),
+        ],
+      ),
+      const SizedBox(height: 12),
+      _OnlineDetailCard(
+        icon: Icons.description_outlined,
+        title: 'Public information',
+        children: [
+          Text(
+            item['short_description']?.toString().trim().isNotEmpty == true
+                ? item['short_description'].toString()
+                : 'No public description',
+            style: TextStyle(color: context.appText, height: 1.45),
+          ),
+        ],
+      ),
+    ],
+  );
+}
+
+class _ClosureDetails extends StatelessWidget {
+  const _ClosureDetails({required this.closure});
+
+  final Map<String, dynamic> closure;
+
+  @override
+  Widget build(BuildContext context) => _OnlineDetailCard(
+    icon: Icons.event_busy_outlined,
+    title: 'Closure information',
+    children: [
+      _DetailLine(label: 'Date', value: closure['closure_date'].toString()),
+      _DetailLine(
+        label: 'Period',
+        value: closure['is_full_day'] == true
+            ? 'Full day'
+            : '${closure['start_time']} – ${closure['end_time']}',
+      ),
+      _DetailLine(
+        label: 'Internal reason',
+        value: closure['internal_reason']?.toString().trim().isNotEmpty == true
+            ? closure['internal_reason'].toString()
+            : 'No reason recorded',
+        last: true,
+      ),
+    ],
+  );
+}
+
+class _OnlineDetailCard extends StatelessWidget {
+  const _OnlineDetailCard({
+    required this.icon,
+    required this.title,
+    required this.children,
+  });
+
+  final IconData icon;
+  final String title;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    width: double.infinity,
+    padding: const EdgeInsets.all(14),
+    decoration: BoxDecoration(
+      color: context.appSurface,
+      border: Border.all(color: context.appBorder),
+      borderRadius: BorderRadius.circular(10),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(icon, size: 19, color: context.appColors.primary),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                  color: context.appText,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        ...children,
+      ],
+    ),
+  );
+}
+
+class _DetailLine extends StatelessWidget {
+  const _DetailLine({
+    required this.label,
+    required this.value,
+    this.last = false,
+  });
+
+  final String label;
+  final String value;
+  final bool last;
+
+  @override
+  Widget build(BuildContext context) => Column(
+    children: [
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              flex: 4,
+              child: Text(label, style: TextStyle(color: context.appMuted)),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              flex: 6,
+              child: Text(
+                value,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  color: context.appText,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (!last) Divider(height: 1, color: context.appBorder),
+    ],
+  );
+}
+
+class _DangerZone extends StatelessWidget {
+  const _DangerZone({
+    required this.title,
+    required this.description,
+    required this.buttonLabel,
+    required this.onPressed,
+  });
+
+  final String title;
+  final String description;
+  final String buttonLabel;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final error = Theme.of(context).colorScheme.error;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Theme.of(
+          context,
+        ).colorScheme.errorContainer.withValues(alpha: 0.45),
+        border: Border.all(color: error),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(color: error, fontWeight: FontWeight.w900),
+          ),
+          const SizedBox(height: 4),
+          Text(description),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: onPressed,
+            icon: const Icon(Icons.delete_outline),
+            label: Text(buttonLabel),
+            style: OutlinedButton.styleFrom(foregroundColor: error),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ServiceDraft {
@@ -599,9 +1025,13 @@ class _OnlineServiceDialog extends StatefulWidget {
     required this.rooms,
     required this.roomLinks,
     required this.hours,
+    required this.isFullScreen,
+    this.onDelete,
   });
   final Map<String, dynamic>? item;
   final List<Map<String, dynamic>> services, rooms, roomLinks, hours;
+  final bool isFullScreen;
+  final Future<void> Function()? onDelete;
   @override
   State<_OnlineServiceDialog> createState() => _OnlineServiceDialogState();
 }
@@ -686,350 +1116,342 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
         break;
       }
     }
-    return AlertDialog(
-      title: Text(
-        widget.item == null ? 'Add online service' : 'Edit online service',
+    return ManagementCatalogueDetailSurface(
+      title: widget.item == null ? 'Add Public Service' : 'Edit Public Service',
+      subtitle: 'Public details, availability and publishing',
+      isFullScreen: widget.isFullScreen,
+      footer: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton(
+              onPressed: () => _saveDraft(internal),
+              child: const Text('Save Changes'),
+            ),
+          ),
+        ],
       ),
-      content: SizedBox(
-        width: 650,
-        child: Form(
-          key: form,
-          child: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+      child: Form(
+        key: form,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            DropdownButtonFormField<String>(
+              initialValue: serviceId,
+              decoration: const InputDecoration(
+                labelText: 'Linked internal service',
+              ),
+              items: widget.services
+                  .map(
+                    (s) => DropdownMenuItem(
+                      value: s['id'].toString(),
+                      child: Text(s['name'].toString()),
+                    ),
+                  )
+                  .toList(),
+              onChanged: widget.item == null
+                  ? (v) => setState(() => serviceId = v)
+                  : null,
+              validator: (v) => v == null ? 'Required' : null,
+            ),
+            if (internal != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(
+                  'Scheduling duration: ${internal['duration']} minutes • Cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes (inherited)',
+                ),
+              ),
+            const SizedBox(height: 12),
+            _field(name, 'Public name', '', required: true),
+            const SizedBox(height: 12),
+            _field(
+              description,
+              'Short public description',
+              '',
+              required: true,
+              lines: 3,
+            ),
+            const SizedBox(height: 12),
+            _field(image, 'Public image URL', 'https://…', required: true),
+            const SizedBox(height: 12),
+            Row(
               children: [
-                DropdownButtonFormField<String>(
-                  initialValue: serviceId,
-                  decoration: const InputDecoration(
-                    labelText: 'Linked internal service',
-                  ),
-                  items: widget.services
-                      .map(
-                        (s) => DropdownMenuItem(
-                          value: s['id'].toString(),
-                          child: Text(s['name'].toString()),
-                        ),
-                      )
-                      .toList(),
-                  onChanged: widget.item == null
-                      ? (v) => setState(() => serviceId = v)
-                      : null,
-                  validator: (v) => v == null ? 'Required' : null,
-                ),
-                if (internal != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: Text(
-                      'Scheduling duration: ${internal['duration']} minutes • Cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes (inherited)',
-                    ),
-                  ),
-                const SizedBox(height: 12),
-                _field(name, 'Public name', '', required: true),
-                const SizedBox(height: 12),
-                _field(
-                  description,
-                  'Short public description',
-                  '',
-                  required: true,
-                  lines: 3,
-                ),
-                const SizedBox(height: 12),
-                _field(image, 'Public image URL', 'https://…', required: true),
-                const SizedBox(height: 12),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _field(
-                        price,
-                        'Display price',
-                        '0',
-                        number: true,
-                        required: true,
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _field(order, 'Display order', '0', number: true),
-                    ),
-                  ],
-                ),
-                const Padding(
-                  padding: EdgeInsets.only(top: 8),
-                  child: Text(
-                    'The cleanup buffer is controlled by the linked internal service and reserves both therapist and room. Customers only see treatment time.',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+                Expanded(
+                  child: _field(
+                    price,
+                    'Display price',
+                    '0',
+                    number: true,
+                    required: true,
                   ),
                 ),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Show price publicly'),
-                  value: showPrice,
-                  onChanged: (v) => setState(() => showPrice = v),
-                ),
-                const Divider(),
-                const Text(
-                  'Eligible rooms / beds',
-                  style: TextStyle(fontWeight: FontWeight.w700),
-                ),
-                ...widget.rooms.map(
-                  (r) => CheckboxListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: Text(
-                      '${r['name']} (${r['total_slots'] ?? 1} slots)',
-                    ),
-                    value: roomIds.contains(r['id'].toString()),
-                    onChanged: (v) => setState(
-                      () => v == true
-                          ? roomIds.add(r['id'].toString())
-                          : roomIds.remove(r['id'].toString()),
-                    ),
-                  ),
-                ),
-                Row(
-                  children: [
-                    Expanded(
-                      child: _field(
-                        capacity,
-                        'Maximum concurrent',
-                        '3',
-                        number: true,
-                      ),
-                    ),
-                  ],
-                ),
-                if (internal != null) ...[
-                  const SizedBox(height: 10),
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF8FAFC),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(color: const Color(0xFFE5E7EB)),
-                    ),
-                    child: Text(
-                      'After-service cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: Color(0xFF374151),
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Use custom service hours'),
-                  subtitle: const Text(
-                    'Otherwise inherits outlet public hours',
-                  ),
-                  value: custom,
-                  onChanged: (v) => setState(() => custom = v),
-                ),
-                if (custom)
-                  Row(
-                    children: [
-                      Expanded(child: _field(start, 'Available from', '11:00')),
-                      const SizedBox(width: 10),
-                      Expanded(child: _field(end, 'Available until', '22:00')),
-                    ],
-                  ),
-                const Divider(),
-                SwitchListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('Enabled'),
-                  value: enabled,
-                  onChanged: (v) => setState(() => enabled = v),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _field(order, 'Display order', '0', number: true),
                 ),
               ],
             ),
-          ),
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () {
-            if (!form.currentState!.validate() ||
-                serviceId == null ||
-                roomIds.isEmpty) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text(
-                    'Complete the public fields and select at least one room.',
+            const Padding(
+              padding: EdgeInsets.only(top: 8),
+              child: Text(
+                'The cleanup buffer is controlled by the linked internal service and reserves both therapist and room. Customers only see treatment time.',
+                style: TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+              ),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Show price publicly'),
+              value: showPrice,
+              onChanged: (v) => setState(() => showPrice = v),
+            ),
+            const Divider(),
+            const Text(
+              'Eligible rooms / beds',
+              style: TextStyle(fontWeight: FontWeight.w700),
+            ),
+            ...widget.rooms.map(
+              (r) => CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                title: Text('${r['name']} (${r['total_slots'] ?? 1} slots)'),
+                value: roomIds.contains(r['id'].toString()),
+                onChanged: (v) => setState(
+                  () => v == true
+                      ? roomIds.add(r['id'].toString())
+                      : roomIds.remove(r['id'].toString()),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Expanded(
+                  child: _field(
+                    capacity,
+                    'Maximum concurrent',
+                    '3',
+                    number: true,
                   ),
                 ),
-              );
-              return;
-            }
-            final configuredHours = custom
-                ? weekdays
-                      .map(
-                        (d) => <String, dynamic>{
-                          'day_of_week': d,
-                          'start_time': start.text.trim(),
-                          'end_time': end.text.trim(),
-                        },
-                      )
-                      .toList()
-                : <Map<String, dynamic>>[];
-            Navigator.pop(
-              context,
-              _ServiceDraft(
-                {
-                  'service_id': serviceId,
-                  'public_name': name.text.trim(),
-                  'short_description': description.text.trim(),
-                  'public_image_url': image.text.trim(),
-                  'display_price': double.tryParse(price.text) ?? 0,
-                  'display_order': int.tryParse(order.text) ?? 0,
-                  'show_price': showPrice,
-                  'buffer_before_minutes': 0,
-                  'buffer_after_minutes':
-                      int.tryParse(
-                        internal?['buffer_after_minutes']?.toString() ?? '',
-                      ) ??
-                      5,
-                  'maximum_concurrent_bookings':
-                      int.tryParse(capacity.text) ?? 3,
-                  'use_custom_hours': custom,
-                  'enabled': enabled,
-                },
-                roomIds,
-                configuredHours,
+              ],
+            ),
+            if (internal != null) ...[
+              const SizedBox(height: 10),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF8FAFC),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: const Color(0xFFE5E7EB)),
+                ),
+                child: Text(
+                  'After-service cleanup buffer: ${internal['buffer_after_minutes'] ?? 0} minutes',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Color(0xFF374151),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
               ),
-            );
-          },
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
-}
-
-class _ClosuresPane extends StatelessWidget {
-  const _ClosuresPane({
-    required this.outletId,
-    required this.closures,
-    required this.onAdd,
-    required this.onDelete,
-  });
-  final String outletId;
-  final List<Map<String, dynamic>> closures;
-  final Future<void> Function(Map<String, dynamic>) onAdd;
-  final Future<void> Function(String) onDelete;
-
-  Future<void> _addClosure(BuildContext context) async {
-    final date = await showDatePicker(
-      context: context,
-      firstDate: DateTime.now(),
-      lastDate: DateTime.now().add(const Duration(days: 365)),
-      initialDate: DateTime.now().add(const Duration(days: 1)),
-    );
-    if (date == null || !context.mounted) return;
-    var fullDay = true;
-    final start = TextEditingController(text: '11:00');
-    final end = TextEditingController(text: '12:00');
-    final reason = TextEditingController();
-    final accepted = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setLocal) => AlertDialog(
-          title: const Text('Add closure'),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Close the full day'),
-                value: fullDay,
-                onChanged: (value) => setLocal(() => fullDay = value),
+            ],
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Use custom service hours'),
+              subtitle: const Text('Otherwise inherits outlet public hours'),
+              value: custom,
+              onChanged: (v) => setState(() => custom = v),
+            ),
+            if (custom)
+              Row(
+                children: [
+                  Expanded(child: _field(start, 'Available from', '11:00')),
+                  const SizedBox(width: 10),
+                  Expanded(child: _field(end, 'Available until', '22:00')),
+                ],
               ),
-              if (!fullDay)
-                Row(
+            const Divider(),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('Enabled'),
+              value: enabled,
+              onChanged: (v) => setState(() => enabled = v),
+            ),
+            if (widget.onDelete != null) ...[
+              const SizedBox(height: 18),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.errorContainer.withValues(alpha: 0.45),
+                  border: Border.all(
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(child: _field(start, 'From', '11:00')),
-                    const SizedBox(width: 10),
-                    Expanded(child: _field(end, 'Until', '12:00')),
+                    Text(
+                      'Danger Zone',
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'Removing this public listing does not delete the internal service.',
+                    ),
+                    const SizedBox(height: 12),
+                    OutlinedButton.icon(
+                      onPressed: _confirmDelete,
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Remove Public Listing'),
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
                   ],
                 ),
-              const SizedBox(height: 12),
-              _field(reason, 'Internal reason', 'Maintenance, holiday…'),
+              ),
             ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext, false),
-              child: const Text('Cancel'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.pop(dialogContext, true),
-              child: const Text('Add'),
-            ),
           ],
         ),
       ),
     );
-    if (accepted == true) {
-      await onAdd({
-        'outlet_id': outletId,
-        'closure_date':
-            '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}',
-        'is_full_day': fullDay,
-        'start_time': fullDay ? null : start.text.trim(),
-        'end_time': fullDay ? null : end.text.trim(),
-        'internal_reason': reason.text.trim(),
-      });
-    }
-    start.dispose();
-    end.dispose();
-    reason.dispose();
   }
+
+  void _saveDraft(Map<String, dynamic>? internal) {
+    if (!form.currentState!.validate() ||
+        serviceId == null ||
+        roomIds.isEmpty) {
+      AppToast.error(
+        context,
+        'Complete the public fields and select at least one room.',
+      );
+      return;
+    }
+    final configuredHours = custom
+        ? weekdays
+              .map(
+                (day) => <String, dynamic>{
+                  'day_of_week': day,
+                  'start_time': start.text.trim(),
+                  'end_time': end.text.trim(),
+                },
+              )
+              .toList()
+        : <Map<String, dynamic>>[];
+    Navigator.pop(
+      context,
+      _ServiceDraft(
+        {
+          'service_id': serviceId,
+          'public_name': name.text.trim(),
+          'short_description': description.text.trim(),
+          'public_image_url': image.text.trim(),
+          'display_price': double.tryParse(price.text) ?? 0,
+          'display_order': int.tryParse(order.text) ?? 0,
+          'show_price': showPrice,
+          'buffer_before_minutes': 0,
+          'buffer_after_minutes':
+              int.tryParse(
+                internal?['buffer_after_minutes']?.toString() ?? '',
+              ) ??
+              5,
+          'maximum_concurrent_bookings': int.tryParse(capacity.text) ?? 3,
+          'use_custom_hours': custom,
+          'enabled': enabled,
+        },
+        roomIds,
+        configuredHours,
+      ),
+    );
+  }
+
+  Future<void> _confirmDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Remove public listing?'),
+        content: const Text(
+          'Customers will no longer see this listing. The internal service remains available to staff.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: Theme.of(context).colorScheme.error,
+            ),
+            child: const Text('Remove'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await widget.onDelete?.call();
+  }
+}
+
+class _ClosuresPane extends StatelessWidget {
+  const _ClosuresPane({required this.closures, required this.onView});
+  final List<Map<String, dynamic>> closures;
+  final void Function(Map<String, dynamic>) onView;
 
   @override
   Widget build(BuildContext context) => ListView(
     padding: const EdgeInsets.all(20),
     children: [
-      Row(
-        children: [
-          const Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Closed & blackout dates',
-                  style: TextStyle(fontSize: 22, fontWeight: FontWeight.w800),
-                ),
-                Text('Internal reasons are never shown publicly.'),
-              ],
-            ),
+      if (closures.isEmpty)
+        _card(
+          const Padding(
+            padding: EdgeInsets.all(20),
+            child: Center(child: Text('No closures configured.')),
           ),
-          FilledButton.icon(
-            onPressed: () => _addClosure(context),
-            icon: const Icon(Icons.event_busy),
-            label: const Text('Add closure'),
-          ),
-        ],
-      ),
-      const SizedBox(height: 16),
+        ),
       ...closures.map(
         (c) => Padding(
           padding: const EdgeInsets.only(bottom: 10),
           child: _card(
-            ListTile(
-              leading: const Icon(Icons.block, color: Colors.redAccent),
-              title: Text(c['closure_date'].toString()),
-              subtitle: Text(
-                c['is_full_day'] == true
-                    ? 'Full day'
-                    : '${c['start_time']} – ${c['end_time']}',
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                onPressed: () => onDelete(c['id'].toString()),
+            Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () => onView(c),
+                borderRadius: BorderRadius.circular(10),
+                child: ListTile(
+                  minTileHeight: context.managementCatalogueListHeight,
+                  leading: Icon(
+                    Icons.event_busy_outlined,
+                    color: Theme.of(context).colorScheme.error,
+                  ),
+                  title: Text(
+                    c['closure_date'].toString(),
+                    style: TextStyle(
+                      color: context.appText,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  subtitle: Text(
+                    c['is_full_day'] == true
+                        ? 'Full day'
+                        : '${c['start_time']} – ${c['end_time']}',
+                    style: TextStyle(color: context.appMuted),
+                  ),
+                  trailing: Icon(
+                    Icons.chevron_right_rounded,
+                    color: context.appMuted,
+                  ),
+                ),
               ),
             ),
           ),
@@ -1039,16 +1461,16 @@ class _ClosuresPane extends StatelessWidget {
   );
 }
 
-Widget _card(Widget child) => Container(
-  decoration: BoxDecoration(
-    color: Colors.white,
-    borderRadius: BorderRadius.circular(16),
-    boxShadow: [
-      BoxShadow(color: Colors.black.withValues(alpha: .05), blurRadius: 18),
-    ],
+Widget _card(Widget child) => Builder(
+  builder: (context) => Container(
+    decoration: BoxDecoration(
+      color: context.appSurface,
+      borderRadius: BorderRadius.circular(12),
+      border: Border.all(color: context.appBorder),
+    ),
+    padding: const EdgeInsets.all(8),
+    child: child,
   ),
-  padding: const EdgeInsets.all(16),
-  child: child,
 );
 Widget _field(
   TextEditingController controller,
@@ -1075,6 +1497,5 @@ Widget _field(
 int _timeToMinutes(String value) {
   final parts = value.trim().split(':');
   if (parts.length != 2) return 0;
-  return (int.tryParse(parts[0]) ?? 0) * 60 +
-      (int.tryParse(parts[1]) ?? 0);
+  return (int.tryParse(parts[0]) ?? 0) * 60 + (int.tryParse(parts[1]) ?? 0);
 }

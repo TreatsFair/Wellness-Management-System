@@ -10,3 +10,21 @@ String friendlyErrorMessage(Object error) {
   }
   return error.toString();
 }
+
+/// Replaces legacy CSP fallback text that incorrectly describes every staff
+/// availability failure as a booking conflict. When no concrete busy-until
+/// time is returned, the failure may instead be caused by working hours or
+/// leave.
+String friendlyBookingErrorMessage(
+  String? errorMessage, {
+  String fallback = 'Unable to complete this booking',
+}) {
+  final message = errorMessage?.trim();
+  if (message == null || message.isEmpty) return fallback;
+
+  if (message.toLowerCase() == 'staff is booked until later.') {
+    return 'Staff is unavailable for this time. Check the outlet hours and staff schedule.';
+  }
+
+  return message;
+}

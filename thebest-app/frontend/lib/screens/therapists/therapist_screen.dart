@@ -4,6 +4,9 @@ import 'package:cached_network_image/cached_network_image.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+import '../../widgets/adaptive_detail_surface.dart';
+import '../../widgets/app_toast.dart';
+import '../../widgets/management_catalogue_shell.dart';
 
 String _normalizeStaffRole(Object? value) {
   final raw = value?.toString().trim().toLowerCase() ?? '';
@@ -23,6 +26,7 @@ class TherapistModel {
   final String notes;
   final String profileImageUrl;
   final Map<String, double> serviceCommissions;
+  final int displayOrder;
 
   // Calculated
   final int totalAppointments;
@@ -38,6 +42,7 @@ class TherapistModel {
     required this.notes,
     required this.profileImageUrl,
     required this.serviceCommissions,
+    this.displayOrder = 0,
     this.totalAppointments = 0,
   });
 
@@ -50,6 +55,12 @@ class TherapistModel {
     if (value is bool) return value;
     if (value is String) return value.toLowerCase().trim() == 'true';
     return true;
+  }
+
+  static int _intValue(dynamic value) {
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    return int.tryParse(value?.toString() ?? '') ?? 0;
   }
 
   static Map<String, double> _commissionMap(dynamic value) {
@@ -76,6 +87,7 @@ class TherapistModel {
       notes: _stringValue(d['notes']),
       profileImageUrl: _stringValue(d['profileImageUrl']),
       serviceCommissions: _commissionMap(d['serviceCommissions']),
+      displayOrder: _intValue(d['displayOrder']),
     );
   }
 
@@ -103,6 +115,7 @@ class TherapistModel {
     int? totalAppointments,
     String? profileImageUrl,
     Map<String, double>? serviceCommissions,
+    int? displayOrder,
   }) {
     return TherapistModel(
       id: id,
@@ -115,6 +128,7 @@ class TherapistModel {
       notes: notes,
       profileImageUrl: profileImageUrl ?? this.profileImageUrl,
       serviceCommissions: serviceCommissions ?? this.serviceCommissions,
+      displayOrder: displayOrder ?? this.displayOrder,
       totalAppointments: totalAppointments ?? this.totalAppointments,
     );
   }
@@ -136,8 +150,49 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   TherapistModel? _selected;
   bool _loading = true;
   final _searchController = TextEditingController();
+  String? _selectedStaffRole = 'Therapist';
+  String _availabilityFilter = 'all';
+  String _staffSort = 'custom';
+  bool _staffGridView = false;
+  bool _savingOrder = false;
 
   bool get _isAdmin => widget.userRole == 'admin';
+
+  /// Drag-to-reorder only makes sense while the list shows every staff member
+  /// of one role in their saved order — otherwise the dropped position would
+  /// not map back to a real `displayOrder`.
+  bool get _canReorderVisibleStaff =>
+      _isAdmin &&
+      _staffSort == 'custom' &&
+      _selectedStaffRole != null &&
+      _availabilityFilter == 'all' &&
+      _searchController.text.trim().isEmpty &&
+      !_savingOrder;
+
+  List<TherapistModel> get _visibleTherapists {
+    final visible = _filtered.where((therapist) {
+      final inRole =
+          _selectedStaffRole == null || therapist.role == _selectedStaffRole;
+      final inAvailability = switch (_availabilityFilter) {
+        'available' => therapist.availabilityStatus,
+        'unavailable' => !therapist.availabilityStatus,
+        _ => true,
+      };
+      return inRole && inAvailability;
+    }).toList();
+    visible.sort((left, right) {
+      return switch (_staffSort) {
+        'name' => left.name.compareTo(right.name),
+        'role' => left.role.compareTo(right.role),
+        'newest' => (DateTime.tryParse(right.joinDate) ?? DateTime(1970))
+            .compareTo(DateTime.tryParse(left.joinDate) ?? DateTime(1970)),
+        _ => left.displayOrder != right.displayOrder
+            ? left.displayOrder.compareTo(right.displayOrder)
+            : left.name.toLowerCase().compareTo(right.name.toLowerCase()),
+      };
+    });
+    return visible;
+  }
 
   @override
   void initState() {
@@ -166,7 +221,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
         _therapists = enriched;
         _filtered = enriched;
         _loading = false;
-        if (enriched.isNotEmpty) _selected = enriched.first;
+        _selected = null;
       });
     } catch (e) {
       setState(() => _loading = false);
@@ -202,11 +257,23 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   Future<TherapistModel?> _openTherapistForm({
     TherapistModel? therapist,
   }) async {
-    final savedTherapist = await showDialog<TherapistModel>(
+    final savedTherapist = await showAdaptiveDetailSurface<TherapistModel>(
       context: context,
-      builder: (context) => _TherapistFormDialog(
+      barrierLabel: therapist == null
+          ? 'Close new staff'
+          : 'Close staff editor',
+      builder: (editorContext, isFullScreen) => _TherapistEditorSurface(
         therapist: therapist,
         defaultJoinDate: _todayString(),
+        isFullScreen: isFullScreen,
+        onDelete: therapist == null || !_isAdmin
+            ? null
+            : () async {
+                final deleted = await _deleteTherapist(therapist);
+                if (deleted && editorContext.mounted) {
+                  Navigator.of(editorContext).pop();
+                }
+              },
       ),
     );
 
@@ -225,7 +292,12 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
           ..._therapists.skip(existingIndex + 1),
         ];
       }
-      _therapists.sort((a, b) => a.name.compareTo(b.name));
+      _therapists.sort((a, b) {
+        if (a.displayOrder != b.displayOrder) {
+          return a.displayOrder.compareTo(b.displayOrder);
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
 
       final query = _searchController.text.toLowerCase();
       _filtered = _therapists.where((t) {
@@ -233,10 +305,60 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
             t.phone.toLowerCase().contains(query) ||
             t.role.toLowerCase().contains(query);
       }).toList();
+      _selectedStaffRole = savedTherapist.role;
       _selected = savedTherapist;
     });
 
     return savedTherapist;
+  }
+
+  Future<void> _reorderStaff(String draggedId, String targetId) async {
+    if (!_canReorderVisibleStaff || draggedId == targetId) return;
+    final ordered = [..._visibleTherapists];
+    final fromIndex = ordered.indexWhere((item) => item.id == draggedId);
+    final targetIndex = ordered.indexWhere((item) => item.id == targetId);
+    if (fromIndex < 0 || targetIndex < 0) return;
+    final moved = ordered.removeAt(fromIndex);
+    ordered.insert(targetIndex, moved);
+    final orderById = <String, int>{
+      for (var index = 0; index < ordered.length; index++)
+        ordered[index].id: index,
+    };
+
+    List<TherapistModel> applyOrder(List<TherapistModel> source) {
+      return source
+          .map(
+            (staff) => orderById.containsKey(staff.id)
+                ? staff.copyWith(displayOrder: orderById[staff.id])
+                : staff,
+          )
+          .toList();
+    }
+
+    setState(() {
+      _savingOrder = true;
+      _therapists = applyOrder(_therapists);
+      _filtered = applyOrder(_filtered);
+    });
+
+    try {
+      await _therapistRepository.updateTherapistOrder(
+        ordered.map((staff) => staff.id).toList(),
+      );
+      if (!mounted) return;
+      setState(() => _savingOrder = false);
+      AppToast.success(context, 'Staff order saved for everyone');
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _savingOrder = false);
+      await _loadTherapists();
+      if (!mounted) return;
+      AppToast.error(
+        context,
+        error.toString(),
+        title: 'Unable to save staff order',
+      );
+    }
   }
 
   Future<bool> _deleteTherapist(TherapistModel therapist) async {
@@ -269,7 +391,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
         }).toList();
 
         if (_selected?.id == therapist.id) {
-          _selected = _filtered.isNotEmpty ? _filtered.first : null;
+          _selected = null;
         }
       });
       return true;
@@ -325,39 +447,643 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     });
   }
 
-  bool _isTablet(BuildContext context) =>
-      MediaQuery.of(context).size.width >= 900;
+  Future<void> _openStaffDetail(TherapistModel therapist) async {
+    setState(() => _selected = therapist);
+    final editRequested = await showAdaptiveDetailSurface<bool>(
+      context: context,
+      barrierLabel: 'Close staff details',
+      builder: (detailContext, isFullScreen) =>
+          ManagementCatalogueDetailSurface(
+            title: 'Staff Details',
+            subtitle: therapist.name,
+            isFullScreen: isFullScreen,
+            scrollable: false,
+            footer: CatalogueDetailEditButton(
+              label: 'Edit Staff',
+              onPressed: () => Navigator.of(detailContext).pop(true),
+            ),
+            child: _DetailPanel(
+              therapist: therapist,
+              onEdit: () => Navigator.of(detailContext).pop(true),
+              showTabletHeader: false,
+              showInlineEdit: false,
+            ),
+          ),
+    );
+    if (!mounted) return;
+    setState(() => _selected = null);
+    if (editRequested == true) {
+      await _openTherapistForm(therapist: therapist);
+    }
+  }
+
+  Widget _staffNavigation() {
+    if (_selectedStaffRole == null) {
+      final definitions =
+          <
+            ({
+              String role,
+              String title,
+              String subtitle,
+              IconData icon,
+              int count,
+            })
+          >[
+            (
+              role: 'Therapist',
+              title: 'Therapists',
+              subtitle: 'Service-performing staff',
+              icon: Icons.spa_outlined,
+              count: _therapists
+                  .where((item) => item.role == 'Therapist')
+                  .length,
+            ),
+            (
+              role: 'Counter',
+              title: 'Counter Staff',
+              subtitle: 'Front counter and cashier',
+              icon: Icons.point_of_sale_outlined,
+              count: _therapists.where((item) => item.role == 'Counter').length,
+            ),
+          ];
+      return ListView(
+        padding: const EdgeInsets.fromLTRB(14, 18, 14, 24),
+        children: [
+          for (final item in definitions)
+            CatalogueSidebarTile(
+              icon: item.icon,
+              title: item.title,
+              subtitle: item.subtitle,
+              count: item.count,
+              selected: false,
+              onTap: () => _selectStaffRole(item.role),
+            ),
+        ],
+      );
+    }
+
+    final visible = _visibleTherapists;
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 18, 14, 24),
+      children: [
+        TextButton.icon(
+          onPressed: () => setState(() {
+            _selectedStaffRole = null;
+            _selected = null;
+          }),
+          style: TextButton.styleFrom(
+            alignment: Alignment.centerLeft,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+          ),
+          icon: const Icon(Icons.arrow_back, size: 18),
+          label: const Text('Staff types'),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(8, 10, 8, 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  _selectedStaffRole == 'Counter'
+                      ? 'Counter Staff'
+                      : 'Therapists',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              Text(
+                '${visible.length}',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF667085),
+                ),
+              ),
+            ],
+          ),
+        ),
+        if (_canReorderVisibleStaff && visible.length > 1)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(8, 0, 8, 12),
+            child: Text(
+              'Hold a card to reorder',
+              style: TextStyle(fontSize: 11, color: Color(0xFF667085)),
+            ),
+          ),
+        if (visible.isEmpty)
+          const Padding(
+            padding: EdgeInsets.fromLTRB(8, 24, 8, 0),
+            child: Text(
+              'No staff match the current search and availability filter.',
+              style: TextStyle(color: Color(0xFF667085), height: 1.4),
+            ),
+          )
+        else
+          for (var index = 0; index < visible.length; index++) ...[
+            Builder(
+              builder: (context) {
+                final cardHeight = _staffGridView
+                    ? context.managementCatalogueCardHeight
+                    : context.managementCatalogueListHeight;
+                return SizedBox(
+                  height: cardHeight,
+                  child: _wrapReorderable(
+                    visible[index],
+                    cardHeight,
+                    _StaffCatalogueCard(
+                      therapist: visible[index],
+                      compact: !_staffGridView,
+                      selected: _selected?.id == visible[index].id,
+                      onTap: () => setState(() => _selected = visible[index]),
+                    ),
+                  ),
+                );
+              },
+            ),
+            if (index != visible.length - 1) const SizedBox(height: 8),
+          ],
+      ],
+    );
+  }
+
+  void _selectStaffRole(String role) {
+    setState(() {
+      _selectedStaffRole = role;
+      _selected = null;
+    });
+  }
+
+  Widget _staffMobileNavigation() {
+    const items = [('Therapist', 'Therapists'), ('Counter', 'Counter')];
+    return CatalogueMobileNavigation(
+      children: [
+        for (final item in items)
+          CatalogueNavigationChip(
+            label: item.$2,
+            selected: _selectedStaffRole == item.$1,
+            onTap: () => _selectStaffRole(item.$1),
+          ),
+      ],
+    );
+  }
+
+  // ignore: unused_element
+  Widget _staffFilterMenu() {
+    return PopupMenuButton<String>(
+      initialValue: _availabilityFilter,
+      onSelected: (value) => setState(() {
+        _availabilityFilter = value;
+        if (_selected != null &&
+            !_visibleTherapists.any((item) => item.id == _selected!.id)) {
+          _selected = null;
+        }
+      }),
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 'all', child: Text('All availability')),
+        PopupMenuItem(value: 'available', child: Text('Available')),
+        PopupMenuItem(value: 'unavailable', child: Text('Unavailable')),
+      ],
+      child: CatalogueToolbarButton(
+        icon: Icons.filter_list,
+        label: switch (_availabilityFilter) {
+          'available' => 'Available',
+          'unavailable' => 'Unavailable',
+          _ => 'All',
+        },
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _staffSortMenu() {
+    return PopupMenuButton<String>(
+      initialValue: _staffSort,
+      onSelected: (value) => setState(() => _staffSort = value),
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 'custom', child: Text('Custom order')),
+        PopupMenuItem(value: 'newest', child: Text('Newest')),
+        PopupMenuItem(value: 'name', child: Text('Name')),
+        PopupMenuItem(value: 'role', child: Text('Role')),
+      ],
+      child: CatalogueToolbarButton(
+        icon: Icons.swap_vert,
+        label: switch (_staffSort) {
+          'name' => 'Name',
+          'role' => 'Role',
+          'newest' => 'Newest',
+          _ => 'Custom',
+        },
+      ),
+    );
+  }
+
+  Widget _wrapReorderable(
+    TherapistModel therapist,
+    double cardHeight,
+    Widget card,
+  ) {
+    if (!_canReorderVisibleStaff) return card;
+    return _ReorderableStaffCard(
+      therapistId: therapist.id,
+      cardHeight: cardHeight,
+      onMove: _reorderStaff,
+      child: card,
+    );
+  }
+
+  Widget _staffContent() {
+    final narrow = MediaQuery.sizeOf(context).width < 900;
+    final visible = _visibleTherapists;
+    if (narrow && _selectedStaffRole != null) {
+      if (visible.isEmpty) {
+        return _staffEmptyState(
+          icon: Icons.person_search_outlined,
+          title: 'No matching staff',
+          message: 'Try changing the search or availability filter.',
+        );
+      }
+      return RefreshIndicator(
+        onRefresh: _loadTherapists,
+        child: _staffGridView
+            ? GridView.builder(
+                padding: const EdgeInsets.fromLTRB(14, 16, 14, 28),
+                gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                  maxCrossAxisExtent: 330,
+                  mainAxisExtent: context.managementCatalogueCardHeight,
+                  crossAxisSpacing: 10,
+                  mainAxisSpacing: 10,
+                ),
+                itemCount: visible.length,
+                itemBuilder: (context, index) => _wrapReorderable(
+                  visible[index],
+                  context.managementCatalogueCardHeight,
+                  _StaffCatalogueCard(
+                    therapist: visible[index],
+                    selected: false,
+                    onTap: () => _openStaffDetail(visible[index]),
+                  ),
+                ),
+              )
+            : ListView.separated(
+                padding: const EdgeInsets.fromLTRB(14, 16, 14, 28),
+                itemCount: visible.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                itemBuilder: (context, index) => SizedBox(
+                  height: context.managementCatalogueListHeight,
+                  child: _wrapReorderable(
+                    visible[index],
+                    context.managementCatalogueListHeight,
+                    _StaffCatalogueCard(
+                      therapist: visible[index],
+                      compact: true,
+                      selected: false,
+                      onTap: () => _openStaffDetail(visible[index]),
+                    ),
+                  ),
+                ),
+              ),
+      );
+    }
+    if (_selectedStaffRole == null) {
+      return _staffEmptyState(
+        icon: Icons.badge_outlined,
+        title: 'Choose a staff type',
+        message: 'Select Therapists or Counter Staff from the left.',
+      );
+    }
+    final selected = _selected;
+    if (selected == null) {
+      return _staffEmptyState(
+        icon: Icons.touch_app_outlined,
+        title: 'Select a staff member',
+        message: 'Their information and commissions will appear here.',
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _loadTherapists,
+      child: SingleChildScrollView(
+        key: ValueKey(selected.id),
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(18),
+        child: _DetailPanel(
+          therapist: selected,
+          onEdit: () => _openTherapistForm(therapist: selected),
+          showTabletHeader: false,
+        ),
+      ),
+    );
+  }
+
+  Widget _staffEmptyState({
+    required IconData icon,
+    required String title,
+    required String message,
+  }) {
+    return RefreshIndicator(
+      onRefresh: _loadTherapists,
+      child: ListView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          const SizedBox(height: 150),
+          Icon(icon, size: 42, color: const Color(0xFF98A2B3)),
+          const SizedBox(height: 14),
+          Center(
+            child: Text(
+              title,
+              style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w800),
+            ),
+          ),
+          const SizedBox(height: 6),
+          Center(
+            child: Text(
+              message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Color(0xFF667085)),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: SafeArea(
-        child: _loading
-            ? const Center(
-                child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
-              )
-            : _isTablet(context)
-            ? _TabletLayout(
-                therapists: _filtered,
-                selected: _selected,
-                searchController: _searchController,
-                isAdmin: _isAdmin,
-                onSelect: (t) => setState(() => _selected = t),
-                onRefresh: _loadTherapists,
-                onAdd: () => _openTherapistForm(),
-                onEdit: (t) => _openTherapistForm(therapist: t),
-                onDelete: _deleteTherapist,
-              )
-            : _PhoneLayout(
-                therapists: _filtered,
-                searchController: _searchController,
-                isAdmin: _isAdmin,
-                onRefresh: _loadTherapists,
-                onAdd: () => _openTherapistForm(),
-                onEdit: (t) => _openTherapistForm(therapist: t),
-                onDelete: _deleteTherapist,
-              ),
+    if (_loading) {
+      return const Scaffold(
+        body: Center(
+          child: CircularProgressIndicator(color: Color(0xFF1B6B72)),
+        ),
+      );
+    }
+    final visible = _visibleTherapists;
+    final compact = MediaQuery.sizeOf(context).width < 900;
+    return ManagementCatalogueShell(
+      moduleTitle: 'Staff',
+      moduleSubtitle: 'Manage roles and availability',
+      contentTitle:
+          _selected?.name ??
+          (_selectedStaffRole == 'Counter'
+              ? 'Counter Staff'
+              : _selectedStaffRole == 'Therapist'
+              ? 'Therapists'
+              : 'Staff'),
+      itemCountLabel:
+          '${visible.length} staff member${visible.length == 1 ? '' : 's'}',
+      addLabel: 'Add Staff',
+      onAdd: () => _openTherapistForm(),
+      navigation: _staffNavigation(),
+      mobileNavigation: compact
+          ? const SizedBox.shrink()
+          : _staffMobileNavigation(),
+      headerActions: compact
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CatalogueHeaderChip(
+                  label: 'Therapists',
+                  selected: _selectedStaffRole == 'Therapist',
+                  onTap: () => _selectStaffRole('Therapist'),
+                ),
+                CatalogueHeaderChip(
+                  label: 'Counter',
+                  selected: _selectedStaffRole == 'Counter',
+                  onTap: () => _selectStaffRole('Counter'),
+                ),
+                CatalogueViewSwitch(
+                  gridView: _staffGridView,
+                  onChanged: (value) => setState(() => _staffGridView = value),
+                ),
+              ],
+            )
+          : CatalogueViewSwitch(
+              gridView: _staffGridView,
+              onChanged: (value) => setState(() => _staffGridView = value),
+            ),
+      content: _staffContent(),
+    );
+  }
+}
+
+class _ReorderableStaffCard extends StatelessWidget {
+  const _ReorderableStaffCard({
+    required this.therapistId,
+    required this.cardHeight,
+    required this.onMove,
+    required this.child,
+  });
+
+  final String therapistId;
+  final double cardHeight;
+  final Future<void> Function(String draggedId, String targetId) onMove;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    return DragTarget<String>(
+      onWillAcceptWithDetails: (details) => details.data != therapistId,
+      onAcceptWithDetails: (details) => onMove(details.data, therapistId),
+      builder: (context, candidates, rejected) => AnimatedScale(
+        scale: candidates.isEmpty ? 1 : 1.025,
+        duration: const Duration(milliseconds: 120),
+        child: LongPressDraggable<String>(
+          data: therapistId,
+          delay: const Duration(milliseconds: 420),
+          feedback: Material(
+            color: Colors.transparent,
+            elevation: 10,
+            borderRadius: BorderRadius.circular(14),
+            child: SizedBox(
+              width: 300,
+              height: cardHeight,
+              child: IgnorePointer(child: child),
+            ),
+          ),
+          childWhenDragging: Opacity(opacity: 0.3, child: child),
+          child: Tooltip(message: 'Hold and drag to reorder', child: child),
+        ),
       ),
+    );
+  }
+}
+
+class _StaffCatalogueCard extends StatelessWidget {
+  const _StaffCatalogueCard({
+    required this.therapist,
+    required this.selected,
+    required this.onTap,
+    this.compact = false,
+  });
+
+  final TherapistModel therapist;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = const Color(0xFF1B6B72);
+    final statusColor = therapist.availabilityStatus
+        ? const Color(0xFF059669)
+        : const Color(0xFFD97706);
+    final identity = Row(
+      children: [
+        _Avatar(therapist: therapist, radius: compact ? 23 : 25),
+        const SizedBox(width: 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                therapist.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text(
+                therapist.availabilityStatus ? 'Available' : 'Unavailable',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: statusColor,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    return Material(
+      color: selected ? accent.withValues(alpha: 0.08) : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: selected ? accent : const Color(0xFFE2E8F0),
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: compact
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: Row(
+                        children: [
+                          _Avatar(therapist: therapist, radius: 23),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  therapist.name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                    color: Color(0xFF1A1A2E),
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  therapist.availabilityStatus
+                                      ? 'Available'
+                                      : 'Unavailable',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: statusColor,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      color: Color(0xFF64748B),
+                    ),
+                  ],
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    identity,
+                    const SizedBox(height: 10),
+                    const Divider(height: 1),
+                    const SizedBox(height: 8),
+                    _StaffCardMetric(
+                      icon: Icons.phone_outlined,
+                      label: therapist.phone.isEmpty ? '-' : therapist.phone,
+                    ),
+                    const SizedBox(height: 6),
+                    _StaffCardMetric(
+                      icon: Icons.calendar_today_outlined,
+                      label: therapist.joinDate.isEmpty
+                          ? 'Join date not set'
+                          : 'Joined ${therapist.joinDate}',
+                    ),
+                    const Spacer(),
+                    const Align(
+                      alignment: Alignment.centerRight,
+                      child: Icon(
+                        Icons.chevron_right_rounded,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffCardMetric extends StatelessWidget {
+  const _StaffCardMetric({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 15, color: const Color(0xFF64748B)),
+        const SizedBox(width: 7),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xFF475569),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -365,6 +1091,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
 // -----------------------------------------------------------------
 // TABLET LAYOUT
 // -----------------------------------------------------------------
+// ignore: unused_element
 class _TabletLayout extends StatelessWidget {
   final List<TherapistModel> therapists;
   final TherapistModel? selected;
@@ -465,9 +1192,7 @@ class _TabletLayout extends StatelessWidget {
                       )
                     : _DetailPanel(
                         therapist: selected!,
-                        isAdmin: isAdmin,
                         onEdit: () => onEdit(selected!),
-                        onDelete: () => onDelete(selected!),
                         showTabletHeader: false,
                       ),
               ),
@@ -575,6 +1300,7 @@ class _TabletListItem extends StatelessWidget {
 // -----------------------------------------------------------------
 // PHONE LAYOUT
 // -----------------------------------------------------------------
+// ignore: unused_element
 class _PhoneLayout extends StatelessWidget {
   final List<TherapistModel> therapists;
   final TextEditingController searchController;
@@ -668,9 +1394,7 @@ class _PhoneLayout extends StatelessWidget {
                   MaterialPageRoute(
                     builder: (_) => _PhoneDetailScreen(
                       therapist: therapists[i],
-                      isAdmin: isAdmin,
                       onEdit: onEdit,
-                      onDelete: onDelete,
                     ),
                   ),
                 ),
@@ -789,16 +1513,9 @@ class _PhoneListCard extends StatelessWidget {
 
 class _PhoneDetailScreen extends StatefulWidget {
   final TherapistModel therapist;
-  final bool isAdmin;
   final Future<TherapistModel?> Function(TherapistModel) onEdit;
-  final Future<bool> Function(TherapistModel) onDelete;
 
-  const _PhoneDetailScreen({
-    required this.therapist,
-    required this.isAdmin,
-    required this.onEdit,
-    required this.onDelete,
-  });
+  const _PhoneDetailScreen({required this.therapist, required this.onEdit});
 
   @override
   State<_PhoneDetailScreen> createState() => _PhoneDetailScreenState();
@@ -817,13 +1534,6 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
     final updatedTherapist = await widget.onEdit(_therapist);
     if (updatedTherapist != null && mounted) {
       setState(() => _therapist = updatedTherapist);
-    }
-  }
-
-  Future<void> _deleteAndReturn() async {
-    final deleted = await widget.onDelete(_therapist);
-    if (deleted && mounted) {
-      Navigator.of(context).pop();
     }
   }
 
@@ -857,9 +1567,7 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
         ),
         child: _DetailPanel(
           therapist: _therapist,
-          isAdmin: widget.isAdmin,
           onEdit: _editAndReturn,
-          onDelete: _deleteAndReturn,
           showInlineEdit: false,
         ),
       ),
@@ -872,17 +1580,13 @@ class _PhoneDetailScreenState extends State<_PhoneDetailScreen> {
 // -----------------------------------------------------------------
 class _DetailPanel extends StatelessWidget {
   final TherapistModel therapist;
-  final bool isAdmin;
   final VoidCallback onEdit;
-  final VoidCallback onDelete;
   final bool showTabletHeader;
   final bool showInlineEdit;
 
   const _DetailPanel({
     required this.therapist,
-    required this.isAdmin,
     required this.onEdit,
-    required this.onDelete,
     this.showTabletHeader = true,
     this.showInlineEdit = true,
   });
@@ -1112,7 +1816,7 @@ class _DetailPanel extends StatelessWidget {
           const SizedBox(height: 12),
 
           // -- Notes ------------------------------------------
-          _StaffCommissionSection(staff: therapist),
+          _StaffCommissionSection(staff: therapist, editable: showInlineEdit),
 
           const SizedBox(height: 12),
 
@@ -1150,36 +1854,6 @@ class _DetailPanel extends StatelessWidget {
               ],
             ),
           ),
-
-          // Delete button — admin only
-          if (isAdmin) ...[
-            const SizedBox(height: 12),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: onDelete,
-                icon: const Icon(
-                  Icons.delete_outline,
-                  color: Color(0xFFE53935),
-                  size: 18,
-                ),
-                label: const Text(
-                  'Remove Staff',
-                  style: TextStyle(
-                    color: Color(0xFFE53935),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                  side: const BorderSide(color: Color(0xFFE53935)),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                ),
-              ),
-            ),
-          ],
 
           const SizedBox(height: 24),
         ],
@@ -1251,8 +1925,9 @@ String _normalizeServiceCategory(String value) {
 
 class _StaffCommissionSection extends StatefulWidget {
   final TherapistModel staff;
+  final bool editable;
 
-  const _StaffCommissionSection({required this.staff});
+  const _StaffCommissionSection({required this.staff, this.editable = false});
 
   @override
   State<_StaffCommissionSection> createState() =>
@@ -1426,7 +2101,9 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
                       service: service,
                       commission: _commissionFor(service),
                       hasOverride: _overrides.containsKey(service.id),
-                      onTap: () => _openCommissionEditor(service),
+                      onTap: widget.editable
+                          ? () => _openCommissionEditor(service)
+                          : null,
                     );
                   },
                 );
@@ -1490,7 +2167,7 @@ class _StaffCommissionServiceCard extends StatelessWidget {
   final _StaffServiceCommission service;
   final double commission;
   final bool hasOverride;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
 
   const _StaffCommissionServiceCard({
     required this.service,
@@ -1778,14 +2455,22 @@ class _CommissionEditorDialogState extends State<_CommissionEditorDialog> {
   }
 }
 
-class _TherapistFormDialog extends StatefulWidget {
+class _TherapistEditorSurface extends StatefulWidget {
   final TherapistModel? therapist;
   final String defaultJoinDate;
+  final bool isFullScreen;
+  final VoidCallback? onDelete;
 
-  const _TherapistFormDialog({this.therapist, required this.defaultJoinDate});
+  const _TherapistEditorSurface({
+    this.therapist,
+    required this.defaultJoinDate,
+    required this.isFullScreen,
+    this.onDelete,
+  });
 
   @override
-  State<_TherapistFormDialog> createState() => _TherapistFormDialogState();
+  State<_TherapistEditorSurface> createState() =>
+      _TherapistEditorSurfaceState();
 }
 
 class _CircleIconButton extends StatelessWidget {
@@ -1870,7 +2555,7 @@ class _TabletDetailHeader extends StatelessWidget {
   }
 }
 
-class _TherapistFormDialogState extends State<_TherapistFormDialog> {
+class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
   final _therapistRepository = TherapistRepository();
   final _imageUploadRepository = ImageUploadRepository();
   final _formKey = GlobalKey<FormState>();
@@ -1885,6 +2570,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   bool _imageRemoved = false;
   bool _saving = false;
   bool _closing = false;
+  int _tab = 0;
 
   bool get _isEditing => widget.therapist != null;
 
@@ -1918,6 +2604,7 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
 
   Future<void> _save() async {
     if (_saving || _closing) return;
+    if (_tab != 0) setState(() => _tab = 0);
     if (!_formKey.currentState!.validate()) return;
 
     setState(() => _saving = true);
@@ -2037,6 +2724,203 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final previewTherapist = _buildPreviewTherapist();
+    return Material(
+      color: Colors.white,
+      child: SafeArea(
+        top: widget.isFullScreen,
+        bottom: widget.isFullScreen,
+        child: Column(
+          children: [
+            _StaffEditorHeader(
+              therapist: previewTherapist,
+              editing: _isEditing,
+              saving: _saving,
+              active: _availabilityStatus,
+              isFullScreen: widget.isFullScreen,
+              onActiveChanged: (value) =>
+                  setState(() => _availabilityStatus = value),
+              onClose: () => _close(),
+            ),
+            _StaffEditorTabs(
+              selected: _tab,
+              onChanged: (value) => setState(() => _tab = value),
+            ),
+            Expanded(
+              child: Form(
+                key: _formKey,
+                child: IndexedStack(
+                  index: _tab,
+                  children: [
+                    _buildStaffDetails(),
+                    _buildStaffPhoto(previewTherapist),
+                  ],
+                ),
+              ),
+            ),
+            _StaffEditorFooter(
+              saving: _saving,
+              editing: _isEditing,
+              onCancel: () => _close(),
+              onSave: _save,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  TherapistModel _buildPreviewTherapist() {
+    return TherapistModel(
+      id: widget.therapist?.id ?? '',
+      name: _nameController.text.trim().isEmpty
+          ? 'Staff'
+          : _nameController.text.trim(),
+      phone: _phoneController.text.trim(),
+      gender: _genderController.text.trim(),
+      role: _normalizeStaffRole(_roleController.text),
+      joinDate: _joinDateController.text.trim(),
+      availabilityStatus: _availabilityStatus,
+      notes: _notesController.text.trim(),
+      profileImageUrl: _imageRemoved
+          ? ''
+          : widget.therapist?.profileImageUrl ?? '',
+      serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+    );
+  }
+
+  Widget _buildStaffDetails() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _StaffEditorSectionTitle('Basic information'),
+          const SizedBox(height: 12),
+          _TherapistFormField(
+            label: 'Name',
+            controller: _nameController,
+            requiredField: true,
+          ),
+          const SizedBox(height: 12),
+          _TherapistFormField(
+            label: 'Phone',
+            controller: _phoneController,
+            keyboardType: TextInputType.phone,
+            requiredField: true,
+          ),
+          const SizedBox(height: 12),
+          _TherapistGenderDropdown(
+            label: 'Gender',
+            controller: _genderController,
+          ),
+          const SizedBox(height: 22),
+          const _StaffEditorSectionTitle('Employment'),
+          const SizedBox(height: 12),
+          _StaffRoleDropdown(label: 'Role', controller: _roleController),
+          const SizedBox(height: 12),
+          _TherapistFormField(
+            label: 'Join Date',
+            controller: _joinDateController,
+            hint: 'YYYY-MM-DD',
+            keyboardType: TextInputType.datetime,
+          ),
+          const SizedBox(height: 22),
+          const _StaffEditorSectionTitle('Internal notes'),
+          const SizedBox(height: 12),
+          _TherapistFormField(
+            label: 'Notes',
+            controller: _notesController,
+            maxLines: 5,
+          ),
+          if (_isEditing && widget.onDelete != null) ...[
+            const SizedBox(height: 28),
+            const Divider(),
+            const SizedBox(height: 14),
+            const _StaffEditorSectionTitle('Danger zone'),
+            const SizedBox(height: 6),
+            const Text(
+              'Removing a staff member is permanent. Keep them unavailable if their history must remain accessible.',
+              style: TextStyle(color: Color(0xFF667085), fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _saving ? null : widget.onDelete,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Delete Staff'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFE53935),
+                side: const BorderSide(color: Color(0xFFE53935)),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStaffPhoto(TherapistModel previewTherapist) {
+    final hasPhoto =
+        _imagePreview != null ||
+        (!_imageRemoved &&
+            (widget.therapist?.profileImageUrl ?? '').trim().isNotEmpty);
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(18, 20, 18, 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _StaffEditorSectionTitle('Profile photo'),
+          const SizedBox(height: 6),
+          const Text(
+            'This photo identifies the staff member across bookings and reports.',
+            style: TextStyle(color: Color(0xFF667085), fontSize: 12),
+          ),
+          const SizedBox(height: 28),
+          Center(
+            child: _Avatar(
+              therapist: previewTherapist,
+              radius: 66,
+              preview: _imagePreview,
+            ),
+          ),
+          const SizedBox(height: 28),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              onPressed: _saving ? null : _pickImage,
+              icon: const Icon(Icons.upload_outlined),
+              label: Text(hasPhoto ? 'Replace Photo' : 'Upload Photo'),
+            ),
+          ),
+          if (hasPhoto) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: TextButton.icon(
+                onPressed: _saving ? null : _removeImage,
+                icon: const Icon(Icons.delete_outline),
+                label: const Text('Remove Photo'),
+                style: TextButton.styleFrom(
+                  foregroundColor: const Color(0xFFE53935),
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          const Center(
+            child: Text(
+              'JPG, PNG, or WebP · Maximum 5 MB · Square images work best',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF667085), fontSize: 11),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _legacyBuild(BuildContext context) {
     final previewTherapist = TherapistModel(
       id: widget.therapist?.id ?? '',
       name: _nameController.text.trim().isEmpty
@@ -2229,6 +3113,254 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _StaffEditorHeader extends StatelessWidget {
+  const _StaffEditorHeader({
+    required this.therapist,
+    required this.editing,
+    required this.saving,
+    required this.active,
+    required this.isFullScreen,
+    required this.onActiveChanged,
+    required this.onClose,
+  });
+
+  final TherapistModel therapist;
+  final bool editing;
+  final bool saving;
+  final bool active;
+  final bool isFullScreen;
+  final ValueChanged<bool> onActiveChanged;
+  final VoidCallback onClose;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          if (isFullScreen) ...[
+            IconButton(
+              tooltip: 'Back',
+              onPressed: saving ? null : onClose,
+              icon: const Icon(Icons.arrow_back),
+            ),
+            const SizedBox(width: 2),
+          ],
+          _Avatar(therapist: therapist, radius: 24),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  editing ? 'Edit Staff' : 'Add Staff',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF1A1A2E),
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  therapist.role,
+                  style: const TextStyle(
+                    color: Color(0xFF667085),
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            active ? 'Available' : 'Unavailable',
+            style: TextStyle(
+              color: active ? const Color(0xFF047857) : const Color(0xFFB45309),
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          Transform.scale(
+            scale: 0.82,
+            child: Switch(
+              value: active,
+              onChanged: saving ? null : onActiveChanged,
+              activeTrackColor: const Color(0xFF10B981),
+            ),
+          ),
+          if (!isFullScreen)
+            IconButton(
+              tooltip: 'Close',
+              onPressed: saving ? null : onClose,
+              icon: const Icon(Icons.close),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StaffEditorTabs extends StatelessWidget {
+  const _StaffEditorTabs({required this.selected, required this.onChanged});
+
+  final int selected;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          _StaffEditorTab(
+            label: 'Details',
+            selected: selected == 0,
+            onTap: () => onChanged(0),
+          ),
+          _StaffEditorTab(
+            label: 'Photo',
+            selected: selected == 1,
+            onTap: () => onChanged(1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StaffEditorTab extends StatelessWidget {
+  const _StaffEditorTab({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
+        child: Column(
+          children: [
+            Expanded(
+              child: Center(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: selected
+                        ? const Color(0xFF1B6B72)
+                        : const Color(0xFF667085),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ),
+            Container(
+              height: 2,
+              color: selected ? const Color(0xFF1B6B72) : Colors.transparent,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StaffEditorFooter extends StatelessWidget {
+  const _StaffEditorFooter({
+    required this.saving,
+    required this.editing,
+    required this.onCancel,
+    required this.onSave,
+  });
+
+  final bool saving;
+  final bool editing;
+  final VoidCallback onCancel;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: saving ? null : onCancel,
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(44),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: const Text('Cancel'),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton(
+              onPressed: saving ? null : onSave,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(44),
+                backgroundColor: const Color(0xFF1B6B72),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: saving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(editing ? 'Save Changes' : 'Add Staff'),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StaffEditorSectionTitle extends StatelessWidget {
+  const _StaffEditorSectionTitle(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        color: Color(0xFF344054),
+        fontSize: 12,
+        fontWeight: FontWeight.w800,
       ),
     );
   }

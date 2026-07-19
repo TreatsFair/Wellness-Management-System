@@ -8,6 +8,8 @@ import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+import '../../data/services/supabase_table_service.dart';
+import '../../widgets/app_toast.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -110,6 +112,13 @@ class _Therapist {
   final bool isFree;
   final String busyUntil;
 
+  /// Availability summary for the booking's selected date (not "right now"):
+  /// e.g. 'Available', 'On leave', 'Off today',
+  /// 'Busy until 3:30 PM'. [statusTone] drives the badge color:
+  /// 'free' (green), 'busy' (amber), 'off' (gray).
+  final String statusLabel;
+  final String statusTone;
+
   const _Therapist({
     required this.id,
     required this.name,
@@ -117,6 +126,8 @@ class _Therapist {
     required this.imageUrl,
     required this.isFree,
     required this.busyUntil,
+    this.statusLabel = '',
+    this.statusTone = 'free',
   });
 
   bool get isFemale => gender.startsWith('f');
@@ -161,6 +172,9 @@ class _TimeSlot {
   final bool isRecommended, isAvailable;
   final int score;
   final String reason;
+  final int roomAvailableSlots;
+  final String? previousBlockEnd, nextBlockStart;
+  final int? gapBeforeMinutes, gapAfterMinutes;
 
   const _TimeSlot({
     required this.start,
@@ -169,6 +183,11 @@ class _TimeSlot {
     required this.isAvailable,
     this.score = 0,
     this.reason = '',
+    this.roomAvailableSlots = 0,
+    this.previousBlockEnd,
+    this.nextBlockStart,
+    this.gapBeforeMinutes,
+    this.gapAfterMinutes,
   });
 
   String get label => '${_bookingTimeLabel(start)} - ${_bookingTimeLabel(end)}';
@@ -176,13 +195,43 @@ class _TimeSlot {
   String get reasonLabel {
     switch (reason) {
       case 'fills_between_bookings':
-        return 'Fills a schedule gap';
+        return nextBlockStart == null
+            ? 'Fills the available schedule gap'
+            : 'Uses the full open window before ${_bookingTimeLabel(nextBlockStart!)}';
       case 'starts_after_booking':
-        return 'Starts after current booking';
+        return previousBlockEnd == null
+            ? 'Starts immediately after a booking'
+            : 'Starts when the schedule clears at ${_bookingTimeLabel(previousBlockEnd!)}';
+      case 'starts_after_booking_short_gap':
+        return 'Starts at ${_bookingTimeLabel(previousBlockEnd ?? start)} · leaves ${gapAfterMinutes ?? 0} min before next';
       case 'ends_before_booking':
-        return 'Ends before current booking';
+        return nextBlockStart == null
+            ? 'Fits directly before the next booking'
+            : 'Fits directly before the ${_bookingTimeLabel(nextBlockStart!)} booking';
+      case 'ends_before_booking_short_gap':
+        return 'Fits before ${_bookingTimeLabel(nextBlockStart ?? end)} · leaves ${gapBeforeMinutes ?? 0} min after previous';
       case 'balances_workload':
         return 'Balances staff workload';
+      case 'leaves_short_gap':
+        final gaps = [
+          gapBeforeMinutes,
+          gapAfterMinutes,
+        ].whereType<int>().where((gap) => gap > 0).toList()..sort();
+        return gaps.isEmpty
+            ? 'Leaves a short idle gap'
+            : 'Leaves a ${gaps.first}-minute idle gap';
+      case 'starts_after_unavailability':
+        return 'Starts when the therapist becomes available';
+      case 'starts_at_shift':
+        return 'Starts at the beginning of the therapist shift';
+      case 'custom_time':
+        return 'Exact time checked and available';
+      case 'therapist_on_leave':
+        return 'Therapist on leave';
+      case 'outside_working_hours':
+        return 'Outside working hours';
+      case 'assigned_to_other_pax':
+        return 'Therapist already booked for another pax';
       default:
         return 'Good schedule fit';
     }
@@ -347,6 +396,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   final _roomRepository = RoomRepository();
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
+  final _serviceCategoryTable = SupabaseTableService('service_categories');
+  final _workingHoursTable = SupabaseTableService('therapist_working_hours');
+  final _unavailabilityTable = SupabaseTableService('therapist_unavailability');
 
   // State
   DateTime _selectedDate = DateTime.now();
@@ -363,14 +415,17 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   bool _summaryExpanded = false;
   bool _isConfirming = false;
   bool _loadingSlots = false;
+  bool _showAllStandardSlots = false;
   int _slotRequestSerial = 0;
   bool _didApplyEditPayload = false;
 
   // Data
   List<_Service> _services = [];
+  List<String> _serviceCategories = const ['Services', 'Add-ons', 'Packages'];
   List<_Therapist> _therapists = [];
   List<_RoomZone> _rooms = [];
   List<_TimeSlot> _slots = [];
+  List<CspScheduleBlock> _scheduleBlocks = [];
   List<_Customer> _customers = [];
   List<_Customer> _filteredCustomers = [];
   bool _loadingData = true;
@@ -490,6 +545,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _activePaxIndex = payload.activePaxIndex.clamp(0, _paxCount - 1);
       _loadAllocationIntoSelection(_paxAllocations[_activePaxIndex]);
     });
+    // Re-resolve card availability for the edited booking's date.
+    _loadTherapists();
+    _loadRooms();
     if (_hasCurrentAllocation) _generateSlots();
   }
 
@@ -506,8 +564,33 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         }
       }
 
+      var categoryRows = const <Map<String, dynamic>>[];
+      try {
+        categoryRows = await _serviceCategoryTable.list(orderBy: 'name');
+      } catch (_) {
+        // Existing service records still provide a safe category fallback.
+      }
+      const coreCategories = ['Services', 'Add-ons', 'Packages'];
+      final categorySet = <String>{
+        ...coreCategories,
+        ...categoryRows
+            .where(_isActiveDoc)
+            .map((row) => row['name']?.toString().trim() ?? ''),
+        ...services.map((service) => service.category.trim()),
+      }..removeWhere((category) => category.isEmpty);
+      final customCategories =
+          categorySet
+              .where((category) => !coreCategories.contains(category))
+              .toList()
+            ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+      final categories = [...coreCategories, ...customCategories];
+
       setState(() {
         _services = services;
+        _serviceCategories = categories;
+        if (!categories.contains(_serviceTab)) {
+          _serviceTab = categories.first;
+        }
         _serviceLoadError = null;
       });
     } catch (e) {
@@ -518,40 +601,146 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     }
   }
 
+  /// Availability shown on the therapist cards reflects the *selected booking
+  /// date* (working hours, leave, and - for today - live busyness), not the
+  /// current wall clock. The final validity of any slot is still decided by
+  /// Supabase in [_generateSlots].
   Future<void> _loadTherapists() async {
     final rows = await _therapistRepository.getActiveTherapists();
+    final date = _stripDate(_selectedDate);
+    final dateKey = DateFormat('yyyy-MM-dd').format(date);
     final now = DateTime.now();
-    final today = DateFormat('yyyy-MM-dd').format(now);
+    final isToday = dateKey == DateFormat('yyyy-MM-dd').format(now);
     final nowMinutes = now.hour * 60 + now.minute;
+    // Postgres day_of_week: Sunday = 0 .. Saturday = 6.
+    final dayOfWeek = date.weekday % 7;
+    final dayStart = date;
+    final dayEnd = date.add(const Duration(days: 1));
+
+    var hoursRows = const <Map<String, dynamic>>[];
+    var leaveRows = const <Map<String, dynamic>>[];
+    try {
+      hoursRows = await _workingHoursTable.findBy('day_of_week', dayOfWeek);
+    } catch (_) {
+      hoursRows = const [];
+    }
+    try {
+      leaveRows = await _unavailabilityTable.list(orderBy: 'starts_at');
+    } catch (_) {
+      leaveRows = const [];
+    }
+
+    final shiftsByTherapist = <String, List<List<int>>>{};
+    for (final row in hoursRows) {
+      final therapistId = row['therapistId']?.toString() ?? '';
+      if (therapistId.isEmpty) continue;
+      final start = _bookingTimeToMinutes(
+        _bookingCleanTime(row['startTime']?.toString() ?? ''),
+      );
+      var end = _bookingTimeToMinutes(
+        _bookingCleanTime(row['endTime']?.toString() ?? ''),
+      );
+      if (end <= start) end += 24 * 60;
+      shiftsByTherapist.putIfAbsent(therapistId, () => []).add([start, end]);
+    }
+
+    final leaveByTherapist = <String, List<List<DateTime>>>{};
+    for (final row in leaveRows) {
+      final therapistId = row['therapistId']?.toString() ?? '';
+      if (therapistId.isEmpty) continue;
+      final startsAt = DateTime.tryParse(
+        row['startsAt']?.toString() ?? '',
+      )?.toLocal();
+      final endsAt = DateTime.tryParse(
+        row['endsAt']?.toString() ?? '',
+      )?.toLocal();
+      if (startsAt == null || endsAt == null) continue;
+      if (!startsAt.isBefore(dayEnd) || !endsAt.isAfter(dayStart)) continue;
+      leaveByTherapist.putIfAbsent(therapistId, () => []).add([
+        startsAt,
+        endsAt,
+      ]);
+    }
+
     final therapists = <_Therapist>[];
     for (final row in rows) {
-      var isFree = _isActiveDoc({
+      final therapistId = row['id']?.toString() ?? '';
+      final isActive = _isActiveDoc({
         'isActive': row['availabilityStatus'] ?? true,
       });
+      final shifts = [...?shiftsByTherapist[therapistId]]
+        ..sort((a, b) => a[0].compareTo(b[0]));
+      final leaves = leaveByTherapist[therapistId] ?? const [];
+
+      DateTime shiftTime(int minutes) => date.add(Duration(minutes: minutes));
+      bool shiftOnLeave(List<int> shift) => leaves.any(
+        (leave) =>
+            !leave[0].isAfter(shiftTime(shift[0])) &&
+            !leave[1].isBefore(shiftTime(shift[1])),
+      );
+      final hasLeaveOverlap = leaves.any(
+        (leave) => shifts.any(
+          (shift) =>
+              leave[0].isBefore(shiftTime(shift[1])) &&
+              leave[1].isAfter(shiftTime(shift[0])),
+        ),
+      );
+
+      var isFree = isActive;
       var busyUntil = '';
-      final appointments = await _appointmentRepository
-          .getActiveAppointmentsForTherapist(
-            row['id']?.toString() ?? '',
-            today,
-          );
-      for (final appointment in appointments) {
-        final start = _bookingTimeToMinutes(
-          appointment['startTime']?.toString() ?? '00:00',
-        );
-        final end =
-            _bookingTimeToMinutes(
-              appointment['endTime']?.toString() ?? '00:00',
-            ) +
-            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
-        if (start <= nowMinutes && end > nowMinutes) {
-          isFree = false;
-          busyUntil = _bookingMinutesToTime(end);
-          break;
+      var statusLabel = '';
+      var statusTone = 'free';
+
+      if (!isActive) {
+        isFree = false;
+        statusLabel = 'Unavailable';
+        statusTone = 'off';
+      } else if (shifts.isEmpty) {
+        isFree = false;
+        statusLabel = isToday
+            ? 'Off today'
+            : 'Off on ${DateFormat('EEE').format(date)}';
+        statusTone = 'off';
+      } else if (shifts.every(shiftOnLeave)) {
+        isFree = false;
+        statusLabel = 'On leave';
+        statusTone = 'off';
+      } else {
+        // Live busyness only makes sense when booking for today.
+        if (isToday) {
+          final appointments = await _appointmentRepository
+              .getActiveAppointmentsForTherapist(therapistId, dateKey);
+          for (final appointment in appointments) {
+            final start = _bookingTimeToMinutes(
+              appointment['startTime']?.toString() ?? '00:00',
+            );
+            final end =
+                _bookingTimeToMinutes(
+                  appointment['endTime']?.toString() ?? '00:00',
+                ) +
+                _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
+            if (start <= nowMinutes && end > nowMinutes) {
+              isFree = false;
+              busyUntil = _bookingMinutesToTime(end);
+              break;
+            }
+          }
+        }
+        if (busyUntil.isNotEmpty) {
+          statusLabel = 'Busy until ${_bookingTimeLabel(busyUntil)}';
+          statusTone = 'busy';
+        } else if (hasLeaveOverlap) {
+          statusLabel = 'Limited availability';
+          statusTone = 'busy';
+        } else {
+          statusLabel = 'Available';
+          statusTone = 'free';
         }
       }
+
       therapists.add(
         _Therapist(
-          id: row['id']?.toString() ?? '',
+          id: therapistId,
           name: row['name']?.toString() ?? '',
           gender: row['gender']?.toString().trim().toLowerCase() ?? '',
           imageUrl:
@@ -561,9 +750,22 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               '',
           isFree: isFree,
           busyUntil: busyUntil,
+          statusLabel: statusLabel,
+          statusTone: statusTone,
         ),
       );
     }
+
+    // Workable therapists first; off/leave sink to the bottom.
+    const toneOrder = {'free': 0, 'busy': 1, 'off': 2};
+    therapists.sort((a, b) {
+      final byTone = (toneOrder[a.statusTone] ?? 1).compareTo(
+        toneOrder[b.statusTone] ?? 1,
+      );
+      return byTone != 0 ? byTone : a.name.compareTo(b.name);
+    });
+
+    if (!mounted) return;
     setState(() {
       _therapists = therapists;
     });
@@ -572,26 +774,32 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   Future<void> _loadRooms() async {
     final rows = await _roomRepository.getActiveRooms();
     final now = DateTime.now();
-    final today = DateFormat('yyyy-MM-dd').format(now);
+    final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
+    final isToday = dateKey == DateFormat('yyyy-MM-dd').format(now);
     final nowMinutes = now.hour * 60 + now.minute;
 
     final zones = <_RoomZone>[];
     for (final d in rows) {
       if (!_isActiveDoc(d)) continue;
       final totalSlots = _parseInt(d['totalSlots'], fallback: 1);
-      final appointments = await _appointmentRepository
-          .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', today);
-      final occupied = appointments.where((appointment) {
-        final start = _bookingTimeToMinutes(
-          appointment['startTime']?.toString() ?? '00:00',
-        );
-        final end =
-            _bookingTimeToMinutes(
-              appointment['endTime']?.toString() ?? '00:00',
-            ) +
-            _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
-        return start <= nowMinutes && end > nowMinutes;
-      }).length;
+      // "Occupied right now" only applies when booking for today; for other
+      // dates the per-slot capacity comes from Supabase in _generateSlots.
+      var occupied = 0;
+      if (isToday) {
+        final appointments = await _appointmentRepository
+            .getActiveAppointmentsForRoom(d['id']?.toString() ?? '', dateKey);
+        occupied = appointments.where((appointment) {
+          final start = _bookingTimeToMinutes(
+            appointment['startTime']?.toString() ?? '00:00',
+          );
+          final end =
+              _bookingTimeToMinutes(
+                appointment['endTime']?.toString() ?? '00:00',
+              ) +
+              _parseInt(appointment['bufferAfterMinutes'], fallback: 0);
+          return start <= nowMinutes && end > nowMinutes;
+        }).length;
+      }
       zones.add(
         _RoomZone(
           id: d['id']?.toString() ?? '',
@@ -711,31 +919,58 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     final requestPaxIndex = _activePaxIndex;
     final requestedStart = _selectedSlot?.start;
     if (mounted) {
-      setState(() => _loadingSlots = true);
+      setState(() {
+        _loadingSlots = true;
+        _showAllStandardSlots = false;
+      });
     }
 
     final duration = _serviceDuration;
+    final bufferAfterMinutes = _serviceBufferAfterMinutes;
+    final date = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
     try {
+      final scheduleContextFuture = () async {
+        try {
+          return await CspService.getStaffBookingScheduleContext(
+            date: date,
+            therapistId: _selectedTherapist!.id,
+            excludeId: _activeEditAppointmentId,
+          );
+        } catch (error) {
+          debugPrint('Unable to load therapist schedule context: $error');
+          return const <CspScheduleBlock>[];
+        }
+      }();
       final cspSlots = await CspService.getAvailableSlots(
-        date: DateFormat('yyyy-MM-dd').format(_selectedDate),
+        date: date,
         therapistId: _selectedTherapist!.id,
         roomId: _selectedRoom!.id,
         duration: duration,
+        bufferAfterMinutes: bufferAfterMinutes,
         excludeId: _activeEditAppointmentId,
       );
-      final slots = cspSlots
-          .map(
-            (slot) => _TimeSlot(
-              start: slot.startTime,
-              end: slot.endTime,
-              isRecommended: slot.isRecommended,
-              isAvailable: slot.isAvailable,
-              score: slot.score,
-              reason: slot.reason,
-            ),
-          )
-          .toList();
+      final scheduleBlocks = await scheduleContextFuture;
+      final slots = _applyLocalPaxConstraints(
+        cspSlots
+            .map(
+              (slot) => _TimeSlot(
+                start: slot.startTime,
+                end: slot.endTime,
+                isRecommended: slot.isRecommended,
+                isAvailable: slot.isAvailable,
+                score: slot.score,
+                reason: slot.reason,
+                roomAvailableSlots: slot.roomAvailableSlots,
+                previousBlockEnd: slot.previousBlockEnd,
+                nextBlockStart: slot.nextBlockStart,
+                gapBeforeMinutes: slot.gapBeforeMinutes,
+                gapAfterMinutes: slot.gapAfterMinutes,
+              ),
+            )
+            .toList(),
+        requestPaxIndex,
+      );
       if (!mounted ||
           requestSerial != _slotRequestSerial ||
           requestPaxIndex != _activePaxIndex) {
@@ -745,8 +980,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ? const <_TimeSlot>[]
           : slots
                 .where(
-                  (slot) =>
-                      slot.isAvailable && slot.start == requestedStart,
+                  (slot) => slot.isAvailable && slot.start == requestedStart,
                 )
                 .toList();
       var matchingSlot = matchingSlots.isEmpty ? null : matchingSlots.first;
@@ -756,10 +990,13 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         final requestedEnd = _bookingMinutesToTime(
           _bookingTimeToMinutes(requestedStart) + duration,
         );
+        final requestedReservedEnd = _bookingMinutesToTime(
+          _bookingTimeToMinutes(requestedStart) + duration + bufferAfterMinutes,
+        );
         final validation = await CspService.validateSlot(
           date: DateFormat('yyyy-MM-dd').format(_selectedDate),
           startTime: requestedStart,
-          endTime: requestedEnd,
+          endTime: requestedReservedEnd,
           therapistId: _selectedTherapist!.id,
           roomId: _selectedRoom!.id,
           excludeId: _activeEditAppointmentId,
@@ -782,6 +1019,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       }
       setState(() {
         _slots = slots;
+        _scheduleBlocks = scheduleBlocks;
         if (requestedStart != null) {
           _selectedSlot = matchingSlot;
           if (matchingSlot == null) {
@@ -790,28 +1028,114 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         }
       });
       if (requestedStart != null && matchingSlot == null) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Pax ${requestPaxIndex + 1} no longer fits at the selected time. Choose another time, therapist, or room.',
-            ),
-            backgroundColor: const Color(0xFFE53935),
-            behavior: SnackBarBehavior.floating,
-          ),
+        AppToast.error(
+          context,
+          'Pax ${requestPaxIndex + 1} no longer fits at the selected time. Choose another time, therapist, or room.',
+          title: 'Time no longer available',
         );
       }
     } catch (e) {
       if (mounted &&
           requestSerial == _slotRequestSerial &&
           requestPaxIndex == _activePaxIndex) {
-        setState(() => _slots = []);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Unable to load available slots: $e'),
-            backgroundColor: const Color(0xFFE53935),
-            behavior: SnackBarBehavior.floating,
-          ),
+        setState(() {
+          _slots = [];
+          _scheduleBlocks = [];
+        });
+        AppToast.error(context, 'Unable to load available slots: $e');
+      }
+    } finally {
+      if (mounted && requestSerial == _slotRequestSerial) {
+        setState(() => _loadingSlots = false);
+      }
+    }
+  }
+
+  Future<void> _pickExactStartTime() async {
+    if (_selectedServices.isEmpty ||
+        _selectedTherapist == null ||
+        _selectedRoom == null ||
+        _loadingSlots) {
+      return;
+    }
+    final now = DateTime.now();
+    final initialMinutes = _selectedSlot == null
+        ? (now.hour * 60 + now.minute + 4) ~/ 5 * 5
+        : _bookingTimeToMinutes(_selectedSlot!.start);
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay(
+        hour: (initialMinutes ~/ 60) % 24,
+        minute: initialMinutes % 60,
+      ),
+      helpText: 'Choose an exact start time',
+      confirmText: 'Check Time',
+    );
+    if (picked == null || !mounted) return;
+
+    final startMinutes = picked.hour * 60 + picked.minute;
+    final selectedDay = _stripDate(_selectedDate);
+    if (selectedDay == _stripDate(now) &&
+        startMinutes <= now.hour * 60 + now.minute) {
+      AppToast.info(context, 'Choose a time later than now');
+      return;
+    }
+
+    final requestSerial = ++_slotRequestSerial;
+    final start = _bookingMinutesToTime(startMinutes);
+    final treatmentEnd = _bookingMinutesToTime(startMinutes + _serviceDuration);
+    final reservedEnd = _bookingMinutesToTime(
+      startMinutes + _serviceDuration + _serviceBufferAfterMinutes,
+    );
+    setState(() => _loadingSlots = true);
+    try {
+      final validation = await CspService.validateSlot(
+        date: DateFormat('yyyy-MM-dd').format(_selectedDate),
+        startTime: start,
+        endTime: reservedEnd,
+        therapistId: _selectedTherapist!.id,
+        roomId: _selectedRoom!.id,
+        excludeId: _activeEditAppointmentId,
+      );
+      if (!mounted || requestSerial != _slotRequestSerial) return;
+      var exactSlot = _TimeSlot(
+        start: start,
+        end: treatmentEnd,
+        isRecommended: false,
+        isAvailable: validation.therapistAvailable && !validation.roomFull,
+        reason: 'custom_time',
+        roomAvailableSlots: validation.roomAvailableSlots,
+      );
+      exactSlot = _applyLocalPaxConstraints([exactSlot], _activePaxIndex).first;
+      if (!exactSlot.isAvailable) {
+        final details = <String>[
+          if (!validation.therapistAvailable &&
+              validation.therapistBusyUntil != null)
+            'therapist busy until ${_bookingTimeLabel(validation.therapistBusyUntil!)}',
+          if (validation.roomFull && validation.roomFullUntil != null)
+            'room full until ${_bookingTimeLabel(validation.roomFullUntil!)}',
+        ];
+        AppToast.error(
+          context,
+          details.isEmpty
+              ? 'The therapist or room is unavailable for the full treatment and cleanup period.'
+              : details.join(' · '),
+          title: 'Exact time is unavailable',
         );
+        return;
+      }
+      setState(() {
+        _slots = [
+          exactSlot,
+          ..._slots.where((slot) => slot.start != exactSlot.start),
+        ];
+        _selectedSlot = exactSlot;
+        _paxAllocations[_activePaxIndex] = null;
+      });
+      AppToast.success(context, 'Exact time is available');
+    } catch (error) {
+      if (mounted && requestSerial == _slotRequestSerial) {
+        AppToast.error(context, 'Unable to check this time: $error');
       }
     } finally {
       if (mounted && requestSerial == _slotRequestSerial) {
@@ -825,14 +1149,91 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     return int.parse(p[0]) * 60 + int.parse(p[1]);
   }
 
+  /// Supabase validates each slot against the database, but it cannot see the
+  /// other pax picks that are still only in this screen's memory. Overlay
+  /// those: the same therapist cannot serve two pax at once, and unsaved pax
+  /// in the same room consume its remaining capacity.
+  List<_TimeSlot> _applyLocalPaxConstraints(
+    List<_TimeSlot> slots,
+    int paxIndex,
+  ) {
+    final therapist = _selectedTherapist;
+    final room = _selectedRoom;
+    if (therapist == null || room == null) return slots;
+
+    final others = <_BookingAllocation>[];
+    for (var i = 0; i < _paxAllocations.length; i++) {
+      if (i == paxIndex) continue;
+      final allocation = _paxAllocations[i];
+      if (allocation == null) continue;
+      // Already-saved appointments are counted by Supabase itself.
+      if (allocation.appointmentId.trim().isNotEmpty) continue;
+      others.add(allocation);
+    }
+    if (others.isEmpty) return slots;
+
+    final duration = _serviceDuration;
+    final ownBuffer = _selectedServices.fold<int>(
+      0,
+      (buffer, service) => service.bufferAfterMinutes > buffer
+          ? service.bufferAfterMinutes
+          : buffer,
+    );
+
+    return slots.map((slot) {
+      if (!slot.isAvailable) return slot;
+      final start = _bookingTimeToMinutes(slot.start);
+      final end = start + duration + ownBuffer;
+      var roomTaken = 0;
+      for (final other in others) {
+        final otherStart = _bookingTimeToMinutes(other.slot.start);
+        var otherEnd = _bookingTimeToMinutes(other.endTime);
+        if (otherEnd <= otherStart) otherEnd += 24 * 60;
+        otherEnd += other.services.fold<int>(
+          0,
+          (buffer, service) => service.bufferAfterMinutes > buffer
+              ? service.bufferAfterMinutes
+              : buffer,
+        );
+        final overlaps = start < otherEnd && end > otherStart;
+        if (!overlaps) continue;
+        if (other.therapist.id == therapist.id) {
+          return _TimeSlot(
+            start: slot.start,
+            end: slot.end,
+            isRecommended: false,
+            isAvailable: false,
+            reason: 'assigned_to_other_pax',
+            roomAvailableSlots: slot.roomAvailableSlots,
+          );
+        }
+        if (other.room.id == room.id) roomTaken++;
+      }
+      // Before migration 076 the RPC does not report per-slot capacity;
+      // fall back to the room's total capacity so nothing is over-blocked.
+      final capacity = slot.roomAvailableSlots > 0
+          ? slot.roomAvailableSlots
+          : room.totalSlots;
+      if (roomTaken > 0 && roomTaken >= capacity) {
+        return _TimeSlot(
+          start: slot.start,
+          end: slot.end,
+          isRecommended: false,
+          isAvailable: false,
+          reason: 'room_full',
+          roomAvailableSlots: 0,
+        );
+      }
+      return slot;
+    }).toList();
+  }
+
   // ── Selection Handlers ─────────────────────────────────────────
 
   void _onServiceSelected(_Service s) {
     if (_lockedServiceIds.contains(s.id) &&
         _selectedServices.any((service) => service.id == s.id)) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Booked services stay in this visit')),
-      );
+      AppToast.info(context, 'Booked services stay in this visit');
       return;
     }
     final isRemoving = _selectedServices.any((service) => service.id == s.id);
@@ -860,6 +1261,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         _selectedSlot = null;
       }
       _slots = [];
+      _scheduleBlocks = [];
       _loadingSlots = false;
       _paxAllocations[_activePaxIndex] = null;
       shouldGenerateSlots =
@@ -881,6 +1283,11 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       isAvailable: slot.isAvailable,
       score: slot.score,
       reason: slot.reason,
+      roomAvailableSlots: slot.roomAvailableSlots,
+      previousBlockEnd: slot.previousBlockEnd,
+      nextBlockStart: slot.nextBlockStart,
+      gapBeforeMinutes: slot.gapBeforeMinutes,
+      gapAfterMinutes: slot.gapAfterMinutes,
     );
   }
 
@@ -900,6 +1307,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _selectedTherapist = t;
       _selectedSlot = null;
       _slots = [];
+      _scheduleBlocks = [];
       _loadingSlots = false;
       _paxAllocations[_activePaxIndex] = null;
     });
@@ -912,6 +1320,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _selectedRoom = r;
       _selectedSlot = null;
       _slots = [];
+      _scheduleBlocks = [];
       _loadingSlots = false;
       _paxAllocations[_activePaxIndex] = null;
     });
@@ -926,8 +1335,10 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       _selectedDate = _stripDate(date);
       _selectedSlot = null;
       _slots = [];
+      _scheduleBlocks = [];
       _loadingSlots = false;
     });
+    _loadTherapists();
     _loadRooms();
     if (_selectedServices.isNotEmpty &&
         _selectedTherapist != null &&
@@ -938,6 +1349,13 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   int get _serviceDuration =>
       _selectedServices.fold(0, (total, service) => total + service.duration);
+
+  int get _serviceBufferAfterMinutes => _selectedServices.fold<int>(
+    0,
+    (buffer, service) => service.bufferAfterMinutes > buffer
+        ? service.bufferAfterMinutes
+        : buffer,
+  );
 
   double get _servicePrice =>
       _selectedServices.fold(0, (total, service) => total + service.price);
@@ -974,6 +1392,12 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   List<_BookingAllocation> get _checkoutAllocations =>
       _allocationSlots.whereType<_BookingAllocation>().toList();
+
+  bool _isTherapistReservedInBooking(String therapistId) {
+    return _allocationSlots.whereType<_BookingAllocation>().any(
+      (allocation) => allocation.therapist.id == therapistId,
+    );
+  }
 
   bool get _hasUnpaidAddOns {
     final payload = widget.editPayload;
@@ -1016,6 +1440,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     _selectedSlot = null;
     _previousSlotReference = null;
     _slots = [];
+    _scheduleBlocks = [];
     _loadingSlots = false;
   }
 
@@ -1031,6 +1456,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     _selectedRoom = allocation.room;
     _selectedSlot = allocation.slot;
     _previousSlotReference = allocation.slot;
+    _scheduleBlocks = [];
     _slots = [allocation.slot];
     _loadingSlots = false;
   }
@@ -1097,13 +1523,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _showPaxConflict(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(message),
-        backgroundColor: const Color(0xFFE53935),
-        behavior: SnackBarBehavior.floating,
-      ),
-    );
+    AppToast.error(context, message, title: 'Pax conflict');
   }
 
   void _selectPax(int index) {
@@ -1222,13 +1642,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         final slotEnd = _timeToMinutes(allocation.endTime);
         if (slotStart == slotEnd) {
           if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Invalid appointment time selected'),
-                backgroundColor: Color(0xFFE53935),
-                behavior: SnackBarBehavior.floating,
-              ),
-            );
+            AppToast.error(context, 'Invalid appointment time selected');
           }
           return;
         }
@@ -1257,11 +1671,12 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
                       .map(
                         (item) => {
                           ...item,
-                          'lineType': (editAllocationsById[allocations[index]
-                                          .appointmentId]
-                                      ?.bookedServiceIds ??
-                                  const <String>[])
-                              .contains(item['id'])
+                          'lineType':
+                              (editAllocationsById[allocations[index]
+                                              .appointmentId]
+                                          ?.bookedServiceIds ??
+                                      const <String>[])
+                                  .contains(item['id'])
                               ? 'booked'
                               : 'add_on',
                         },
@@ -1343,27 +1758,16 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
       if (!result.success) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(result.message),
-              backgroundColor: const Color(0xFFE53935),
-              behavior: SnackBarBehavior.floating,
-            ),
-          );
+          AppToast.error(context, result.message, title: 'Could not book');
           await _generateSlots();
         }
         return;
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              _isEditing ? 'Appointment saved' : 'Appointment confirmed',
-            ),
-            backgroundColor: const Color(0xFF1B6B72),
-            behavior: SnackBarBehavior.floating,
-          ),
+        AppToast.success(
+          context,
+          _isEditing ? 'Appointment saved' : 'Appointment confirmed',
         );
         Navigator.pop(
           context,
@@ -1372,13 +1776,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error: ${friendlyErrorMessage(e)}'),
-            backgroundColor: const Color(0xFFE53935),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+        AppToast.error(context, friendlyErrorMessage(e));
       }
     } finally {
       if (mounted) setState(() => _isConfirming = false);
@@ -1759,45 +2157,48 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   Widget _buildServiceSection() {
-    final tabs = ['Services', 'Packages', 'Add-ons'];
+    final tabs = _serviceCategories;
     final filtered = _services.where((s) => s.category == _serviceTab).toList();
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         // Tabs
-        Row(
-          children: tabs
-              .map(
-                (tab) => GestureDetector(
-                  onTap: () => setState(() => _serviceTab = tab),
-                  child: Padding(
-                    padding: const EdgeInsets.only(right: 20, bottom: 12),
-                    child: Column(
-                      children: [
-                        Text(
-                          tab,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: _serviceTab == tab
-                                ? const Color(0xFF1B6B72)
-                                : const Color(0xFF9E9E9E),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: tabs
+                .map(
+                  (tab) => GestureDetector(
+                    onTap: () => setState(() => _serviceTab = tab),
+                    child: Padding(
+                      padding: const EdgeInsets.only(right: 20, bottom: 12),
+                      child: Column(
+                        children: [
+                          Text(
+                            tab,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: _serviceTab == tab
+                                  ? const Color(0xFF1B6B72)
+                                  : const Color(0xFF9E9E9E),
+                            ),
                           ),
-                        ),
-                        const SizedBox(height: 4),
-                        if (_serviceTab == tab)
-                          Container(
-                            height: 2,
-                            width: 40,
-                            color: const Color(0xFF1B6B72),
-                          ),
-                      ],
+                          const SizedBox(height: 4),
+                          if (_serviceTab == tab)
+                            Container(
+                              height: 2,
+                              width: 40,
+                              color: const Color(0xFF1B6B72),
+                            ),
+                        ],
+                      ),
                     ),
                   ),
-                ),
-              )
-              .toList(),
+                )
+                .toList(),
+          ),
         ),
         if (filtered.isEmpty || _serviceLoadError != null) ...[
           _ServiceEmptyState(tab: _serviceTab, error: _serviceLoadError),
@@ -1861,6 +2262,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               return _TherapistCard(
                 therapist: t,
                 isSelected: _selectedTherapist?.id == t.id,
+                isReserved: _isTherapistReservedInBooking(t.id),
                 isDisabled: false,
                 onTap: () => _onTherapistSelected(t),
               );
@@ -1895,6 +2297,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
             child: _TherapistCard(
               therapist: t,
               isSelected: _selectedTherapist?.id == t.id,
+              isReserved: _isTherapistReservedInBooking(t.id),
               isDisabled: false,
               onTap: () => _onTherapistSelected(t),
             ),
@@ -1927,16 +2330,20 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       return const _SlotsLoadingPanel();
     }
 
-    final ranked = _slots.where((s) => s.isRecommended && s.isAvailable).toList()
-      ..sort((left, right) {
-        final byScore = right.score.compareTo(left.score);
-        return byScore != 0 ? byScore : left.start.compareTo(right.start);
-      });
+    final ranked =
+        _slots.where((s) => s.isRecommended && s.isAvailable).toList()
+          ..sort((left, right) {
+            final byScore = right.score.compareTo(left.score);
+            return byScore != 0 ? byScore : left.start.compareTo(right.start);
+          });
     final recommended = ranked.take(3).toList();
     final recommendedStarts = recommended.map((slot) => slot.start).toSet();
     final standard = _slots
         .where((s) => s.isAvailable && !recommendedStarts.contains(s.start))
         .toList();
+    final visibleStandard = _showAllStandardSlots
+        ? standard
+        : standard.take(12).toList();
     final unavailable = _slots.where((s) => !s.isAvailable).toList();
 
     if (_slots.isEmpty) {
@@ -1947,7 +2354,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Times use the outlet interval and current therapist and room availability',
+          'Best Fit includes exact booking, cleanup, shift, and leave boundaries. Other times use a 10-minute staff grid.',
           style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
         ),
         if (_isEditing && _previousSlotReference != null) ...[
@@ -1959,6 +2366,14 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
         ],
         const SizedBox(height: 14),
+
+        if (_scheduleBlocks.isNotEmpty) ...[
+          _ScheduleOverviewCard(
+            blocks: _scheduleBlocks,
+            selectedDate: _selectedDate,
+          ),
+          const SizedBox(height: 14),
+        ],
 
         // Recommended
         if (recommended.isNotEmpty) ...[
@@ -2005,7 +2420,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           ),
           const SizedBox(height: 10),
           _SlotGrid(
-            slots: standard,
+            slots: visibleStandard,
             selectedSlot: _selectedSlot,
             recommended: false,
             onSelect: (s) => setState(() {
@@ -2013,18 +2428,49 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
               _paxAllocations[_activePaxIndex] = null;
             }),
           ),
+          if (standard.length > visibleStandard.length)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => setState(() => _showAllStandardSlots = true),
+                icon: const Icon(Icons.expand_more, size: 17),
+                label: Text(
+                  'Show ${standard.length - visibleStandard.length} more times',
+                ),
+              ),
+            )
+          else if (_showAllStandardSlots && standard.length > 12)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton.icon(
+                onPressed: () => setState(() => _showAllStandardSlots = false),
+                icon: const Icon(Icons.expand_less, size: 17),
+                label: const Text('Show fewer times'),
+              ),
+            ),
           const SizedBox(height: 14),
         ],
 
-        if (unavailable.isNotEmpty) ...[
-          Text(
-            '${unavailable.length} unavailable time${unavailable.length == 1 ? '' : 's'} hidden',
-            style: const TextStyle(
-              fontSize: 11,
-              color: Color(0xFF9E9E9E),
-            ),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            onPressed: _loadingSlots ? null : _pickExactStartTime,
+            icon: const Icon(Icons.edit_calendar_outlined, size: 17),
+            label: const Text('Check exact time'),
           ),
-        ],
+        ),
+        const SizedBox(height: 14),
+
+        if (_scheduleBlocks.isNotEmpty)
+          _BookedPeriodsPanel(
+            blocks: _scheduleBlocks,
+            excludedCandidateCount: unavailable.length,
+          )
+        else if (unavailable.isNotEmpty)
+          Text(
+            '${unavailable.length} conflicting candidate time${unavailable.length == 1 ? '' : 's'} excluded',
+            style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+          ),
       ],
     );
   }
@@ -2366,12 +2812,9 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Unable to save customer: ${friendlyErrorMessage(e)}'),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
+      AppToast.error(
+        context,
+        'Unable to save customer: ${friendlyErrorMessage(e)}',
       );
     }
   }
@@ -3343,12 +3786,14 @@ class _TherapistPhoto extends StatelessWidget {
 class _TherapistCard extends StatelessWidget {
   final _Therapist therapist;
   final bool isSelected;
+  final bool isReserved;
   final bool isDisabled;
   final VoidCallback? onTap;
 
   const _TherapistCard({
     required this.therapist,
     required this.isSelected,
+    required this.isReserved,
     required this.isDisabled,
     required this.onTap,
   });
@@ -3399,47 +3844,78 @@ class _TherapistCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 7),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 8,
-                        vertical: 4,
-                      ),
-                      decoration: BoxDecoration(
-                        color: therapist.isFree
+                    Builder(
+                      builder: (context) {
+                        final tone = isReserved
+                            ? 'reserved'
+                            : therapist.statusTone;
+                        final background = tone == 'free'
                             ? const Color(0xFFE8F5E9)
-                            : const Color(0xFFFFF7ED),
-                        borderRadius: BorderRadius.circular(999),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: therapist.isFree
-                                  ? const Color(0xFF4CAF50)
-                                  : const Color(0xFFF59E0B),
-                            ),
+                            : tone == 'reserved'
+                            ? const Color(0xFFE6F4F5)
+                            : tone == 'busy'
+                            ? const Color(0xFFFFF7ED)
+                            : const Color(0xFFF3F4F6);
+                        final dot = tone == 'free'
+                            ? const Color(0xFF4CAF50)
+                            : tone == 'reserved'
+                            ? const Color(0xFF1B6B72)
+                            : tone == 'busy'
+                            ? const Color(0xFFF59E0B)
+                            : const Color(0xFF9CA3AF);
+                        final foreground = tone == 'free'
+                            ? const Color(0xFF2E7D32)
+                            : tone == 'reserved'
+                            ? const Color(0xFF155E63)
+                            : tone == 'busy'
+                            ? const Color(0xFFC2410C)
+                            : const Color(0xFF6B7280);
+                        final label = isReserved
+                            ? 'Reserved'
+                            : therapist.statusLabel.isNotEmpty
+                            ? therapist.statusLabel
+                            : therapist.isFree
+                            ? 'Free'
+                            : therapist.busyUntil.isNotEmpty
+                            ? 'Busy until ${therapist.busyUntil}'
+                            : 'Busy';
+                        return Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 4,
                           ),
-                          const SizedBox(width: 5),
-                          Text(
-                            therapist.isFree
-                                ? 'Free'
-                                : therapist.busyUntil.isNotEmpty
-                                ? 'Busy until ${therapist.busyUntil}'
-                                : 'Busy',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              color: therapist.isFree
-                                  ? const Color(0xFF2E7D32)
-                                  : const Color(0xFFC2410C),
-                            ),
+                          decoration: BoxDecoration(
+                            color: background,
+                            borderRadius: BorderRadius.circular(999),
                           ),
-                        ],
-                      ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Container(
+                                width: 6,
+                                height: 6,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: dot,
+                                ),
+                              ),
+                              const SizedBox(width: 5),
+                              Flexible(
+                                child: Text(
+                                  label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                    color: foreground,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
                     ),
                   ],
                 ),
@@ -3891,6 +4367,286 @@ class _PreviousTimeReferenceCard extends StatelessWidget {
     );
   }
 }
+
+class _ScheduleOverviewCard extends StatelessWidget {
+  const _ScheduleOverviewCard({
+    required this.blocks,
+    required this.selectedDate,
+  });
+
+  final List<CspScheduleBlock> blocks;
+  final DateTime selectedDate;
+
+  @override
+  Widget build(BuildContext context) {
+    final positions = _schedulePositions(blocks);
+    if (positions.isEmpty) return const SizedBox.shrink();
+    final now = DateTime.now();
+    final isToday = _stripDate(now) == _stripDate(selectedDate);
+    final referenceMinutes = isToday ? now.hour * 60 + now.minute : -1;
+    final upcoming = positions
+        .where((position) => position.blockedUntil > referenceMinutes)
+        .toList();
+    final next = upcoming.isEmpty ? null : upcoming.first;
+    final last = positions.reduce(
+      (left, right) => left.blockedUntil >= right.blockedUntil ? left : right,
+    );
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1B6B72).withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: const Color(0xFF1B6B72).withValues(alpha: 0.28),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.view_timeline_outlined,
+                size: 17,
+                color: Color(0xFF1B6B72),
+              ),
+              SizedBox(width: 7),
+              Text(
+                'Selected therapist schedule',
+                style: TextStyle(
+                  color: Color(0xFF1B6B72),
+                  fontSize: 13,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 11),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final nextInfo = _ScheduleFact(
+                label: 'Next blocked period',
+                value: next == null
+                    ? 'No more today'
+                    : '${_scheduleRangeLabel(next)} · ${next.block.label}',
+              );
+              final lastInfo = _ScheduleFact(
+                label: 'Schedule clears after',
+                value: _scheduleMinuteLabel(last.blockedUntil),
+              );
+              if (constraints.maxWidth < 500) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [nextInfo, const SizedBox(height: 10), lastInfo],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(flex: 2, child: nextInfo),
+                  const SizedBox(width: 18),
+                  Expanded(child: lastInfo),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ScheduleFact extends StatelessWidget {
+  const _ScheduleFact({required this.label, required this.value});
+
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(fontSize: 10.5, color: Color(0xFF6B7280)),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          value,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(
+            color: Color(0xFF1A1A2E),
+            fontSize: 12,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _BookedPeriodsPanel extends StatelessWidget {
+  const _BookedPeriodsPanel({
+    required this.blocks,
+    required this.excludedCandidateCount,
+  });
+
+  final List<CspScheduleBlock> blocks;
+  final int excludedCandidateCount;
+
+  @override
+  Widget build(BuildContext context) {
+    final positions = _schedulePositions(blocks);
+    return Container(
+      decoration: BoxDecoration(
+        border: Border.all(color: const Color(0xFFE5E7EB)),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          tilePadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 2),
+          childrenPadding: const EdgeInsets.fromLTRB(14, 0, 14, 14),
+          leading: const Icon(
+            Icons.event_busy_outlined,
+            size: 20,
+            color: Color(0xFF6B7280),
+          ),
+          title: const Text(
+            'Booked & unavailable periods',
+            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w800),
+          ),
+          subtitle: Text(
+            excludedCandidateCount == 0
+                ? 'View the selected therapist timeline'
+                : '$excludedCandidateCount conflicting candidate time${excludedCandidateCount == 1 ? '' : 's'} excluded',
+            style: const TextStyle(fontSize: 10.5),
+          ),
+          children: [
+            ...positions.map(
+              (position) => Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(
+                      _scheduleBlockIcon(position.block.kind),
+                      size: 17,
+                      color: const Color(0xFF6B7280),
+                    ),
+                    const SizedBox(width: 9),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _scheduleRangeLabel(position),
+                            style: const TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF1A1A2E),
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            position.block.label,
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: Color(0xFF6B7280),
+                            ),
+                          ),
+                          if (position.blockedUntil > position.end) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              'Cleanup until ${_scheduleMinuteLabel(position.blockedUntil)}',
+                              style: const TextStyle(
+                                fontSize: 10.5,
+                                color: Color(0xFFB45309),
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const Padding(
+              padding: EdgeInsets.only(top: 12),
+              child: Text(
+                'Suggestions also exclude periods when the selected room is full, active payment holds, working-hour breaks, and leave.',
+                style: TextStyle(fontSize: 10.5, color: Color(0xFF9E9E9E)),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ScheduleBlockPosition {
+  const _ScheduleBlockPosition({
+    required this.block,
+    required this.start,
+    required this.end,
+    required this.blockedUntil,
+  });
+
+  final CspScheduleBlock block;
+  final int start;
+  final int end;
+  final int blockedUntil;
+}
+
+List<_ScheduleBlockPosition> _schedulePositions(List<CspScheduleBlock> blocks) {
+  final positions = <_ScheduleBlockPosition>[];
+  var previousStart = -1;
+  for (final block in blocks) {
+    var start = _bookingTimeToMinutes(block.startTime);
+    while (start < previousStart) {
+      start += 24 * 60;
+    }
+    var end = _bookingTimeToMinutes(block.endTime);
+    while (end <= start) {
+      end += 24 * 60;
+    }
+    var blockedUntil = _bookingTimeToMinutes(block.blockedUntil);
+    while (blockedUntil < end) {
+      blockedUntil += 24 * 60;
+    }
+    positions.add(
+      _ScheduleBlockPosition(
+        block: block,
+        start: start,
+        end: end,
+        blockedUntil: blockedUntil,
+      ),
+    );
+    previousStart = start;
+  }
+  return positions;
+}
+
+String _scheduleRangeLabel(_ScheduleBlockPosition position) =>
+    '${_scheduleMinuteLabel(position.start)} - ${_scheduleMinuteLabel(position.end)}';
+
+String _scheduleMinuteLabel(int minutes) {
+  final label = _bookingTimeLabel(_bookingMinutesToTime(minutes));
+  return minutes >= 24 * 60 ? '$label next day' : label;
+}
+
+IconData _scheduleBlockIcon(String kind) => switch (kind) {
+  'hold' => Icons.hourglass_top_outlined,
+  'leave' => Icons.person_off_outlined,
+  _ => Icons.event_outlined,
+};
 
 class _SlotGrid extends StatelessWidget {
   final List<_TimeSlot> slots;

@@ -3,23 +3,26 @@ import 'package:intl/intl.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
-import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/repositories/appointment_repository.dart';
-import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/adaptive_detail_surface.dart';
+import '../../widgets/management_catalogue_shell.dart';
 import '../therapists/therapist_screen.dart';
 import 'accessibility_screen.dart';
+import 'business_settings_screen.dart';
 import 'online_booking_screen.dart';
+import 'service_management_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF1A1A2E);
 const _muted = Color(0xFF6B7280);
 const _page = Color(0xFFF4F5F7);
+const _roomFloorOptions = ['Ground', 'Upper'];
 
 String _asString(Object? value, [String fallback = '']) {
   if (value == null) return fallback;
@@ -69,6 +72,18 @@ String _roomTypeLabel(String value) {
     default:
       return value.isEmpty ? 'Any Room' : value;
   }
+}
+
+String _normalizeRoomFloor(Object? value) {
+  final floor = value?.toString().trim().toLowerCase() ?? '';
+  if (floor == 'upper' ||
+      floor == 'first' ||
+      floor == 'second' ||
+      floor == 'third' ||
+      floor == 'both') {
+    return 'Upper';
+  }
+  return 'Ground';
 }
 
 String _today() => DateFormat('yyyy-MM-dd').format(DateTime.now());
@@ -147,10 +162,8 @@ class ManagementScreen extends StatelessWidget {
                     onTap: () => Navigator.push(
                       context,
                       MaterialPageRoute(
-                        builder: (_) => _ServiceRoomScreen(
-                          type: _ResourceType.service,
-                          userRole: userRole,
-                        ),
+                        builder: (_) =>
+                            ServiceManagementScreen(userRole: userRole),
                       ),
                     ),
                   ),
@@ -191,7 +204,7 @@ class ManagementScreen extends StatelessWidget {
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const _BusinessSettingsScreen(),
+                          builder: (_) => const BusinessSettingsScreen(),
                         ),
                       ),
                     ),
@@ -457,6 +470,9 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
   List<_ResourceItem> _filtered = [];
   _ResourceItem? _selected;
   bool _loading = true;
+  String _resourceFilter = 'all';
+  String _resourceSort = 'newest';
+  bool _gridView = true;
 
   String get _title =>
       widget.type == _ResourceType.service ? 'Services' : 'Rooms';
@@ -465,6 +481,48 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
       : 'Manage room availability and equipment';
   bool get _isAdmin => widget.userRole == 'admin';
   bool get _canDeleteCurrentType => _isAdmin;
+
+  List<_ResourceItem> get _visibleItems {
+    final visible = _filtered.where((item) {
+      if (_resourceFilter == 'available') {
+        return item.active && _asInt(item.raw['currentBusySlots']) == 0;
+      }
+      if (_resourceFilter == 'occupied') {
+        return item.active && _asInt(item.raw['currentBusySlots']) > 0;
+      }
+      if (_resourceFilter == 'inactive') return !item.active;
+      if (_resourceFilter.startsWith('type:')) {
+        return _normalizeRoomType(item.raw['type'] ?? item.raw['roomType']) ==
+            _resourceFilter.substring(5);
+      }
+      return true;
+    }).toList();
+    visible.sort((left, right) {
+      return switch (_resourceSort) {
+        'name' => left.name.compareTo(right.name),
+        'capacity' => _asInt(
+          right.raw['totalSlots'],
+          1,
+        ).compareTo(_asInt(left.raw['totalSlots'], 1)),
+        _ =>
+          (DateTime.tryParse(
+                    _asString(
+                      right.raw['createdAt'] ?? right.raw['created_at'],
+                    ),
+                  ) ??
+                  DateTime(1970))
+              .compareTo(
+                DateTime.tryParse(
+                      _asString(
+                        left.raw['createdAt'] ?? left.raw['created_at'],
+                      ),
+                    ) ??
+                    DateTime(1970),
+              ),
+      };
+    });
+    return visible;
+  }
 
   @override
   void initState() {
@@ -499,11 +557,11 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
       setState(() {
         _items = items;
         _filtered = items;
-        _selected = items.isEmpty
+        _selected = _selected == null
             ? null
-            : items.firstWhere(
-                (item) => item.id == _selected?.id,
-                orElse: () => items.first,
+            : items.cast<_ResourceItem?>().firstWhere(
+                (item) => item?.id == _selected?.id,
+                orElse: () => null,
               );
         _loading = false;
       });
@@ -587,21 +645,232 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
         _selected = null;
       } else if (_selected == null ||
           !_filtered.any((item) => item.id == _selected!.id)) {
-        _selected = _filtered.first;
+        _selected = null;
       }
     });
   }
 
-  Future<void> _openForm({_ResourceItem? item}) async {
-    final saved = await showDialog<bool>(
+  Future<void> _openResourceDetail(_ResourceItem item) async {
+    setState(() => _selected = item);
+    final editRequested = await showAdaptiveDetailSurface<bool>(
       context: context,
-      builder: (_) =>
-          _ResourceFormDialog(type: widget.type, item: item, isAdmin: _isAdmin),
+      barrierLabel: 'Close ${_title.toLowerCase()} details',
+      builder: (detailContext, isFullScreen) =>
+          ManagementCatalogueDetailSurface(
+            title: 'Room Details',
+            subtitle: item.name,
+            isFullScreen: isFullScreen,
+            footer: CatalogueDetailEditButton(
+              label: 'Edit Room',
+              onPressed: () => Navigator.of(detailContext).pop(true),
+            ),
+            child: _ResourceDetailCard(
+              item: item,
+              title: _title,
+              onEdit: () => Navigator.of(detailContext).pop(true),
+              onDelete: () async {
+                final deleted = await _delete(item);
+                if (deleted && detailContext.mounted) {
+                  Navigator.of(detailContext).pop(false);
+                }
+              },
+              showInlineEdit: false,
+              canDelete: false,
+            ),
+          ),
+    );
+    if (!mounted) return;
+    setState(() => _selected = null);
+    if (editRequested == true) await _openForm(item: item);
+  }
+
+  List<String> get _roomTypes {
+    final types =
+        _items
+            .map(
+              (item) =>
+                  _normalizeRoomType(item.raw['type'] ?? item.raw['roomType']),
+            )
+            .where((type) => type.isNotEmpty)
+            .toSet()
+            .toList()
+          ..sort();
+    return types;
+  }
+
+  Widget _resourceNavigation() {
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(14, 18, 14, 24),
+      children: [
+        CatalogueSidebarTile(
+          icon: Icons.meeting_room_outlined,
+          title: 'All Rooms',
+          subtitle: 'Every treatment room',
+          count: _items.length,
+          selected: _resourceFilter == 'all',
+          onTap: () => setState(() => _resourceFilter = 'all'),
+          color: const Color(0xFF8B5CF6),
+        ),
+        ..._roomTypes.map((type) {
+          final id = 'type:$type';
+          return CatalogueSidebarTile(
+            icon: Icons.grid_view_outlined,
+            title: _roomTypeLabel(type),
+            subtitle: 'Browse this room type',
+            count: _items
+                .where(
+                  (item) =>
+                      _normalizeRoomType(
+                        item.raw['type'] ?? item.raw['roomType'],
+                      ) ==
+                      type,
+                )
+                .length,
+            selected: _resourceFilter == id,
+            onTap: () => setState(() => _resourceFilter = id),
+            color: const Color(0xFF8B5CF6),
+          );
+        }),
+      ],
+    );
+  }
+
+  Widget _resourceMobileNavigation() {
+    return CatalogueMobileNavigation(
+      children: [
+        CatalogueNavigationChip(
+          label: 'All',
+          selected: _resourceFilter == 'all',
+          onTap: () => setState(() => _resourceFilter = 'all'),
+        ),
+        for (final type in _roomTypes)
+          CatalogueNavigationChip(
+            label: _roomTypeLabel(type),
+            selected: _resourceFilter == 'type:$type',
+            onTap: () => setState(() => _resourceFilter = 'type:$type'),
+          ),
+      ],
+    );
+  }
+
+  // ignore: unused_element
+  Widget _resourceFilterMenu() {
+    return PopupMenuButton<String>(
+      initialValue: _resourceFilter.startsWith('type:')
+          ? 'all'
+          : _resourceFilter,
+      onSelected: (value) => setState(() => _resourceFilter = value),
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 'all', child: Text('All rooms')),
+        PopupMenuItem(value: 'available', child: Text('Available')),
+        PopupMenuItem(value: 'occupied', child: Text('Occupied')),
+        PopupMenuItem(value: 'inactive', child: Text('Inactive')),
+      ],
+      child: CatalogueToolbarButton(
+        icon: Icons.filter_list,
+        label: switch (_resourceFilter) {
+          'available' => 'Available',
+          'occupied' => 'Occupied',
+          'inactive' => 'Inactive',
+          _ => 'All',
+        },
+      ),
+    );
+  }
+
+  // ignore: unused_element
+  Widget _resourceSortMenu() {
+    return PopupMenuButton<String>(
+      initialValue: _resourceSort,
+      onSelected: (value) => setState(() => _resourceSort = value),
+      itemBuilder: (_) => const [
+        PopupMenuItem(value: 'newest', child: Text('Newest')),
+        PopupMenuItem(value: 'name', child: Text('Name')),
+        PopupMenuItem(value: 'capacity', child: Text('Capacity')),
+      ],
+      child: CatalogueToolbarButton(
+        icon: Icons.swap_vert,
+        label: switch (_resourceSort) {
+          'name' => 'Name',
+          'capacity' => 'Capacity',
+          _ => 'Newest',
+        },
+      ),
+    );
+  }
+
+  Widget _resourceCatalogue() {
+    final visible = _visibleItems;
+    if (visible.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _load,
+        child: ListView(
+          children: const [
+            SizedBox(height: 150),
+            Center(child: Text('No rooms match these filters.')),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      onRefresh: _load,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final padding = constraints.maxWidth >= 900 ? 24.0 : 16.0;
+          final cardHeight =
+              context.managementCatalogueCardHeight +
+              (constraints.maxWidth < 600 ? 16 : 0);
+          if (!_gridView) {
+            return ListView.separated(
+              padding: EdgeInsets.fromLTRB(padding, 16, padding, 28),
+              itemCount: visible.length,
+              separatorBuilder: (_, _) => const SizedBox(height: 10),
+              itemBuilder: (context, index) => SizedBox(
+                height: context.managementCatalogueListHeight,
+                child: _RoomCatalogueCard(
+                  item: visible[index],
+                  compact: true,
+                  selected: _selected?.id == visible[index].id,
+                  onTap: () => _openResourceDetail(visible[index]),
+                ),
+              ),
+            );
+          }
+          return GridView.builder(
+            padding: EdgeInsets.fromLTRB(padding, 16, padding, 28),
+            gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+              maxCrossAxisExtent: 330,
+              mainAxisExtent: cardHeight,
+              crossAxisSpacing: 12,
+              mainAxisSpacing: 12,
+            ),
+            itemCount: visible.length,
+            itemBuilder: (context, index) => _RoomCatalogueCard(
+              item: visible[index],
+              selected: _selected?.id == visible[index].id,
+              onTap: () => _openResourceDetail(visible[index]),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<void> _openForm({_ResourceItem? item}) async {
+    final saved = await showAdaptiveDetailSurface<bool>(
+      context: context,
+      barrierLabel: item == null ? 'Close new room' : 'Close room editor',
+      builder: (_, isFullScreen) => _ResourceEditorSurface(
+        type: widget.type,
+        item: item,
+        isAdmin: _isAdmin,
+        isFullScreen: isFullScreen,
+      ),
     );
     if (saved == true) await _load();
   }
 
-  Future<void> _delete(_ResourceItem item) async {
+  Future<bool> _delete(_ResourceItem item) async {
     if (!_isAdmin) {
       final resourceName = widget.type == _ResourceType.service
           ? 'services'
@@ -613,7 +882,7 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
           behavior: SnackBarBehavior.floating,
         ),
       );
-      return;
+      return false;
     }
 
     final confirmed = await showDialog<bool>(
@@ -639,51 +908,75 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
         ],
       ),
     );
-    if (confirmed != true) return;
+    if (confirmed != true) return false;
     if (widget.type == _ResourceType.service) {
       await _serviceRepository.deleteService(item.id);
     } else {
       await _roomRepository.deleteRoom(item.id);
     }
     await _load();
+    return true;
   }
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 900;
-    return Scaffold(
-      backgroundColor: _page,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _ManagementHeader(
-              title: _title,
-              subtitle: _subtitle,
-              action: _AddButton(
-                label: widget.type == _ResourceType.service
-                    ? 'Add Service'
-                    : 'Add Room',
-                onTap: () => _openForm(),
-              ),
-            ),
-            Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator(color: _teal))
-                  : isWide
-                  ? Row(
-                      children: [
-                        SizedBox(width: 360, child: _resourceListPane()),
-                        Expanded(child: _resourceDetailPane()),
-                      ],
-                    )
-                  : _resourceListPane(phone: true),
-            ),
-          ],
+    if (_loading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator(color: _teal)),
+      );
+    }
+    final visible = _visibleItems;
+    final compact = MediaQuery.sizeOf(context).width < 900;
+    return ManagementCatalogueShell(
+      moduleTitle: _title,
+      moduleSubtitle: _subtitle,
+      contentTitle: switch (_resourceFilter) {
+        'available' => 'Available Rooms',
+        'occupied' => 'Occupied Rooms',
+        'inactive' => 'Inactive Rooms',
+        _ when _resourceFilter.startsWith('type:') => _roomTypeLabel(
+          _resourceFilter.substring(5),
         ),
-      ),
+        _ => 'All Rooms',
+      },
+      itemCountLabel: '${visible.length} room${visible.length == 1 ? '' : 's'}',
+      addLabel: 'Add Room',
+      onAdd: () => _openForm(),
+      navigation: _resourceNavigation(),
+      mobileNavigation: compact
+          ? const SizedBox.shrink()
+          : _resourceMobileNavigation(),
+      headerActions: compact
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CatalogueHeaderChip(
+                  label: 'All',
+                  selected: _resourceFilter == 'all',
+                  onTap: () => setState(() => _resourceFilter = 'all'),
+                ),
+                for (final type in _roomTypes)
+                  CatalogueHeaderChip(
+                    label: _roomTypeLabel(type),
+                    selected: _resourceFilter == 'type:$type',
+                    onTap: () => setState(() => _resourceFilter = 'type:$type'),
+                  ),
+                CatalogueViewSwitch(
+                  gridView: _gridView,
+                  onChanged: (value) => setState(() => _gridView = value),
+                ),
+              ],
+            )
+          : CatalogueViewSwitch(
+              gridView: _gridView,
+              onChanged: (value) => setState(() => _gridView = value),
+            ),
+      content: _resourceCatalogue(),
     );
   }
 
+  // Kept temporarily for the legacy compact resource detail route.
+  // ignore: unused_element
   Widget _resourceListPane({bool phone = false}) {
     final horizontalPadding = MediaQuery.of(context).size.width < 360
         ? 12.0
@@ -749,6 +1042,7 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
     );
   }
 
+  // ignore: unused_element
   Widget _resourceDetailPane() {
     final item = _selected;
     if (item == null) {
@@ -768,6 +1062,273 @@ class _ServiceRoomScreenState extends State<_ServiceRoomScreen> {
         onDelete: () => _delete(item),
         canDelete: _canDeleteCurrentType,
       ),
+    );
+  }
+}
+
+class _RoomCatalogueCard extends StatelessWidget {
+  const _RoomCatalogueCard({
+    required this.item,
+    required this.selected,
+    required this.onTap,
+    this.compact = false,
+  });
+
+  final _ResourceItem item;
+  final bool selected;
+  final VoidCallback onTap;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    const accent = Color(0xFF8B5CF6);
+    final narrowGrid = !compact && MediaQuery.sizeOf(context).width < 600;
+    final totalSlots = _asInt(item.raw['totalSlots'], 1);
+    final busySlots = _asInt(item.raw['currentBusySlots']);
+    final freeSlots = (totalSlots - busySlots).clamp(0, totalSlots);
+    final statusColor = !item.active
+        ? const Color(0xFF64748B)
+        : busySlots == 0
+        ? const Color(0xFF059669)
+        : const Color(0xFFD97706);
+    final statusLabel = !item.active
+        ? 'Inactive'
+        : busySlots == 0
+        ? 'Available'
+        : 'Occupied';
+    final identity = Row(
+      children: [
+        Container(
+          width: compact
+              ? 46
+              : narrowGrid
+              ? 40
+              : 50,
+          height: compact
+              ? 46
+              : narrowGrid
+              ? 40
+              : 50,
+          decoration: BoxDecoration(
+            color: accent.withValues(alpha: 0.11),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: const Icon(
+            Icons.meeting_room_outlined,
+            color: accent,
+            size: 24,
+          ),
+        ),
+        SizedBox(width: narrowGrid ? 8 : 11),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                item.name,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: _ink,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              const SizedBox(height: 3),
+              Text.rich(
+                TextSpan(
+                  children: [
+                    TextSpan(text: item.subtitle),
+                    const TextSpan(text: ' · '),
+                    TextSpan(
+                      text: statusLabel,
+                      style: TextStyle(
+                        color: statusColor,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ],
+                ),
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  color: Color(0xFF64748B),
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+    return Material(
+      color: selected ? accent.withValues(alpha: 0.07) : Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(10),
+        side: BorderSide(
+          color: selected ? accent : const Color(0xFFE2E8F0),
+          width: selected ? 1.5 : 1,
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.all(narrowGrid ? 12 : 14),
+          child: compact
+              ? Row(
+                  children: [
+                    Expanded(
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 46,
+                            height: 46,
+                            decoration: BoxDecoration(
+                              color: accent.withValues(alpha: 0.11),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(
+                              Icons.meeting_room_outlined,
+                              color: accent,
+                              size: 23,
+                            ),
+                          ),
+                          const SizedBox(width: 11),
+                          Expanded(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  item.name,
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: _ink,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text.rich(
+                                  TextSpan(
+                                    children: [
+                                      TextSpan(
+                                        text:
+                                            '${item.subtitle} · $freeSlots/$totalSlots free slots · ${_asString(item.raw['floor'], 'Main Floor')} · ',
+                                      ),
+                                      TextSpan(
+                                        text: statusLabel,
+                                        style: TextStyle(
+                                          color: statusColor,
+                                          fontWeight: FontWeight.w800,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  maxLines: 3,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(
+                                    color: Color(0xFF64748B),
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    const Icon(
+                      Icons.chevron_right_rounded,
+                      color: Color(0xFF64748B),
+                    ),
+                  ],
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    identity,
+                    const SizedBox(height: 10),
+                    const Divider(height: 1),
+                    const SizedBox(height: 8),
+                    _RoomCardMetric(
+                      icon: Icons.layers_outlined,
+                      label: '$freeSlots/$totalSlots free slots',
+                    ),
+                    const SizedBox(height: 6),
+                    _RoomCardMetric(
+                      icon: Icons.map_outlined,
+                      label: _asString(item.raw['floor'], 'Main Floor'),
+                    ),
+                    const Spacer(),
+                    if (_asString(item.raw['equipment']).trim().isNotEmpty)
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              _asString(item.raw['equipment']),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Color(0xFF475569),
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                          const Icon(
+                            Icons.chevron_right_rounded,
+                            color: Color(0xFF64748B),
+                          ),
+                        ],
+                      )
+                    else
+                      const Align(
+                        alignment: Alignment.centerRight,
+                        child: Icon(
+                          Icons.chevron_right_rounded,
+                          color: Color(0xFF64748B),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+class _RoomCardMetric extends StatelessWidget {
+  const _RoomCardMetric({required this.icon, required this.label});
+
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 15, color: const Color(0xFF64748B)),
+        const SizedBox(width: 7),
+        Flexible(
+          child: Text(
+            label,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(
+              color: Color(0xFF475569),
+              fontSize: 11.5,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }
@@ -969,7 +1530,10 @@ class _ResourceDetailCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isService = title == 'Services';
+    if (!isService) return _buildRoomReadOnly();
     return ListView(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
       children: [
         _Panel(
           child: Column(
@@ -1079,24 +1643,180 @@ class _ResourceDetailCard extends StatelessWidget {
       ],
     );
   }
+
+  Widget _buildRoomReadOnly() {
+    final totalSlots = _asInt(item.raw['totalSlots'], 1);
+    final busySlots = _asInt(item.raw['currentBusySlots']);
+    final freeSlots = (totalSlots - busySlots).clamp(0, totalSlots);
+    final statusLabel = !item.active
+        ? 'Inactive'
+        : busySlots == 0
+        ? 'Available'
+        : 'Occupied';
+    final statusColor = !item.active
+        ? const Color(0xFF64748B)
+        : busySlots == 0
+        ? const Color(0xFF059669)
+        : const Color(0xFFD97706);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _Panel(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 58,
+                height: 58,
+                decoration: BoxDecoration(
+                  color: const Color(0xFF8B5CF6).withValues(alpha: 0.11),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(
+                  Icons.meeting_room_outlined,
+                  color: Color(0xFF8B5CF6),
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 13),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.name,
+                      style: const TextStyle(
+                        color: _ink,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      item.subtitle,
+                      style: const TextStyle(
+                        color: _muted,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 8,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: statusColor.withValues(alpha: 0.11),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        statusLabel,
+                        style: TextStyle(
+                          color: statusColor,
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _Panel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(Icons.info_outline, size: 18, color: Color(0xFF8B5CF6)),
+                  SizedBox(width: 8),
+                  Text(
+                    'Room information',
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              _InfoRow('Room type', item.subtitle),
+              _InfoRow('Floor', _asString(item.raw['floor'], 'Main Floor')),
+              _InfoRow(
+                'Capacity',
+                '$totalSlots slot${totalSlots == 1 ? '' : 's'}',
+              ),
+              _InfoRow(
+                'Available now',
+                '$freeSlots of $totalSlots slots',
+                isLast: true,
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _Panel(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Row(
+                children: [
+                  Icon(
+                    Icons.handyman_outlined,
+                    size: 18,
+                    color: Color(0xFF8B5CF6),
+                  ),
+                  SizedBox(width: 8),
+                  Text(
+                    'Equipment and setup',
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                _asString(item.raw['equipment'], 'No equipment listed'),
+                style: const TextStyle(
+                  color: Color(0xFF475569),
+                  fontSize: 13,
+                  height: 1.45,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
 }
 
-class _ResourceFormDialog extends StatefulWidget {
+class _ResourceEditorSurface extends StatefulWidget {
   final _ResourceType type;
   final _ResourceItem? item;
   final bool isAdmin;
+  final bool isFullScreen;
 
-  const _ResourceFormDialog({
+  const _ResourceEditorSurface({
     required this.type,
     required this.isAdmin,
+    required this.isFullScreen,
     this.item,
   });
 
   @override
-  State<_ResourceFormDialog> createState() => _ResourceFormDialogState();
+  State<_ResourceEditorSurface> createState() => _ResourceEditorSurfaceState();
 }
 
-class _ResourceFormDialogState extends State<_ResourceFormDialog> {
+class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
   final _serviceRepository = ServiceRepository();
   final _roomRepository = RoomRepository();
   final _imageUploadRepository = ImageUploadRepository();
@@ -1118,6 +1838,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   bool _imageRemoved = false;
   bool _saving = false;
   bool _closing = false;
+  int _tab = 0;
   List<String> _categoryOptions = const ['Services', 'Packages', 'Add-ons'];
 
   bool get _isService => widget.type == _ResourceType.service;
@@ -1153,7 +1874,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
         _isService ? 'body_room' : 'body_room',
       ),
     );
-    _floor = TextEditingController(text: _asString(raw['floor'], 'Ground'));
+    _floor = TextEditingController(text: _normalizeRoomFloor(raw['floor']));
     _slots = TextEditingController(
       text: _asInt(raw['totalSlots'], 1).toString(),
     );
@@ -1271,6 +1992,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
 
   Future<void> _save() async {
     if (_saving || _closing) return;
+    if (!_isService && _tab != 0) setState(() => _tab = 0);
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
     final data = _isService
@@ -1296,7 +2018,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
             'name': _name.text.trim(),
             'type': _normalizeRoomType(_roomType.text),
             'roomType': _normalizeRoomType(_roomType.text),
-            'floor': _floor.text.trim(),
+            'floor': _normalizeRoomFloor(_floor.text),
             'totalSlots': int.tryParse(_slots.text.trim()) ?? 1,
             'equipment': _equipment.text.trim(),
             'isActive': _active,
@@ -1351,6 +2073,54 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
     }
   }
 
+  Future<void> _deleteCurrentRoom() async {
+    if (_isService || !_isEditing || !widget.isAdmin || _saving || _closing) {
+      return;
+    }
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.delete_outline, color: Color(0xFFE53935)),
+        title: const Text('Delete this room?'),
+        content: Text(
+          '${widget.item!.name} will be permanently removed. If it is linked to bookings, deletion may be blocked; setting it to Inactive is safer.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFFE53935),
+            ),
+            child: const Text('Delete Room'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+    setState(() => _saving = true);
+    try {
+      await _roomRepository.deleteRoom(widget.item!.id);
+      if (!mounted) return;
+      _close(true);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Unable to delete this room. Set it to Inactive instead.\n$error',
+          ),
+          backgroundColor: const Color(0xFFE53935),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+    }
+  }
+
   Future<void> _pickImage() async {
     if (!_canEditAdminFields) return;
     try {
@@ -1390,6 +2160,188 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
 
   @override
   Widget build(BuildContext context) {
+    if (_isService) return _legacyBuild(context);
+    return Material(
+      color: Colors.white,
+      child: SafeArea(
+        top: widget.isFullScreen,
+        bottom: widget.isFullScreen,
+        child: Column(
+          children: [
+            _RoomEditorHeader(
+              editing: _isEditing,
+              saving: _saving,
+              active: _active,
+              roomName: _name.text.trim().isEmpty ? 'Room' : _name.text.trim(),
+              roomType: _roomTypeLabel(_normalizeRoomType(_roomType.text)),
+              isFullScreen: widget.isFullScreen,
+              onActiveChanged: (value) => setState(() => _active = value),
+              onClose: () => _close(),
+            ),
+            _RoomEditorTabs(
+              selected: _tab,
+              onChanged: (value) => setState(() => _tab = value),
+            ),
+            Expanded(
+              child: Form(
+                key: _formKey,
+                child: IndexedStack(
+                  index: _tab,
+                  children: [_buildRoomDetails(), _buildRoomEquipment()],
+                ),
+              ),
+            ),
+            _RoomEditorFooter(
+              saving: _saving,
+              editing: _isEditing,
+              onCancel: () => _close(),
+              onSave: _save,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRoomDetails() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _RoomEditorSectionTitle('Basic information'),
+          const SizedBox(height: 12),
+          _FormField(
+            label: 'Room name',
+            controller: _name,
+            requiredField: true,
+          ),
+          const SizedBox(height: 22),
+          const _RoomEditorSectionTitle('Room type and capacity'),
+          const SizedBox(height: 12),
+          _ControllerDropdown(
+            label: 'Room type',
+            controller: _roomType,
+            options: const ['body_room', 'foot_chair'],
+            optionLabel: _roomTypeLabel,
+          ),
+          const SizedBox(height: 12),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: _ControllerDropdown(
+                  label: 'Floor',
+                  controller: _floor,
+                  options: _roomFloorOptions,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _FormField(
+                  label: 'Available slots',
+                  controller: _slots,
+                  keyboardType: TextInputType.number,
+                  requiredField: true,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF8FAFC),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFE2E8F0)),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline, size: 18, color: Color(0xFF64748B)),
+                SizedBox(width: 9),
+                Expanded(
+                  child: Text(
+                    'Slots control how many bookings this room can handle at the same time.',
+                    style: TextStyle(
+                      color: Color(0xFF64748B),
+                      fontSize: 11.5,
+                      height: 1.4,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          if (_isEditing && widget.isAdmin) ...[
+            const SizedBox(height: 28),
+            const Divider(),
+            const SizedBox(height: 14),
+            const _RoomEditorSectionTitle('Danger zone'),
+            const SizedBox(height: 6),
+            const Text(
+              'Use Inactive if this room may be needed again. Delete is permanent.',
+              style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+            ),
+            const SizedBox(height: 10),
+            OutlinedButton.icon(
+              onPressed: _saving ? null : _deleteCurrentRoom,
+              icon: const Icon(Icons.delete_outline),
+              label: const Text('Delete Room'),
+              style: OutlinedButton.styleFrom(
+                foregroundColor: const Color(0xFFE53935),
+                side: const BorderSide(color: Color(0xFFE53935)),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildRoomEquipment() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(18, 20, 18, 28),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _RoomEditorSectionTitle('Equipment and setup'),
+          const SizedBox(height: 6),
+          const Text(
+            'Record the fixed equipment or special setup staff should expect in this room.',
+            style: TextStyle(color: Color(0xFF64748B), fontSize: 12),
+          ),
+          const SizedBox(height: 16),
+          _FormField(
+            label: 'Equipment',
+            controller: _equipment,
+            maxLines: 6,
+            hint: 'Example: massage bed, hot stone heater, sink',
+          ),
+          const SizedBox(height: 16),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF5F3FF),
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: const Color(0xFFDDD6FE)),
+            ),
+            child: const Text(
+              'Keep this concise so staff can scan it quickly while assigning rooms.',
+              style: TextStyle(
+                color: Color(0xFF6D28D9),
+                fontSize: 11.5,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _legacyBuild(BuildContext context) {
     final label = _isService ? 'Service' : 'Room';
     final imageItem = _ResourceItem(
       id: widget.item?.id ?? '',
@@ -1581,7 +2533,7 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
                         child: _ControllerDropdown(
                           label: 'Floor',
                           controller: _floor,
-                          options: const ['Ground', 'First', 'Second', 'Third'],
+                          options: _roomFloorOptions,
                         ),
                       ),
                       const SizedBox(width: 12),
@@ -1628,412 +2580,265 @@ class _ResourceFormDialogState extends State<_ResourceFormDialog> {
   }
 }
 
-class _BusinessSettingsScreen extends StatefulWidget {
-  const _BusinessSettingsScreen();
+class _RoomEditorHeader extends StatelessWidget {
+  const _RoomEditorHeader({
+    required this.editing,
+    required this.saving,
+    required this.active,
+    required this.roomName,
+    required this.roomType,
+    required this.isFullScreen,
+    required this.onActiveChanged,
+    required this.onClose,
+  });
 
-  @override
-  State<_BusinessSettingsScreen> createState() => _BusinessSettingsScreenState();
-}
-
-class _BusinessSettingsScreenState extends State<_BusinessSettingsScreen> {
-  final _repository = BusinessSettingsRepository();
-  final _formKey = GlobalKey<FormState>();
-  final _sstRate = TextEditingController();
-  final _lateGrace = TextEditingController();
-  final _noShowThreshold = TextEditingController();
-  final _delayWarning = TextEditingController();
-  String _outletId = OutletContext.activeOutletId.value;
-  String _settingsId = '';
-  String _sstMode = 'exclusive';
-  String _roundingMode = 'nearest_cent';
-  bool _sstEnabled = true;
-  bool _autoExtend = false;
-  bool _loading = true;
-  bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  @override
-  void dispose() {
-    _sstRate.dispose();
-    _lateGrace.dispose();
-    _noShowThreshold.dispose();
-    _delayWarning.dispose();
-    super.dispose();
-  }
-
-  Future<void> _load() async {
-    if (mounted) setState(() => _loading = true);
-    try {
-      OutletContext.select(_outletId);
-      final row = await _repository.getActiveSettingsRow();
-      final settings = row == null
-          ? BusinessRuleSettings.defaults()
-          : BusinessRuleSettings.fromMap(row);
-      if (!mounted) return;
-      setState(() {
-        _settingsId = _asString(row?['id']);
-        _sstEnabled = settings.sstEnabled;
-        _sstMode = settings.sstPricingMode;
-        _roundingMode = settings.sstRoundingMode;
-        _autoExtend = settings.autoExtendLateArrivals;
-        _sstRate.text = settings.sstRatePercent.toStringAsFixed(
-          settings.sstRatePercent % 1 == 0 ? 0 : 2,
-        );
-        _lateGrace.text = settings.lateGraceMinutes.toString();
-        _noShowThreshold.text = settings.noShowThresholdMinutes.toString();
-        _delayWarning.text = settings.delayWarningMinutes.toString();
-        _loading = false;
-      });
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _loading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Unable to load business settings: $e'),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
-
-  Future<void> _save() async {
-    if (_saving || !_formKey.currentState!.validate()) return;
-    setState(() => _saving = true);
-    try {
-      await _repository.saveActiveSettings(
-        {
-          'sstEnabled': _sstEnabled,
-          'sstPricingMode': _sstMode,
-          'sstRatePercent': double.tryParse(_sstRate.text.trim()) ?? 0,
-          'sstRoundingMode': _roundingMode,
-          'lateGraceMinutes': int.tryParse(_lateGrace.text.trim()) ?? 0,
-          'noShowThresholdMinutes':
-              int.tryParse(_noShowThreshold.text.trim()) ?? 0,
-          'autoExtendLateArrivals': _autoExtend,
-          'delayWarningMinutes': int.tryParse(_delayWarning.text.trim()) ?? 0,
-        },
-        id: _settingsId,
-      );
-      if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Business settings updated'),
-          backgroundColor: _teal,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-      await _load();
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Unable to save business settings: $e'),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
-  }
+  final bool editing;
+  final bool saving;
+  final bool active;
+  final String roomName;
+  final String roomType;
+  final bool isFullScreen;
+  final ValueChanged<bool> onActiveChanged;
+  final VoidCallback onClose;
 
   @override
   Widget build(BuildContext context) {
-    final isWide = MediaQuery.of(context).size.width >= 760;
-    return Scaffold(
-      backgroundColor: _page,
-      body: SafeArea(
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 12, 8, 12),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          if (isFullScreen) ...[
+            IconButton(
+              tooltip: 'Back',
+              onPressed: saving ? null : onClose,
+              icon: const Icon(Icons.arrow_back),
+            ),
+            const SizedBox(width: 2),
+          ],
+          Container(
+            width: 48,
+            height: 48,
+            decoration: BoxDecoration(
+              color: const Color(0xFF8B5CF6).withValues(alpha: 0.11),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.meeting_room_outlined,
+              color: Color(0xFF8B5CF6),
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 11),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  editing ? 'Edit Room' : 'Add Room',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: _ink,
+                    fontSize: 16,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  roomName == 'Room' ? roomType : '$roomName · $roomType',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 11.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Text(
+            active ? 'Active' : 'Inactive',
+            style: TextStyle(
+              color: active ? const Color(0xFF047857) : const Color(0xFF64748B),
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          Transform.scale(
+            scale: 0.82,
+            child: Switch(
+              value: active,
+              onChanged: saving ? null : onActiveChanged,
+              activeTrackColor: const Color(0xFF10B981),
+            ),
+          ),
+          if (!isFullScreen)
+            IconButton(
+              tooltip: 'Close',
+              onPressed: saving ? null : onClose,
+              icon: const Icon(Icons.close),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RoomEditorTabs extends StatelessWidget {
+  const _RoomEditorTabs({required this.selected, required this.onChanged});
+
+  final int selected;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      height: 48,
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          _RoomEditorTab(
+            label: 'Details',
+            selected: selected == 0,
+            onTap: () => onChanged(0),
+          ),
+          _RoomEditorTab(
+            label: 'Equipment',
+            selected: selected == 1,
+            onTap: () => onChanged(1),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _RoomEditorTab extends StatelessWidget {
+  const _RoomEditorTab({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Expanded(
+      child: InkWell(
+        onTap: onTap,
         child: Column(
           children: [
-            const _ManagementHeader(
-              title: 'Business Settings',
-              subtitle: 'Outlet financial and attendance rules',
-            ),
             Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator(color: _teal))
-                  : SingleChildScrollView(
-                      padding: const EdgeInsets.all(16),
-                      child: Center(
-                        child: ConstrainedBox(
-                          constraints: const BoxConstraints(maxWidth: 920),
-                          child: Form(
-                            key: _formKey,
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                _Panel(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      _settingsTitle('Outlet'),
-                                      const SizedBox(height: 12),
-                                      DropdownButtonFormField<String>(
-                                        initialValue: _outletId,
-                                        isExpanded: true,
-                                        items: OutletContext.outlets
-                                            .map(
-                                              (outlet) =>
-                                                  DropdownMenuItem<String>(
-                                                    value: outlet.id,
-                                                    child: Text(outlet.name),
-                                                  ),
-                                            )
-                                            .toList(),
-                                        onChanged: _saving
-                                            ? null
-                                            : (value) async {
-                                                if (value == null) return;
-                                                setState(
-                                                  () => _outletId = value,
-                                                );
-                                                await _load();
-                                              },
-                                        decoration: _fieldDecoration('Outlet'),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                _Panel(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      _settingsTitle('SST'),
-                                      const SizedBox(height: 8),
-                                      SwitchListTile(
-                                        value: _sstEnabled,
-                                        onChanged: _saving
-                                            ? null
-                                            : (value) => setState(
-                                                () => _sstEnabled = value,
-                                              ),
-                                        contentPadding: EdgeInsets.zero,
-                                        activeThumbColor: Colors.white,
-                                        activeTrackColor:
-                                            const Color(0xFF10B981),
-                                        title: const Text('SST enabled'),
-                                      ),
-                                      const SizedBox(height: 8),
-                                      Wrap(
-                                        spacing: 12,
-                                        runSpacing: 12,
-                                        children: [
-                                          SizedBox(
-                                            width: isWide ? 280 : double.infinity,
-                                            child: DropdownButtonFormField<
-                                                String>(
-                                              initialValue: _sstMode,
-                                              isExpanded: true,
-                                              items: const [
-                                                DropdownMenuItem(
-                                                  value: 'inclusive',
-                                                  child: Text('Inclusive'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: 'exclusive',
-                                                  child: Text('Exclusive'),
-                                                ),
-                                              ],
-                                              onChanged: _saving
-                                                  ? null
-                                                  : (value) => setState(
-                                                      () => _sstMode =
-                                                          value ?? 'exclusive',
-                                                    ),
-                                              decoration: _fieldDecoration(
-                                                'Pricing mode',
-                                              ),
-                                            ),
-                                          ),
-                                          SizedBox(
-                                            width: isWide ? 180 : double.infinity,
-                                            child: _FormField(
-                                              label: 'SST percentage',
-                                              controller: _sstRate,
-                                              keyboardType:
-                                                  const TextInputType
-                                                      .numberWithOptions(
-                                                decimal: true,
-                                              ),
-                                            ),
-                                          ),
-                                          SizedBox(
-                                            width: isWide ? 260 : double.infinity,
-                                            child:
-                                                DropdownButtonFormField<String>(
-                                              initialValue: _roundingMode,
-                                              isExpanded: true,
-                                              items: const [
-                                                DropdownMenuItem(
-                                                  value: 'nearest_cent',
-                                                  child: Text('Nearest cent'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: 'nearest_5_sen',
-                                                  child: Text('Nearest 5 sen'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: 'floor_cent',
-                                                  child: Text('Round down'),
-                                                ),
-                                                DropdownMenuItem(
-                                                  value: 'ceil_cent',
-                                                  child: Text('Round up'),
-                                                ),
-                                              ],
-                                              onChanged: _saving
-                                                  ? null
-                                                  : (value) => setState(
-                                                      () => _roundingMode =
-                                                          value ??
-                                                              'nearest_cent',
-                                                    ),
-                                              decoration: _fieldDecoration(
-                                                'Rounding',
-                                              ),
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 14),
-                                _Panel(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      _settingsTitle('Late Arrival'),
-                                      const SizedBox(height: 12),
-                                      Wrap(
-                                        spacing: 12,
-                                        runSpacing: 12,
-                                        children: [
-                                          SizedBox(
-                                            width: isWide ? 210 : double.infinity,
-                                            child: _FormField(
-                                              label: 'Grace minutes',
-                                              controller: _lateGrace,
-                                              keyboardType:
-                                                  TextInputType.number,
-                                            ),
-                                          ),
-                                          SizedBox(
-                                            width: isWide ? 230 : double.infinity,
-                                            child: _FormField(
-                                              label: 'No-show threshold',
-                                              controller: _noShowThreshold,
-                                              keyboardType:
-                                                  TextInputType.number,
-                                            ),
-                                          ),
-                                          SizedBox(
-                                            width: isWide ? 210 : double.infinity,
-                                            child: _FormField(
-                                              label: 'Delay warning',
-                                              controller: _delayWarning,
-                                              keyboardType:
-                                                  TextInputType.number,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                      const SizedBox(height: 8),
-                                      SwitchListTile(
-                                        value: _autoExtend,
-                                        onChanged: _saving
-                                            ? null
-                                            : (value) => setState(
-                                                () => _autoExtend = value,
-                                              ),
-                                        contentPadding: EdgeInsets.zero,
-                                        activeThumbColor: Colors.white,
-                                        activeTrackColor:
-                                            const Color(0xFF10B981),
-                                        title: const Text(
-                                          'Auto-extend late arrivals',
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                const SizedBox(height: 18),
-                                Align(
-                                  alignment: Alignment.centerRight,
-                                  child: FilledButton.icon(
-                                    onPressed: _saving ? null : _save,
-                                    icon: _saving
-                                        ? const SizedBox(
-                                            width: 16,
-                                            height: 16,
-                                            child: CircularProgressIndicator(
-                                              strokeWidth: 2,
-                                              color: Colors.white,
-                                            ),
-                                          )
-                                        : const Icon(
-                                            Icons.save_outlined,
-                                            size: 18,
-                                          ),
-                                    label: const Text('Save Settings'),
-                                    style: FilledButton.styleFrom(
-                                      backgroundColor: _teal,
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 18,
-                                        vertical: 14,
-                                      ),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
+              child: Center(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: selected
+                        ? const Color(0xFF1B6B72)
+                        : const Color(0xFF64748B),
+                    fontSize: 12,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+            ),
+            Container(
+              height: 2,
+              color: selected ? const Color(0xFF1B6B72) : Colors.transparent,
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  Widget _settingsTitle(String text) {
-    return Text(
-      text,
-      style: const TextStyle(
-        color: _ink,
-        fontSize: 16,
-        fontWeight: FontWeight.w900,
+class _RoomEditorFooter extends StatelessWidget {
+  const _RoomEditorFooter({
+    required this.saving,
+    required this.editing,
+    required this.onCancel,
+    required this.onSave,
+  });
+
+  final bool saving;
+  final bool editing;
+  final VoidCallback onCancel;
+  final VoidCallback onSave;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 14),
+      decoration: const BoxDecoration(
+        color: Colors.white,
+        border: Border(top: BorderSide(color: Color(0xFFE4E7EC))),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: OutlinedButton(
+              onPressed: saving ? null : onCancel,
+              style: OutlinedButton.styleFrom(
+                minimumSize: const Size.fromHeight(44),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: const Text('Cancel'),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: FilledButton(
+              onPressed: saving ? null : onSave,
+              style: FilledButton.styleFrom(
+                minimumSize: const Size.fromHeight(44),
+                backgroundColor: const Color(0xFF1B6B72),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: saving
+                  ? const SizedBox(
+                      width: 18,
+                      height: 18,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Colors.white,
+                      ),
+                    )
+                  : Text(editing ? 'Save Changes' : 'Add Room'),
+            ),
+          ),
+        ],
       ),
     );
   }
+}
 
-  InputDecoration _fieldDecoration(String label) {
-    return InputDecoration(
-      labelText: label,
-      filled: true,
-      fillColor: const Color(0xFFF7F8FA),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: BorderSide.none,
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(8),
-        borderSide: const BorderSide(color: _teal, width: 1.4),
+class _RoomEditorSectionTitle extends StatelessWidget {
+  const _RoomEditorSectionTitle(this.label);
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      label,
+      style: const TextStyle(
+        color: Color(0xFF344054),
+        fontSize: 12,
+        fontWeight: FontWeight.w800,
       ),
     );
   }
@@ -3851,6 +4656,8 @@ class _TherapistFormDialogState extends State<_TherapistFormDialog> {
   }
 }
 
+// Kept for older management forms that still use the legacy header.
+// ignore: unused_element
 class _AddButton extends StatelessWidget {
   final String label;
   final VoidCallback onTap;
@@ -3999,10 +4806,15 @@ class _InfoRow extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(vertical: 10),
           child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(label, style: const TextStyle(color: _muted)),
+              Expanded(
+                flex: 4,
+                child: Text(label, style: const TextStyle(color: _muted)),
+              ),
               const SizedBox(width: 16),
               Expanded(
+                flex: 6,
                 child: Text(
                   value.isEmpty ? '-' : value,
                   textAlign: TextAlign.right,

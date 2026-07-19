@@ -136,6 +136,7 @@ class _ScheduleAppointment {
   final String bookedStartTime;
   final String bookedEndTime;
   final DateTime? actualStartedAt;
+  final DateTime? actualCompletedAt;
   final int bufferAfterMinutes;
   final String status;
   final String type;
@@ -165,6 +166,11 @@ class _ScheduleAppointment {
   final int lateGraceMinutes;
   final int delayWarningMinutes;
 
+  double get chargedTotal => appointmentChargedTotal(
+    scheduledAmount: price,
+    paidAmount: paidAmount,
+  );
+
   const _ScheduleAppointment({
     required this.id,
     required this.appointmentGroupId,
@@ -179,6 +185,7 @@ class _ScheduleAppointment {
     required this.bookedStartTime,
     required this.bookedEndTime,
     required this.actualStartedAt,
+    required this.actualCompletedAt,
     required this.bufferAfterMinutes,
     required this.status,
     required this.type,
@@ -315,6 +322,7 @@ class _ScheduleAppointment {
           data['endTime']?.toString() ??
           '10:00',
       actualStartedAt: _readDateTime(data['actualStartedAt']),
+      actualCompletedAt: _readDateTime(data['actualCompletedAt']),
       bufferAfterMinutes: _readInt(data['bufferAfterMinutes'], 0),
       status: data['status']?.toString().trim().toLowerCase() ?? 'pending',
       type: data['type']?.toString().trim().toLowerCase() ?? '',
@@ -579,12 +587,15 @@ class _ScheduleAppointment {
   String get bookedTimeRange =>
       '${_clockLabel(bookedStartTime)} - ${_clockLabel(bookedEndTime)}';
   bool get hasActualTiming => actualStartedAt != null;
-  DateTime? get actualServiceEndAt => actualStartedAt == null
-      ? null
-      : endAt?.toLocal() ??
-            actualStartedAt!.toLocal().add(
-              Duration(minutes: scheduledServiceMinutes),
-            );
+  DateTime? get actualServiceEndAt {
+    final actualStart = actualStartedAt?.toLocal();
+    if (actualStart == null) return null;
+    final actualCompletion = actualCompletedAt?.toLocal();
+    if (actualCompletion != null && !actualCompletion.isBefore(actualStart)) {
+      return actualCompletion;
+    }
+    return actualStart.add(Duration(minutes: scheduledServiceMinutes));
+  }
   String get actualServiceTimeRange {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
@@ -868,6 +879,10 @@ class _AppointmentGroup {
   String get blockDurationLabel =>
       '$timeRange ($durationMinutes min) + cleanup block until ${_clockLabel(_minutesToTime(cleanupEndMinutes))}';
   double get price => appointments.fold(0, (total, a) => total + a.price);
+  double get chargedTotal => appointments.fold(
+    0,
+    (total, appointment) => total + appointment.chargedTotal,
+  );
   String get priceLabel => 'RM ${price.toStringAsFixed(0)}';
 
   String get serviceName {
@@ -4299,7 +4314,10 @@ class _TabletAppointmentListHeader extends StatelessWidget {
           Expanded(flex: 7, child: _TabletColumnLabel('Booking details')),
           SizedBox(
             width: _apptColStatus,
-            child: _TabletColumnLabel('Payment status'),
+            child: _TabletColumnLabel(
+              'Payment status',
+              align: TextAlign.center,
+            ),
           ),
           SizedBox(
             width: _apptColAmount,
@@ -4512,7 +4530,7 @@ class _TabletAppointmentListRow extends StatelessWidget {
               SizedBox(
                 width: _apptColStatus,
                 child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                  crossAxisAlignment: CrossAxisAlignment.center,
                   mainAxisAlignment: MainAxisAlignment.center,
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -4615,9 +4633,14 @@ class _ListStatusChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final metrics = context.uiScale;
     return Container(
-      constraints: const BoxConstraints(maxWidth: 130),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      alignment: Alignment.center,
+      constraints: BoxConstraints(
+        minHeight: metrics.badgeHeight,
+        maxWidth: 130,
+      ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       decoration: BoxDecoration(
         color: colors.accent.withValues(alpha: 0.12),
         borderRadius: BorderRadius.circular(999),
@@ -4626,10 +4649,12 @@ class _ListStatusChip extends StatelessWidget {
         label,
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
+        textAlign: TextAlign.center,
         style: TextStyle(
           fontSize: 11.5,
           fontWeight: FontWeight.w800,
           color: colors.accent,
+          height: 1.1,
         ),
       ),
     );
@@ -5357,7 +5382,10 @@ class _TabletTimeline extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    const hourHeight = 78.0;
+    final presetScale = context.uiScale.timetableScale;
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
+    final verticalScale = presetScale > textScale ? presetScale : textScale;
+    final hourHeight = 78.0 * verticalScale;
     const labelWidth = 58.0;
     const gutter = 16.0;
     final totalHeight = (closeHour - openHour) * hourHeight;
@@ -5399,9 +5427,11 @@ class _TabletTimeline extends StatelessWidget {
           // Short appointments get a readable minimum height, but a card must
           // never grow past the top of a following card that shares its
           // horizontal band, otherwise touching/back-to-back slots overlap.
-          const laneGap = 4.0;
+          final laneGap = 4.0 * verticalScale;
           for (final rect in rects) {
-            var height = rect.rawHeight.clamp(42.0, 260.0).toDouble();
+            var height = rect.rawHeight
+                .clamp(42.0 * verticalScale, 260.0 * verticalScale)
+                .toDouble();
             double? nextTop;
             for (final other in rects) {
               if (identical(other, rect)) continue;
@@ -5415,7 +5445,9 @@ class _TabletTimeline extends StatelessWidget {
             if (nextTop != null) {
               final available = nextTop - rect.top - laneGap;
               if (available < height) {
-                height = available.clamp(20.0, 260.0).toDouble();
+                height = available
+                    .clamp(20.0 * verticalScale, 260.0 * verticalScale)
+                    .toDouble();
               }
             }
             rect.height = height;
@@ -6527,7 +6559,7 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
           ? group.primary.actualServiceTimeRange
           : null,
       durationLabel: group.durationLabel,
-      total: group.price,
+      total: group.chargedTotal,
       paidAmount: group.paidAmount,
       receiptNumber: group.receiptNumber,
       paymentMethod: group.paymentMethod,
@@ -7030,7 +7062,7 @@ class _BookingTotalCard extends StatelessWidget {
                   _moneyAmount(total),
                   maxLines: 1,
                   style: const TextStyle(
-                    fontSize: 20,
+                    fontSize: 17,
                     color: Color(0xFF0F8A5F),
                     fontWeight: FontWeight.w900,
                   ),
@@ -7310,7 +7342,7 @@ class _GroupPaxDetailCard extends StatelessWidget {
                 const Divider(height: 18, color: Color(0xFFE5E7EB)),
                 _PaxPriceRow(
                   label: 'Total',
-                  amount: appointment.price,
+                  amount: appointment.chargedTotal,
                   emphasized: true,
                 ),
               ],

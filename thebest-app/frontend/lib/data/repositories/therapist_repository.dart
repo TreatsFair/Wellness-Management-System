@@ -10,8 +10,18 @@ class TherapistRepository {
   final SupabaseTableService _table;
   final AppointmentRepository _appointments;
 
-  Future<List<Map<String, dynamic>>> getTherapists() {
-    return _table.list(orderBy: 'name');
+  Future<List<Map<String, dynamic>>> getTherapists() async {
+    final rows = await _table.list(orderBy: 'name');
+    rows.sort((left, right) {
+      final orderComparison = asInt(
+        left['displayOrder'],
+      ).compareTo(asInt(right['displayOrder']));
+      if (orderComparison != 0) return orderComparison;
+      return asString(
+        left['name'],
+      ).toLowerCase().compareTo(asString(right['name']).toLowerCase());
+    });
+    return rows;
   }
 
   Future<List<Map<String, dynamic>>> listTherapists() => getTherapists();
@@ -37,8 +47,17 @@ class TherapistRepository {
 
   Future<Map<String, dynamic>?> getTherapist(String id) => _table.getById(id);
 
-  Future<Map<String, dynamic>> addTherapist(Map<String, dynamic> values) {
-    return _table.create(values);
+  Future<Map<String, dynamic>> addTherapist(Map<String, dynamic> values) async {
+    if (values.containsKey('displayOrder')) return _table.create(values);
+    final role = asString(values['role'], 'Therapist').trim();
+    final existing = await getTherapists();
+    var nextOrder = 0;
+    for (final row in existing) {
+      if (asString(row['role']).trim() != role) continue;
+      final candidate = asInt(row['displayOrder']) + 1;
+      if (candidate > nextOrder) nextOrder = candidate;
+    }
+    return _table.create({...values, 'displayOrder': nextOrder});
   }
 
   Future<Map<String, dynamic>> createTherapist(Map<String, dynamic> values) {
@@ -60,6 +79,12 @@ class TherapistRepository {
   }
 
   Future<void> deleteTherapist(String id) => _table.delete(id);
+
+  Future<void> updateTherapistOrder(List<String> therapistIds) async {
+    for (var index = 0; index < therapistIds.length; index++) {
+      await _table.update(therapistIds[index], {'displayOrder': index});
+    }
+  }
 
   Future<Map<String, dynamic>> getTherapistAppointmentStats(
     String therapistId, {

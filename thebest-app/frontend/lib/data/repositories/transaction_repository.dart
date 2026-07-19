@@ -30,7 +30,10 @@ class TransactionRepository {
     final target = dateKey(date);
     final rows = await listTransactions();
     return rows.where((row) {
-      final createdAt = asDateTime(row['createdAt']);
+      // created_at is timestamptz, so DateTime.tryParse yields a UTC instant.
+      // Compare in local time or anything billed between midnight and 08:00
+      // (Malaysia) keys to the previous day and drops off the timetable.
+      final createdAt = asDateTime(row['createdAt'])?.toLocal();
       return createdAt != null && dateKey(createdAt) == target;
     }).toList();
   }

@@ -48,6 +48,7 @@ class OutletContext {
     'online_booking_closures',
     'therapist_working_hours',
     'therapist_unavailability',
+    'notifications',
   };
 
   static OutletOption get activeOutlet => outletById(activeOutletId.value);

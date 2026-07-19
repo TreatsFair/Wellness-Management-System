@@ -1,5 +1,7 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../utils/error_message.dart';
+
 class PaymentResult {
   const PaymentResult({
     required this.success,
@@ -39,7 +41,10 @@ class PaymentResult {
   final String? errorCode;
   final String? errorMessage;
 
-  String get message => errorMessage ?? errorCode ?? 'Payment failed';
+  String get message => friendlyBookingErrorMessage(
+    errorMessage ?? errorCode,
+    fallback: 'Payment failed',
+  );
 }
 
 /// Atomic appointment-write + transaction-write RPCs. Each call either lands

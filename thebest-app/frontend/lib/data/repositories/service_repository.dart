@@ -7,8 +7,18 @@ class ServiceRepository {
 
   final SupabaseTableService _table;
 
-  Future<List<Map<String, dynamic>>> getServices() {
-    return _table.list(orderBy: 'name');
+  Future<List<Map<String, dynamic>>> getServices() async {
+    final rows = await _table.list(orderBy: 'name');
+    rows.sort((left, right) {
+      final orderComparison = asInt(
+        left['displayOrder'],
+      ).compareTo(asInt(right['displayOrder']));
+      if (orderComparison != 0) return orderComparison;
+      return asString(
+        left['name'],
+      ).toLowerCase().compareTo(asString(right['name']).toLowerCase());
+    });
+    return rows;
   }
 
   Future<List<Map<String, dynamic>>> listServices() => getServices();
@@ -20,8 +30,17 @@ class ServiceRepository {
 
   Future<Map<String, dynamic>?> getService(String id) => _table.getById(id);
 
-  Future<Map<String, dynamic>> addService(Map<String, dynamic> values) {
-    return _table.create(values);
+  Future<Map<String, dynamic>> addService(Map<String, dynamic> values) async {
+    if (values.containsKey('displayOrder')) return _table.create(values);
+    final category = asString(values['category'], 'Services').trim();
+    final existing = await getServices();
+    var nextOrder = 0;
+    for (final row in existing) {
+      if (asString(row['category']).trim() != category) continue;
+      final candidate = asInt(row['displayOrder']) + 1;
+      if (candidate > nextOrder) nextOrder = candidate;
+    }
+    return _table.create({...values, 'displayOrder': nextOrder});
   }
 
   Future<Map<String, dynamic>> createService(Map<String, dynamic> values) {
@@ -35,7 +54,9 @@ class ServiceRepository {
     final row = await _table.update(id, values);
     _verifySavedString(row, values, 'name');
     _verifySavedString(row, values, 'category');
+    _verifySavedString(row, values, 'serviceDescription');
     _verifySavedInt(row, values, 'duration');
+    _verifySavedInt(row, values, 'bufferAfterMinutes');
     _verifySavedDouble(row, values, 'price');
     _verifySavedDouble(row, values, 'therapistCommission');
     _verifySavedDouble(row, values, 'counterCommission');
@@ -53,6 +74,12 @@ class ServiceRepository {
 
   Future<Map<String, dynamic>> toggleServiceActive(String id, bool active) {
     return _table.update(id, {'isActive': active});
+  }
+
+  Future<void> updateServiceOrder(List<String> serviceIds) async {
+    for (var index = 0; index < serviceIds.length; index++) {
+      await _table.update(serviceIds[index], {'displayOrder': index});
+    }
   }
 }
 
