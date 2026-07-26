@@ -25,7 +25,8 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
 
   _BusinessSection _section = _BusinessSection.outlet;
   String _settingsId = '';
-  String _sstMode = 'exclusive';
+  String _billplzSstMode = 'inclusive';
+  String _counterSstMode = 'exclusive';
   String _roundingMode = 'nearest_cent';
   bool _sstEnabled = true;
   bool _autoExtend = false;
@@ -58,7 +59,8 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
       setState(() {
         _settingsId = row?['id']?.toString() ?? '';
         _sstEnabled = settings.sstEnabled;
-        _sstMode = settings.sstPricingMode;
+        _billplzSstMode = settings.billplzSstPricingMode;
+        _counterSstMode = settings.counterSstPricingMode;
         _roundingMode = settings.sstRoundingMode;
         _autoExtend = settings.autoExtendLateArrivals;
         _sstRate.text = settings.sstRatePercent.toStringAsFixed(
@@ -82,7 +84,8 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
     try {
       await _repository.saveActiveSettings({
         'sstEnabled': _sstEnabled,
-        'sstPricingMode': _sstMode,
+        'billplzSstPricingMode': _billplzSstMode,
+        'counterSstPricingMode': _counterSstMode,
         'sstRatePercent': double.tryParse(_sstRate.text.trim()) ?? 0,
         'sstRoundingMode': _roundingMode,
         'lateGraceMinutes': int.tryParse(_lateGrace.text.trim()) ?? 0,
@@ -237,7 +240,7 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
             final stack = constraints.maxWidth < 720;
             final fields = [
               DropdownButtonFormField<String>(
-                initialValue: _sstMode,
+                initialValue: _billplzSstMode,
                 isExpanded: true,
                 items: const [
                   DropdownMenuItem(
@@ -252,8 +255,28 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
                 onChanged: _saving
                     ? null
                     : (value) =>
-                          setState(() => _sstMode = value ?? 'exclusive'),
-                decoration: _decoration('Pricing mode'),
+                          setState(() => _billplzSstMode = value ?? 'inclusive'),
+                decoration: _decoration('Billplz payments'),
+              ),
+              DropdownButtonFormField<String>(
+                initialValue: _counterSstMode,
+                isExpanded: true,
+                items: const [
+                  DropdownMenuItem(
+                    value: 'inclusive',
+                    child: Text('Inclusive (nett)'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'exclusive',
+                    child: Text('Exclusive (+ SST)'),
+                  ),
+                ],
+                onChanged: _saving
+                    ? null
+                    : (value) => setState(
+                        () => _counterSstMode = value ?? 'exclusive',
+                      ),
+                decoration: _decoration('Counter payments'),
               ),
               _numberField(
                 controller: _sstRate,
@@ -268,6 +291,10 @@ class _BusinessSettingsScreenState extends State<BusinessSettingsScreen> {
                   DropdownMenuItem(
                     value: 'nearest_cent',
                     child: Text('Nearest cent'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'nearest_10_sen',
+                    child: Text('Nearest 10 sen'),
                   ),
                   DropdownMenuItem(
                     value: 'nearest_5_sen',

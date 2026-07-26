@@ -35,6 +35,7 @@ class RoomRepository {
     _verifySavedString(row, values, 'floor');
     _verifySavedInt(row, values, 'totalSlots');
     _verifySavedString(row, values, 'equipment');
+    _verifySavedString(row, values, 'allocationMode');
     _verifySavedBool(row, values, 'isActive');
     return row;
   }

@@ -25,7 +25,7 @@ class OnlineBookingRepository {
           .order('display_order'),
       _client
           .from('services')
-          .select('id,name,duration,buffer_after_minutes,is_active')
+          .select('id,name,category,duration,buffer_after_minutes,is_active')
           .eq('outlet_id', outletId)
           .order('name'),
       _client
@@ -141,6 +141,14 @@ class OnlineBookingRepository {
     }
     return catalogueId;
   }
+
+  Future<void> updateServiceImage(String id, String url) => _client
+      .from('online_booking_services')
+      .update({
+        'public_image_url': url,
+        'updated_at': DateTime.now().toUtc().toIso8601String(),
+      })
+      .eq('id', id);
 
   Future<void> deleteService(String id) =>
       _client.from('online_booking_services').delete().eq('id', id);

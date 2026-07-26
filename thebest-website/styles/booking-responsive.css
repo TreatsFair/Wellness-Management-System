@@ -131,8 +131,8 @@ body {
 .guest-names { margin-top: 1.3rem; padding-top: 1.15rem; }
 .same-toggle { margin-bottom: 0.8rem; padding: 0.75rem 0.85rem; }
 .guest-preview { grid-template-columns: 1fr; }
-.service-card { grid-template-columns: 72px minmax(0, 1fr); gap: 0.7rem; padding: 0.65rem; border-radius: 13px; }
-.service-card img { width: 72px; height: 72px; }
+.service-card { grid-template-columns: 104px minmax(0, 1fr); gap: 0.7rem; padding: 0.65rem; border-radius: 13px; }
+.service-card img { width: 104px; height: 104px; }
 .service-copy { min-width: 0; }
 .service-copy h3 { font-size: 1rem; }
 .service-copy p { display: none; }
@@ -184,6 +184,10 @@ body {
 .field input,
 .field textarea { min-height: 48px; padding: 0.8rem; font-size: 0.84rem; }
 .consent { font-size: 0.68rem; }
+.terms-dialog { max-height: min(88vh, 720px); }
+.terms-dialog-head { padding: 1.25rem 1.25rem 0.85rem; }
+.terms-dialog-head h2 { font-size: 1.2rem; }
+.terms-body { padding: 0.85rem 1.25rem 1.4rem; }
 
 /* Fixed action dock above the summary bar, so panel content is never sliced
    mid-card by an in-flow sticky footer. */
@@ -232,10 +236,10 @@ body {
 .summary-overlay { display: block; }
 .mobile-summary-bar { display: grid; }
 
-.summary-sheet-handle { margin-top: 0.55rem; }
+.summary-sheet-handle { position: absolute; z-index: 3; top: 8px; left: 50%; transform: translateX(-50%); margin: 0; }
 .summary-close { top: 0.7rem; right: 0.75rem; }
 .review-card { overflow: visible; }
-.review-heading { padding: 0.65rem 3.5rem 0.85rem 1rem; align-items: flex-start; }
+.review-heading { padding: 1.2rem 3.5rem 0.85rem 1rem; align-items: flex-start; }
 .review-heading h3 { font-size: 1.2rem; }
 .review-secure { display: none; }
 .review-details { padding: 0.25rem 1rem; }
@@ -251,8 +255,8 @@ body {
   .booking-shell { padding-inline: 0.75rem; }
   .booking-content { padding: 1.1rem; }
   .card-image { height: 145px; }
-  .service-card { grid-template-columns: 86px minmax(0, 1fr) auto; }
-  .service-card img { width: 86px; height: 82px; }
+  .service-card { grid-template-columns: 124px minmax(0, 1fr) auto; }
+  .service-card img { width: 124px; height: 108px; }
   .service-copy p { display: block; }
   .service-action { grid-column: auto; padding: 0 0.25rem; display: grid; justify-items: end; }
   .service-more { grid-column: 2 / -1; }
@@ -280,7 +284,7 @@ body {
   .panel-heading h2 { font-size: 1.9rem; }
   .active-guest-label { position: static; margin: 0 0 0.85rem; padding: 0; border: 0; background: transparent; }
   .outlet-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; }
-  .guest-card-fields { grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); }
+  .guest-preview { grid-template-columns: repeat(2, 1fr); }
   .card-image { height: 190px; }
   .date-section,
   .time-section { padding: 1.25rem; }

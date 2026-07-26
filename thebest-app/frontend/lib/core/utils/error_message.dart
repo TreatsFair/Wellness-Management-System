@@ -1,10 +1,35 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+class AppointmentOperationException implements Exception {
+  const AppointmentOperationException({
+    required this.code,
+    required this.message,
+  });
+
+  final String code;
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 /// Renders an error as text suitable for a SnackBar, unwrapping
 /// [PostgrestException] to its `message` instead of the raw
 /// `PostgrestException(message: ..., code: ..., details: ..., hint: ...)`
 /// toString that Postgrest/Supabase throws.
 String friendlyErrorMessage(Object error) {
+  if (error is AppointmentOperationException) {
+    return switch (error.code.toUpperCase()) {
+      'THERAPIST_BUSY' =>
+        'That therapist is busy during this service window. Choose another therapist.',
+      'THERAPIST_UNAVAILABLE' =>
+        'That therapist is not available for assignment.',
+      'OUTSIDE_WORKING_HOURS' =>
+        'That therapist is outside their working hours.',
+      'INVALID_THERAPIST' => 'That therapist is no longer available.',
+      _ => error.message,
+    };
+  }
   if (error is PostgrestException) {
     return error.message;
   }

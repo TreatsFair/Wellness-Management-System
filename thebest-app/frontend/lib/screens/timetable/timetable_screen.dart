@@ -7,6 +7,7 @@ import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
@@ -17,6 +18,7 @@ import '../../data/services/supabase_table_service.dart';
 import '../../widgets/app_shell_scope.dart';
 import '../../widgets/detail_drawer_layout.dart';
 import '../appointments/appointment_screen.dart';
+import '../appointments/appointment_checkin_logic.dart';
 import '../customers/customer_screen.dart';
 
 const Color _timetableAccent = Color(0xFF0F766E);
@@ -37,6 +39,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
   final _transactionRepository = TransactionRepository();
   final _roomRepository = RoomRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
+  final _businessHoursTable = SupabaseTableService('business_hours');
   final _roomUnitsTable = SupabaseTableService('room_units');
   final _search = TextEditingController();
 
@@ -85,8 +88,19 @@ class _TimetableScreenState extends State<TimetableScreen> {
       final businessRules = settings.$3;
       final appointmentRows = await _appointmentRepository
           .getAppointmentsByDate(date);
+      final appointmentIds = appointmentRows
+          .map((row) => asString(row['id']))
+          .where((id) => id.isNotEmpty)
+          .toSet();
+      final appointmentGroupIds = appointmentRows
+          .map((row) => asString(row['appointmentGroupId']))
+          .where((id) => id.isNotEmpty)
+          .toSet();
       final transactionRows = await _transactionRepository
-          .getTransactionsByDate(_selectedDate);
+          .getLinkedAppointmentTransactionsBatch(
+            appointmentIds: appointmentIds,
+            appointmentGroupIds: appointmentGroupIds,
+          );
       final therapistRows = await _dashboardRepository.listTherapists();
       final roomRows = await _roomRepository.getActiveRooms();
       final roomUnitRows = await _roomUnitsTable.list(orderBy: 'unit_number');
@@ -94,9 +108,17 @@ class _TimetableScreenState extends State<TimetableScreen> {
       final customerIds = appointmentRows
           .map((row) => asString(row['customerId']))
           .where((id) => id.isNotEmpty && id != 'walk_in_guest');
-      final serviceIds = appointmentRows
-          .map((row) => asString(row['serviceId']))
-          .where((id) => id.isNotEmpty);
+      final serviceIds = <String>{};
+      for (final row in appointmentRows) {
+        final primaryId = asString(row['serviceId']);
+        if (primaryId.isNotEmpty) serviceIds.add(primaryId);
+        final rawItems = row['serviceItems'];
+        if (rawItems is! List) continue;
+        for (final rawItem in rawItems.whereType<Map>()) {
+          final id = serviceItemId(Map<String, dynamic>.from(rawItem));
+          if (id.isNotEmpty) serviceIds.add(id);
+        }
+      }
       final therapistIds = appointmentRows
           .map((row) => asString(row['therapistId']))
           .where((id) => id.isNotEmpty);
@@ -121,16 +143,21 @@ class _TimetableScreenState extends State<TimetableScreen> {
       );
       final therapists = {...allTherapists, ...linkedTherapists};
       final rooms = await _dashboardRepository.loadByIds('rooms', roomIds);
-      final transactionsByAppointment = <String, Map<String, dynamic>>{};
-      final transactionsByGroup = <String, Map<String, dynamic>>{};
+      final transactionsByAppointment =
+          <String, List<Map<String, dynamic>>>{};
+      final transactionsByGroup = <String, List<Map<String, dynamic>>>{};
       for (final transaction in transactionRows) {
         final appointmentId = asString(transaction['appointmentId']);
         final appointmentGroupId = asString(transaction['appointmentGroupId']);
         if (appointmentId.isNotEmpty) {
-          transactionsByAppointment[appointmentId] = transaction;
+          transactionsByAppointment
+              .putIfAbsent(appointmentId, () => [])
+              .add(transaction);
         }
         if (appointmentGroupId.isNotEmpty) {
-          transactionsByGroup[appointmentGroupId] = transaction;
+          transactionsByGroup
+              .putIfAbsent(appointmentGroupId, () => [])
+              .add(transaction);
         }
       }
 
@@ -143,9 +170,14 @@ class _TimetableScreenState extends State<TimetableScreen> {
                   services: services,
                   therapists: therapists,
                   rooms: rooms,
-                  transaction:
-                      transactionsByAppointment[asString(row['id'])] ??
-                      transactionsByGroup[asString(row['appointmentGroupId'])],
+                  transactions: _mergeTimetableTransactions(
+                    transactionsByGroup[asString(
+                          row['appointmentGroupId'],
+                        )] ??
+                        const [],
+                    transactionsByAppointment[asString(row['id'])] ??
+                        const [],
+                  ),
                   selectedDate: _selectedDate,
                   lateGraceMinutes: businessRules.lateGraceMinutes,
                   delayWarningMinutes: businessRules.delayWarningMinutes,
@@ -178,14 +210,32 @@ class _TimetableScreenState extends State<TimetableScreen> {
 
   Future<(int, int, BusinessRuleSettings)> _loadBusinessSettings() async {
     try {
-      final rows = await _businessSettingsTable.list(limit: 1);
-      final row = rows.isEmpty ? null : rows.first;
-      final open = _timeToMinutes(asString(row?['openTime'], '09:00'));
-      var close = _timeToMinutes(asString(row?['closeTime'], '21:00'));
+      final results = await Future.wait([
+        _businessSettingsTable.list(limit: 1),
+        _businessHoursTable.findBy(
+          'day_of_week',
+          _selectedDate.weekday % 7,
+          limit: 1,
+        ),
+      ]);
+      final settingsRow = results[0].isEmpty ? null : results[0].first;
+      final dayRow = results[1].isEmpty ? null : results[1].first;
+      final open = _timeToMinutes(
+        asString(
+          dayRow?['openTime'],
+          asString(settingsRow?['openTime'], '09:00'),
+        ),
+      );
+      var close = _timeToMinutes(
+        asString(
+          dayRow?['closeTime'],
+          asString(settingsRow?['closeTime'], '21:00'),
+        ),
+      );
       if (close <= open) close += 24 * 60;
-      final rules = row == null
+      final rules = settingsRow == null
           ? BusinessRuleSettings.defaults()
-          : BusinessRuleSettings.fromMap(row);
+          : BusinessRuleSettings.fromMap(settingsRow);
       return (open, close, rules);
     } catch (_) {
       return (9 * 60, 21 * 60, BusinessRuleSettings.defaults());
@@ -398,51 +448,19 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   Future<bool> _startEntry(_TimetableEntry entry) async {
-    if (!entry.isWalkIn) {
-      final completed = await Navigator.push<bool>(
-        context,
-        MaterialPageRoute(
-          builder: (_) => AppointmentsScreen(
-            userRole: widget.userRole,
-            initialCheckInAppointmentId: entry.id,
-            initialDate: entry.selectedDate,
-          ),
+    final completed = await Navigator.push<bool>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => AppointmentsScreen(
+          userRole: widget.userRole,
+          initialCheckInAppointmentId: entry.id,
+          initialDate: entry.selectedDate,
         ),
-      );
-      if (!mounted) return false;
-      await _loadTimetable();
-      if (!mounted) return false;
-      if (completed == true) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('Appointment checked in')));
-      }
-      return completed == true;
-    }
-    try {
-      await _appointmentRepository.startAppointment(
-        entry.id,
-        startedAt: DateTime.now(),
-      );
-      if (!mounted) return false;
-      await _loadTimetable();
-      if (!mounted) return false;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Service started')));
-      return true;
-    } catch (error) {
-      if (!mounted) return false;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Unable to start service: ${friendlyErrorMessage(error)}',
-          ),
-          backgroundColor: const Color(0xFFB42318),
-        ),
-      );
-      return false;
-    }
+      ),
+    );
+    if (!mounted) return false;
+    await _loadTimetable();
+    return completed == true;
   }
 
   Future<bool> _switchEntryTherapist(_TimetableEntry entry) async {
@@ -466,8 +484,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
         : entry._serviceStartDateTime;
     final requiredEnd = entry._serviceEndDateTime;
     final requiredWindow =
-        '${DateFormat('HH:mm').format(requiredStart)} - '
-        '${DateFormat('HH:mm').format(requiredEnd)}';
+        '${DateFormat('h:mm a').format(requiredStart)} - '
+        '${DateFormat('h:mm a').format(requiredEnd)}';
     final options = await Future.wait(
       candidates.map((therapist) async {
         if (!therapist.available) {
@@ -527,7 +545,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
     final selection = await showDialog<_TimetableTherapistSwitchSelection>(
       context: context,
       builder: (context) => _TimetableTherapistSwitchDialog(
-        currentTherapistName: entry.staffName,
+        currentTherapistName: entry.staffDisplayName,
         requiredWindow: requiredWindow,
         options: options,
         receivesFullCommission: receivesFullCommission,
@@ -541,6 +559,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
         newTherapistId: selection.therapistId,
         splitMethod: selection.splitMethod,
         reason: selection.reason,
+        assignmentSource: 'manual_override',
       );
       if (!mounted) return false;
       await _loadTimetable();
@@ -559,7 +578,8 @@ class _TimetableScreenState extends State<TimetableScreen> {
         ),
       );
       return true;
-    } catch (error) {
+    } catch (error, stackTrace) {
+      debugPrint('switch_appointment_therapist failed: $error\n$stackTrace');
       if (!mounted) return false;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
@@ -846,6 +866,77 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 }
 
+List<Map<String, dynamic>> _timetableServiceItems(
+  Object? value, {
+  required String serviceId,
+  required String serviceName,
+  required Map<String, Map<String, dynamic>> services,
+  required double fallbackPrice,
+}) {
+  final primaryService = services[serviceId];
+  if (value is List && value.isNotEmpty) {
+    return value.whereType<Map>().map((raw) {
+      final item = Map<String, dynamic>.from(raw);
+      final itemId = asString(item['id'] ?? item['serviceId']);
+      final linkedService = services[itemId] ??
+          (itemId == serviceId ? primaryService : null);
+      return {
+        ...item,
+        'id': itemId,
+        'name': asString(
+          item['name'] ?? linkedService?['name'],
+          serviceName,
+        ),
+        'duration': asInt(
+          item['duration'] ?? linkedService?['duration'],
+          60,
+        ),
+        'price': asDouble(item['price'] ?? linkedService?['price']),
+        'category': asString(
+          item['category'] ?? linkedService?['category'],
+          'Services',
+        ),
+        'imageUrl':
+            item['imageUrl'] ??
+            item['image_url'] ??
+            item['publicImageUrl'] ??
+            item['public_image_url'] ??
+            linkedService?['imageUrl'] ??
+            linkedService?['publicImageUrl'],
+      };
+    }).toList();
+  }
+  return [
+    {
+      'id': serviceId,
+      'name': serviceName,
+      'duration': asInt(primaryService?['duration'], 60),
+      'price': fallbackPrice > 0
+          ? fallbackPrice
+          : asDouble(primaryService?['price']),
+      'category': asString(primaryService?['category'], 'Services'),
+      'imageUrl':
+          primaryService?['imageUrl'] ?? primaryService?['publicImageUrl'],
+    },
+  ];
+}
+
+List<Map<String, dynamic>> _mergeTimetableTransactions(
+  Iterable<Map<String, dynamic>> groupRows,
+  Iterable<Map<String, dynamic>> appointmentRows,
+) {
+  final seen = <String>{};
+  final rows = <Map<String, dynamic>>[];
+  for (final row in [...groupRows, ...appointmentRows]) {
+    final id = asString(row['id']);
+    final receipt = asString(row['receiptNumber']);
+    final key = id.isNotEmpty ? id : receipt;
+    if (key.isNotEmpty && !seen.add(key)) continue;
+    rows.add(row);
+  }
+  return rows;
+}
+
 class _TimetableEntry {
   final String id;
   final String therapistId;
@@ -855,7 +946,13 @@ class _TimetableEntry {
   final String customerPhone;
   final String serviceName;
   final int serviceCount;
+  final List<Map<String, dynamic>> serviceItems;
+  final List<Map<String, dynamic>> bookedServiceItems;
+  final List<Map<String, dynamic>> paidServiceItems;
+  final List<Map<String, dynamic>> transactions;
   final String staffName;
+  final String assignmentSource;
+  final String requestedGender;
   final String roomName;
   final String roomUnitName;
   final String type;
@@ -866,6 +963,7 @@ class _TimetableEntry {
   final DateTime? endAt;
   final String bookedStartTime;
   final String bookedEndTime;
+  final DateTime? checkedInAt;
   final DateTime? actualStartedAt;
   final DateTime? actualCompletedAt;
   final int bufferAfterMinutes;
@@ -889,7 +987,13 @@ class _TimetableEntry {
     required this.customerPhone,
     required this.serviceName,
     required this.serviceCount,
+    required this.serviceItems,
+    required this.bookedServiceItems,
+    required this.paidServiceItems,
+    required this.transactions,
     required this.staffName,
+    required this.assignmentSource,
+    required this.requestedGender,
     required this.roomName,
     required this.roomUnitName,
     required this.type,
@@ -900,6 +1004,7 @@ class _TimetableEntry {
     required this.endAt,
     required this.bookedStartTime,
     required this.bookedEndTime,
+    required this.checkedInAt,
     required this.actualStartedAt,
     required this.actualCompletedAt,
     required this.bufferAfterMinutes,
@@ -921,7 +1026,7 @@ class _TimetableEntry {
     required Map<String, Map<String, dynamic>> services,
     required Map<String, Map<String, dynamic>> therapists,
     required Map<String, Map<String, dynamic>> rooms,
-    required Map<String, dynamic>? transaction,
+    required List<Map<String, dynamic>> transactions,
     required DateTime selectedDate,
     required int lateGraceMinutes,
     required int delayWarningMinutes,
@@ -933,6 +1038,50 @@ class _TimetableEntry {
     final serviceName = asString(row['serviceName']).isNotEmpty
         ? asString(row['serviceName'])
         : asString(service?['name'], 'Service');
+    final appointmentId = asString(row['id']);
+    final paidTransactions = transactions
+        .where(
+          (transaction) =>
+              asString(transaction['paymentStatus']).toLowerCase() == 'paid',
+        )
+        .toList();
+    final primaryTransactions = paidTransactions
+        .where(
+          (transaction) =>
+              asString(transaction['source']).toLowerCase() !=
+              'appointment_addon',
+        )
+        .toList();
+    final serviceItems = _timetableServiceItems(
+      row['serviceItems'],
+      serviceId: asString(row['serviceId']),
+      serviceName: serviceName,
+      services: services,
+      fallbackPrice: asDouble(row['totalPrice']),
+    );
+    final bookedItems = <Map<String, dynamic>>[
+      for (final transaction in primaryTransactions)
+        ...transactionItemsForAppointment(
+          transaction: transaction,
+          appointmentId: appointmentId,
+          fallbackAppointmentItems: serviceItems,
+        ),
+    ];
+    final paidItems = <Map<String, dynamic>>[
+      for (final transaction in paidTransactions)
+        ...transactionItemsForAppointment(
+          transaction: transaction,
+          appointmentId: appointmentId,
+          fallbackAppointmentItems: serviceItems,
+        ),
+    ];
+    final displayTransaction = primaryTransactions.isNotEmpty
+        ? primaryTransactions.first
+        : paidTransactions.isNotEmpty
+        ? paidTransactions.first
+        : transactions.isNotEmpty
+        ? transactions.first
+        : null;
     return _TimetableEntry(
       id: asString(row['id']),
       therapistId: asString(row['therapistId']),
@@ -948,9 +1097,15 @@ class _TimetableEntry {
           : asString(customer?['phone'], '-'),
       serviceName: serviceName,
       serviceCount: _readServiceCount(row['serviceItems'], serviceName),
+      serviceItems: serviceItems,
+      bookedServiceItems: bookedItems,
+      paidServiceItems: paidItems,
+      transactions: List<Map<String, dynamic>>.unmodifiable(transactions),
       staffName: asString(row['therapistName']).isNotEmpty
           ? asString(row['therapistName'])
           : asString(therapist?['name'], 'Unassigned'),
+      assignmentSource: asString(row['assignmentSource'], 'queue'),
+      requestedGender: asString(row['requestedGender']),
       roomName: asString(row['roomName']).isNotEmpty
           ? asString(row['roomName'])
           : asString(room?['name'], 'Room'),
@@ -967,20 +1122,121 @@ class _TimetableEntry {
       bookedEndTime: _cleanTime(
         asString(row['bookedEndTime'], asString(row['endTime'], '10:00')),
       ),
+      checkedInAt: asDateTime(row['checkedInAt']),
       actualStartedAt: asDateTime(row['actualStartedAt']),
       actualCompletedAt: asDateTime(row['actualCompletedAt']),
       bufferAfterMinutes: asInt(row['bufferAfterMinutes'], 0),
       price: asDouble(row['totalPrice']),
-      receiptNumber: asString(transaction?['receiptNumber']),
-      paymentMethod: asString(transaction?['paymentMethod']),
+      receiptNumber: asString(displayTransaction?['receiptNumber']),
+      paymentMethod: asString(displayTransaction?['paymentMethod']),
       paymentStatus: asString(row['paymentStatus'], 'unpaid'),
-      paidAmount: asDouble(transaction?['totalAmount']),
-      paidServicePrice: asDouble(transaction?['servicePrice']),
-      paidSstAmount: asDouble(transaction?['sstAmount']),
+      paidAmount: paidTransactions.fold<double>(
+        0,
+        (sum, transaction) =>
+            sum +
+            transactionAmountForAppointment(
+              transaction: transaction,
+              appointmentId: appointmentId,
+              fallbackAppointmentItems: serviceItems,
+            ),
+      ),
+      paidServicePrice: paidTransactions.fold<double>(
+        0,
+        (sum, transaction) => sum + asDouble(transaction['servicePrice']),
+      ),
+      paidSstAmount: paidTransactions.fold<double>(
+        0,
+        (sum, transaction) => sum + asDouble(transaction['sstAmount']),
+      ),
       selectedDate: selectedDate,
       lateGraceMinutes: lateGraceMinutes,
       delayWarningMinutes: delayWarningMinutes,
     );
+  }
+
+  String get staffDisplayName {
+    final normalizedType = type.trim().toLowerCase();
+    final isWalkIn =
+        normalizedType == 'walkin' ||
+        normalizedType == 'walk_in' ||
+        normalizedType == 'walk-in';
+    if (actualStartedAt != null ||
+        isWalkIn ||
+        isFixedTherapistAssignmentSource(assignmentSource)) {
+      return staffName;
+    }
+    if (assignmentSource.trim().toLowerCase() == 'gender_preference' &&
+        requestedGender.trim().isNotEmpty) {
+      final gender = requestedGender.trim();
+      return 'Auto assign at start · '
+          '${gender[0].toUpperCase()}${gender.substring(1).toLowerCase()}';
+    }
+    return 'Auto assign at start';
+  }
+
+  List<Map<String, dynamic>> get displayServiceItems {
+    final bookedById = <String, List<Map<String, dynamic>>>{};
+    final paidCounts = <String, int>{};
+    for (final item in bookedServiceItems) {
+      final id = serviceItemId(item);
+      if (id.isNotEmpty) bookedById.putIfAbsent(id, () => []).add(item);
+    }
+    for (final item in paidServiceItems) {
+      final id = serviceItemId(item);
+      if (id.isNotEmpty) paidCounts[id] = (paidCounts[id] ?? 0) + 1;
+    }
+    final hasSnapshot = bookedById.isNotEmpty;
+    return [
+      for (final item in serviceItems)
+        () {
+          final id = serviceItemId(item);
+          final lineType = asString(
+            item['lineType'] ?? item['line_type'],
+          ).toLowerCase();
+          final bookedQueue = bookedById[id];
+          final bookedItem = bookedQueue == null || bookedQueue.isEmpty
+              ? null
+              : bookedQueue.removeAt(0);
+          final category = asString(item['category']).trim().toLowerCase();
+          final categoryIsAddon =
+              category == 'add-ons' ||
+              category == 'add ons' ||
+              category == 'addon' ||
+              category == 'add-on';
+          final categoryIsPackage =
+              category == 'packages' || category == 'package';
+          final isBooked = bookedItem != null;
+          final isAddon =
+              categoryIsAddon ||
+              lineType == 'addon' ||
+              lineType == 'add_on' ||
+              (hasSnapshot && !isBooked && !categoryIsPackage);
+          final paidRemaining = paidCounts[id] ?? 0;
+          if (paidRemaining > 0) paidCounts[id] = paidRemaining - 1;
+          final paid = isBooked ||
+              paidRemaining > 0 ||
+              (hasPayment && !isAddon && !hasSnapshot);
+          final bookedPrice = asDouble(bookedItem?['price']);
+          return {
+            ...item,
+            ...?bookedItem,
+            'name': item['name'],
+            'category': item['category'],
+            'imageUrl': item['imageUrl'],
+            'duration': asInt(
+              bookedItem?['duration'] ?? item['duration'],
+              0,
+            ),
+            'price': bookedPrice > 0 ? bookedPrice : item['price'],
+            'lineType': isAddon
+                ? 'addon'
+                : categoryIsPackage
+                ? 'package'
+                : 'main',
+            'paymentStatus': paid ? 'paid' : 'unpaid',
+          };
+        }(),
+    ];
   }
 
   String get roomDisplayName =>
@@ -1056,9 +1312,8 @@ class _TimetableEntry {
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
   bool get isServiceDateToday =>
       _stripDate(selectedDate) == _stripDate(DateTime.now());
-  bool get canStartService =>
+  bool get canFinalizeAndStart =>
       isServiceDateToday &&
-      hasPayment &&
       actualStartedAt == null &&
       (status == 'pending' || status == 'confirmed');
   bool get canSwitchTherapist =>
@@ -1174,8 +1429,8 @@ class _TimetableEntry {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
     if (started == null || ended == null) return '';
-    return '${DateFormat('HH:mm').format(started)} - '
-        '${DateFormat('HH:mm').format(ended)}';
+    return '${DateFormat('h:mm a').format(started)} - '
+        '${DateFormat('h:mm a').format(ended)}';
   }
 
   String get operationalTimeRange =>
@@ -1184,10 +1439,10 @@ class _TimetableEntry {
       : timeRange;
   String get actualStartLabel => actualStartedAt == null
       ? 'Not started'
-      : DateFormat('HH:mm').format(actualStartedAt!.toLocal());
+      : DateFormat('h:mm a').format(actualStartedAt!.toLocal());
   String get actualCompletedLabel => actualCompletedAt == null
       ? 'Not completed'
-      : DateFormat('HH:mm').format(actualCompletedAt!.toLocal());
+      : DateFormat('h:mm a').format(actualCompletedAt!.toLocal());
   String? get actualServiceCompletionLabel {
     if (actualCompletedAt != null) return 'Completed $actualCompletedLabel';
     return null;
@@ -1250,13 +1505,7 @@ class _TimetableTherapist {
     );
   }
 
-  String get initials {
-    final parts = name.trim().split(RegExp(r'\s+'));
-    if (parts.length >= 2) {
-      return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
-    }
-    return name.isEmpty ? '?' : name[0].toUpperCase();
-  }
+  String get initials => staffInitials(name);
 }
 
 List<_TimetableTherapist> _buildTherapistRows(
@@ -2709,10 +2958,7 @@ class _TimetableOverview extends StatelessWidget {
             else ...[
               for (var i = 0; i < zonesWithUnits.length; i++) ...[
                 groupLabel(zoneHeading(zonesWithUnits[i])),
-                roomUnitRow(
-                  zonesWithUnits[i],
-                  zoneHeading(zonesWithUnits[i]),
-                ),
+                roomUnitRow(zonesWithUnits[i], zoneHeading(zonesWithUnits[i])),
                 if (i != zonesWithUnits.length - 1 || capacityZones.isNotEmpty)
                   const SizedBox(height: 12),
               ],
@@ -3280,7 +3526,7 @@ class _OverviewInProgressCard extends StatelessWidget {
                   const SizedBox(width: 4),
                   Expanded(
                     child: Text(
-                      entry.staffName,
+                      entry.staffDisplayName,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
@@ -6297,7 +6543,7 @@ class _MobileTimelineEntryCard extends StatelessWidget {
   });
 
   String get _resourceLabel =>
-      mode == 'rooms' ? entry.roomDisplayName : entry.staffName;
+      mode == 'rooms' ? entry.roomDisplayName : entry.staffDisplayName;
 
   @override
   Widget build(BuildContext context) {
@@ -6663,7 +6909,7 @@ class _MobileNowMarker extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final label = DateFormat('HH:mm').format(DateTime.now());
+    final label = DateFormat('h:mm a').format(DateTime.now());
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Row(
@@ -6881,7 +7127,9 @@ class _MobileEntryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final style = _statusStyle(entry);
-    final secondary = mode == 'staff' ? entry.roomDisplayName : entry.staffName;
+    final secondary = mode == 'staff'
+        ? entry.roomDisplayName
+        : entry.staffDisplayName;
     return SizedBox(
       width: width,
       child: Material(
@@ -7445,8 +7693,10 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
 
   /// Pricing shown in the popup.
   ///
-  /// Once a bill exists the transaction is the source of truth — it is what the
-  /// customer actually paid, and it is what History and the receipt display.
+  /// Once a bill exists its service and SST components are the source of truth.
+  /// The displayed total is reconciled from those components because older
+  /// online group receipts could store SST while accidentally leaving
+  /// `total_amount` equal to the service-only amount.
   /// `appointments.total_price` is *not* usable here: walk-ins store it net of
   /// SST, so an inclusive outlet would render RM 113.21 for a RM 120 sale.
   ///
@@ -7457,30 +7707,41 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
     final entry = widget.entry;
     final settings = _businessSettings;
     final paid = entry.hasPayment && entry.paidAmount > 0;
-
-    // Inclusive outlets (PV128): the customer-facing figure already contains
-    // the tax, so show it whole with no split.
-    if (settings == null || !settings.sstEnabled || settings.isInclusive) {
-      if (!paid) return null;
-      return PriceBreakdown(
-        servicePrice: entry.paidAmount,
-        sstAmount: 0,
-        totalAmount: entry.paidAmount,
-      );
-    }
-
-    // Exclusive outlets (Taman Wahyu): service price plus SST on top.
     if (paid) {
+      var counterSst = 0.0;
+      for (final transaction in entry.transactions) {
+        if (asString(transaction['paymentStatus']).toLowerCase() != 'paid' ||
+            asString(transaction['paymentMethod']).toLowerCase() == 'billplz') {
+          continue;
+        }
+        final transactionTotal = asDouble(transaction['totalAmount']);
+        if (transactionTotal <= 0) continue;
+        final allocated = transactionAmountForAppointment(
+          transaction: transaction,
+          appointmentId: entry.id,
+          fallbackAppointmentItems: entry.serviceItems,
+        );
+        counterSst +=
+            asDouble(transaction['sstAmount']) * allocated / transactionTotal;
+      }
       return PriceBreakdown(
-        servicePrice: entry.paidServicePrice > 0
-            ? entry.paidServicePrice
-            : entry.paidAmount - entry.paidSstAmount,
-        sstAmount: entry.paidSstAmount,
+        servicePrice: entry.paidAmount - counterSst,
+        sstAmount: counterSst,
         totalAmount: entry.paidAmount,
       );
     }
-    final projected = settings.priceBreakdown(entry.price);
-    return projected.sstAmount > 0 ? projected : null;
+    if (settings == null) return null;
+    return settings.priceBreakdown(
+      entry.price,
+      origin: PaymentOrigin.counter,
+    );
+  }
+
+  bool get _hasPricingMismatch {
+    final breakdown = _pricingBreakdown;
+    return breakdown != null &&
+        widget.entry.hasPayment &&
+        (breakdown.totalAmount - widget.entry.paidAmount).abs() >= 0.01;
   }
 
   Future<void> _run(Future<bool> Function()? action) async {
@@ -7639,41 +7900,39 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
               ),
             ),
             const SizedBox(height: 10),
-            _TimetableServiceDetailCard(
-              entry: entry,
-              accent: accent,
-              sstBreakdown: _pricingBreakdown,
-              sstLabel: _businessSettings?.sstLabel ?? 'SST',
-            ),
+            _TimetableServiceDetailCard(entry: entry, accent: accent),
             _TimetableGrandTotal(
-              total: _pricingBreakdown?.totalAmount ?? entry.price,
+              breakdown:
+                  _pricingBreakdown ??
+                  PriceBreakdown(
+                    servicePrice: entry.price,
+                    sstAmount: 0,
+                    totalAmount: entry.price,
+                  ),
             ),
-            if (entry.hasPayment) ...[
+            if (_hasPricingMismatch) ...[
               const SizedBox(height: 10),
-              _TimetableReceiptCard(
-                entry: entry,
-                onTap: entry.receiptNumber.isEmpty
-                    ? null
-                    : () => showTransactionOrderDetailSheet(
-                        context,
-                        receiptNumber: entry.receiptNumber,
-                      ),
+              _TimetablePricingMismatchCard(
+                recordedTotal: entry.paidAmount,
+                expectedTotal: _pricingBreakdown!.totalAmount,
               ),
             ],
+            if (entry.transactions.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              _TimetableReceiptCard(entry: entry),
+            ],
             const SizedBox(height: 18),
-            if (entry.canStartService || entry.canSwitchTherapist) ...[
-              if (entry.canStartService)
+            if (entry.canFinalizeAndStart || entry.canSwitchTherapist) ...[
+              if (entry.canFinalizeAndStart)
                 _TimetableDetailAction(
-                  icon: entry.isWalkIn
-                      ? Icons.play_arrow_rounded
-                      : Icons.login_rounded,
-                  label: entry.isWalkIn ? 'Start Service' : 'Check In',
+                  icon: Icons.play_arrow_rounded,
+                  label: 'Check In & Start Service',
                   color: const Color(0xFF15803D),
                   filled: true,
                   loading: _saving,
                   onPressed: _saving ? null : () => _run(widget.onStart),
                 ),
-              if (entry.canStartService && entry.canSwitchTherapist)
+              if (entry.canFinalizeAndStart && entry.canSwitchTherapist)
                 const SizedBox(height: 10),
               if (entry.canSwitchTherapist)
                 _TimetableDetailAction(
@@ -7812,29 +8071,44 @@ class _TimetableTimingCard extends StatelessWidget {
                 _TimetableTimingLine(
                   icon: Icons.schedule_outlined,
                   text:
-                      '${entry.bookedTimeRange} - ${_compactDurationLabel(entry.scheduledServiceMinutes)}',
+                      'Scheduled: ${entry.bookedTimeRange} · ${_compactDurationLabel(entry.scheduledServiceMinutes)}',
+                ),
+                const SizedBox(height: 10),
+                _TimetableTimingLine(
+                  icon: Icons.play_circle_outline_rounded,
+                  text:
+                      'Service started: ${_timetableTimingLabel(entry.actualStartedAt, date: entry.selectedDate, empty: 'Not started')}',
+                  color: entry.actualStartedAt == null
+                      ? const Color(0xFF475569)
+                      : const Color(0xFF0F8A5F),
+                ),
+                const SizedBox(height: 10),
+                _TimetableTimingLine(
+                  icon: Icons.flag_outlined,
+                  text:
+                      'Expected end: ${_timetableTimingLabel(entry.endAt, date: entry.selectedDate, empty: 'Not set')}',
                 ),
               ],
             ),
           ),
-          if (entry.actualStartedAt != null)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-              decoration: const BoxDecoration(
-                color: Color(0xFFF0FDF7),
-                borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
-              ),
-              child: _TimetableTimingLine(
-                icon: Icons.play_circle_outline_rounded,
-                text: 'Actual service time: ${entry.actualServiceTimeRange}',
-                color: const Color(0xFF0F8A5F),
-              ),
-            ),
         ],
       ),
     );
   }
+}
+
+String _timetableTimingLabel(
+  DateTime? value, {
+  required DateTime date,
+  required String empty,
+}) {
+  if (value == null) return empty;
+  final local = value.toLocal();
+  final sameDate =
+      local.year == date.year &&
+      local.month == date.month &&
+      local.day == date.day;
+  return DateFormat(sameDate ? 'h:mm a' : 'EEE, h:mm a').format(local);
 }
 
 class _TimetableTimingLine extends StatelessWidget {
@@ -7873,15 +8147,9 @@ class _TimetableServiceDetailCard extends StatelessWidget {
   final _TimetableEntry entry;
   final Color accent;
 
-  /// Non-null only for SST-exclusive outlets; null keeps the original layout.
-  final PriceBreakdown? sstBreakdown;
-  final String sstLabel;
-
   const _TimetableServiceDetailCard({
     required this.entry,
     required this.accent,
-    this.sstBreakdown,
-    this.sstLabel = 'SST',
   });
 
   @override
@@ -7934,19 +8202,6 @@ class _TimetableServiceDetailCard extends StatelessWidget {
                           color: context.appText,
                         ),
                       ),
-                      const SizedBox(height: 3),
-                      Text(
-                        entry.serviceCount > 1
-                            ? '${entry.serviceName} (${entry.serviceCount} services)'
-                            : entry.serviceName,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: context.appMuted,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
                       const SizedBox(height: 7),
                       Wrap(
                         spacing: 10,
@@ -7954,7 +8209,7 @@ class _TimetableServiceDetailCard extends StatelessWidget {
                         children: [
                           _TimetableServiceMeta(
                             icon: Icons.person_outline,
-                            text: entry.staffName,
+                            text: entry.staffDisplayName,
                           ),
                           _TimetableServiceMeta(
                             icon: Icons.meeting_room_outlined,
@@ -7974,30 +8229,17 @@ class _TimetableServiceDetailCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                const Text(
-                  'Pricing',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF0F8A5F),
-                    fontWeight: FontWeight.w900,
+                for (
+                  var itemIndex = 0;
+                  itemIndex < entry.displayServiceItems.length;
+                  itemIndex++
+                ) ...[
+                  _TimetableServiceLineCard(
+                    item: entry.displayServiceItems[itemIndex],
                   ),
-                ),
-                const SizedBox(height: 8),
-                _TimetablePriceRow(
-                  label: 'Service total',
-                  amount: sstBreakdown?.servicePrice ?? entry.price,
-                ),
-                if (sstBreakdown != null && sstBreakdown!.sstAmount > 0)
-                  _TimetablePriceRow(
-                    label: sstLabel,
-                    amount: sstBreakdown!.sstAmount,
-                  ),
-                const Divider(height: 18, color: Color(0xFFE5E7EB)),
-                _TimetablePriceRow(
-                  label: 'Total',
-                  amount: sstBreakdown?.totalAmount ?? entry.price,
-                  emphasized: true,
-                ),
+                  if (itemIndex != entry.displayServiceItems.length - 1)
+                    const SizedBox(height: 10),
+                ],
               ],
             ),
           ),
@@ -8005,6 +8247,133 @@ class _TimetableServiceDetailCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _TimetableServiceLineCard extends StatelessWidget {
+  final Map<String, dynamic> item;
+
+  const _TimetableServiceLineCard({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final isAddon = asString(item['lineType']) == 'addon';
+    final isPackage = asString(item['lineType']) == 'package';
+    final isPaid = asString(item['paymentStatus']) == 'paid';
+    final imageUrl = asString(item['imageUrl'] ?? item['publicImageUrl']);
+    final typeColor = isAddon
+        ? const Color(0xFFC2410C)
+        : isPackage
+        ? const Color(0xFF7C3AED)
+        : const Color(0xFF0369A1);
+    final paymentColor = isPaid
+        ? const Color(0xFF047857)
+        : const Color(0xFFB45309);
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: 54,
+              height: 54,
+              color: const Color(0xFFF1F5F9),
+              child: imageUrl.isEmpty
+                  ? const Icon(Icons.spa_outlined, color: Color(0xFF64748B))
+                  : Image.network(
+                      imageUrl,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => const Icon(
+                        Icons.spa_outlined,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  asString(item['name'], 'Service'),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: context.appText,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      '${asInt(item['duration'], 0)} min',
+                      style: TextStyle(
+                        color: context.appMuted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    _TimetableTextPill(
+                      label: isAddon
+                          ? 'Add-on'
+                          : isPackage
+                          ? 'Package'
+                          : 'Main Service',
+                      color: typeColor,
+                    ),
+                    _TimetableTextPill(
+                      label: isPaid ? 'Paid' : 'Unpaid',
+                      color: paymentColor,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            'RM ${asDouble(item['price']).toStringAsFixed(2)}',
+            style: const TextStyle(
+              color: Color(0xFF0F8A5F),
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableTextPill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _TimetableTextPill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.09),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      label,
+      style: TextStyle(color: color, fontSize: 10.5, fontWeight: FontWeight.w800),
+    ),
+  );
 }
 
 class _TimetableServiceMeta extends StatelessWidget {
@@ -8084,9 +8453,9 @@ class _TimetablePriceRow extends StatelessWidget {
 }
 
 class _TimetableGrandTotal extends StatelessWidget {
-  final double total;
+  final PriceBreakdown breakdown;
 
-  const _TimetableGrandTotal({required this.total});
+  const _TimetableGrandTotal({required this.breakdown});
 
   @override
   Widget build(BuildContext context) {
@@ -8097,31 +8466,65 @@ class _TimetableGrandTotal extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: context.appBorder),
       ),
-      child: Row(
+      child: Column(
         children: [
-          const Text(
-            'Grand Total',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF475569),
-              fontWeight: FontWeight.w900,
+          if (breakdown.sstAmount > 0.005) ...[
+            _TimetablePriceRow(
+              label: 'Subtotal',
+              amount: breakdown.servicePrice,
             ),
+            _TimetablePriceRow(label: 'SST (6%)', amount: breakdown.sstAmount),
+            const Divider(height: 18, color: Color(0xFFE5E7EB)),
+          ],
+          _TimetablePriceRow(
+            label: 'Total',
+            amount: breakdown.totalAmount,
+            emphasized: true,
           ),
-          const SizedBox(width: 14),
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetablePricingMismatchCard extends StatelessWidget {
+  final double recordedTotal;
+  final double expectedTotal;
+
+  const _TimetablePricingMismatchCard({
+    required this.recordedTotal,
+    required this.expectedTotal,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7ED),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: const Color(0xFFFED7AA)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            size: 18,
+            color: Color(0xFFC2410C),
+          ),
+          const SizedBox(width: 9),
           Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  'RM ${total.toStringAsFixed(2)}',
-                  maxLines: 1,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    color: Color(0xFF0F8A5F),
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
+            child: Text(
+              'Pricing mismatch: recorded payment RM '
+              '${recordedTotal.toStringAsFixed(2)}, expected total RM '
+              '${expectedTotal.toStringAsFixed(2)} including SST.',
+              style: const TextStyle(
+                fontSize: 11.5,
+                height: 1.35,
+                color: Color(0xFF9A3412),
+                fontWeight: FontWeight.w700,
               ),
             ),
           ),
@@ -8131,82 +8534,149 @@ class _TimetableGrandTotal extends StatelessWidget {
   }
 }
 
-class _TimetableReceiptCard extends StatelessWidget {
+class _TimetableReceiptCard extends StatefulWidget {
   final _TimetableEntry entry;
-  final VoidCallback? onTap;
 
-  const _TimetableReceiptCard({required this.entry, required this.onTap});
+  const _TimetableReceiptCard({required this.entry});
+
+  @override
+  State<_TimetableReceiptCard> createState() => _TimetableReceiptCardState();
+}
+
+class _TimetableReceiptCardState extends State<_TimetableReceiptCard> {
+  bool _expanded = false;
+
+  List<Map<String, dynamic>> get _transactions {
+    final rows = [...widget.entry.transactions];
+    rows.sort((left, right) {
+      final leftAddon =
+          asString(left['source']).toLowerCase() == 'appointment_addon';
+      final rightAddon =
+          asString(right['source']).toLowerCase() == 'appointment_addon';
+      if (leftAddon != rightAddon) return leftAddon ? 1 : -1;
+      final leftAt = asDateTime(left['createdAt']);
+      final rightAt = asDateTime(right['createdAt']);
+      return (leftAt ?? DateTime.fromMillisecondsSinceEpoch(0)).compareTo(
+        rightAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      );
+    });
+    return rows;
+  }
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: context.appSurface,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        onTap: onTap,
+    final rows = _transactions;
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appSurface,
         borderRadius: BorderRadius.circular(8),
-        child: Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: context.appBorder),
-          ),
-          child: Row(
-            children: [
-              const Icon(
-                Icons.receipt_long_outlined,
-                size: 25,
-                color: Color(0xFF475569),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Payment & Receipt',
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.receipt_long_outlined,
+                    color: Color(0xFF475569),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Text(
+                      'Receipts (${rows.length})',
                       style: TextStyle(
+                        color: context.appText,
                         fontSize: 13,
-                        color: Color(0xFF111827),
                         fontWeight: FontWeight.w900,
                       ),
                     ),
-                    const SizedBox(height: 3),
-                    Text(
-                      'Paid via ${_timetablePaymentLabel(entry.paymentMethod)} - ${entry.paidLabel}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 11.5,
-                        color: Color(0xFF64748B),
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                    if (entry.receiptNumber.isNotEmpty) ...[
-                      const SizedBox(height: 2),
-                      Text(
-                        'Receipt: ${entry.receiptNumber}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          color: Color(0xFF64748B),
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
-                  ],
-                ),
+                  ),
+                  Icon(
+                    _expanded
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                    color: const Color(0xFF64748B),
+                  ),
+                ],
               ),
-              if (onTap != null) ...[
-                const SizedBox(width: 8),
-                const Icon(
-                  Icons.chevron_right_rounded,
-                  color: Color(0xFF94A3B8),
-                ),
-              ],
-            ],
+            ),
           ),
+          if (_expanded) ...[
+            const Divider(height: 1),
+            for (var index = 0; index < rows.length; index++) ...[
+              _TimetableReceiptRow(transaction: rows[index]),
+              if (index != rows.length - 1)
+                const Divider(height: 1, indent: 14, endIndent: 14),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _TimetableReceiptRow extends StatelessWidget {
+  final Map<String, dynamic> transaction;
+
+  const _TimetableReceiptRow({required this.transaction});
+
+  @override
+  Widget build(BuildContext context) {
+    final receipt = asString(transaction['receiptNumber']);
+    final isAddon =
+        asString(transaction['source']).toLowerCase() == 'appointment_addon';
+    final status = asString(transaction['paymentStatus'], 'unpaid');
+    return InkWell(
+      onTap: receipt.isEmpty
+          ? null
+          : () => showTransactionOrderDetailSheet(
+              context,
+              receiptNumber: receipt,
+            ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${isAddon ? 'Add-on' : 'Main'} receipt · ${_timetablePaymentLabel(asString(transaction['paymentMethod']))}',
+                    style: TextStyle(
+                      color: context.appText,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${receipt.isEmpty ? 'No receipt number' : receipt} · ${_titleCase(status)}',
+                    style: TextStyle(
+                      color: context.appMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              'RM ${asDouble(transaction['totalAmount']).toStringAsFixed(2)}',
+              style: const TextStyle(
+                color: Color(0xFF0F8A5F),
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            if (receipt.isNotEmpty)
+              const Icon(Icons.chevron_right_rounded, color: Color(0xFF94A3B8)),
+          ],
         ),
       ),
     );
@@ -8750,7 +9220,9 @@ String _clockLabel(String time) {
   final minutes = _timeToMinutes(time);
   final hour = (minutes ~/ 60) % 24;
   final minute = minutes % 60;
-  return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
+  return DateFormat(
+    'h:mm a',
+  ).format(DateTime(2026, 1, 1, hour, minute));
 }
 
 String _shortClockLabel(String time) {

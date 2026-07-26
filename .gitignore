@@ -102,3 +102,7 @@ project_guide
 docs/
 # Playwright MCP browser snapshots
 .playwright-mcp/
+
+# Local report/package artifacts (keep on disk, never commit)
+Capstone2_Report_Context.md
+phase6b1_corrected_package.zip

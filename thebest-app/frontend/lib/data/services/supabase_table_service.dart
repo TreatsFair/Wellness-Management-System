@@ -6,6 +6,15 @@ const Map<String, String> _snakeToCamelAliases = {
   'appointment_id': 'appointmentId',
   'appointment_date': 'date',
   'appointment_group_id': 'appointmentGroupId',
+  'assignment_source': 'assignmentSource',
+  'therapist_assignment_state': 'therapistAssignmentState',
+  'room_assignment_state': 'roomAssignmentState',
+  'therapist_auto_assigned_at': 'therapistAutoAssignedAt',
+  'resources_confirmed_at': 'resourcesConfirmedAt',
+  'resources_confirmed_by': 'resourcesConfirmedBy',
+  'assignment_last_attempted_at': 'assignmentLastAttemptedAt',
+  'assignment_error_code': 'assignmentErrorCode',
+  'assignment_error_message': 'assignmentErrorMessage',
   'availability_status': 'availabilityStatus',
   'business_name': 'businessName',
   'busy_until': 'busyUntil',
@@ -19,6 +28,8 @@ const Map<String, String> _snakeToCamelAliases = {
   'customer_id': 'customerId',
   'customer_name': 'customerName',
   'customer_phone': 'customerPhone',
+  'guest_name': 'guestName',
+  'guest_phone': 'guestPhone',
   'counter_commission': 'counterCommission',
   'counter_commission_amount': 'counterCommissionAmount',
   'counter_staff_id': 'counterStaffId',
@@ -55,6 +66,11 @@ const Map<String, String> _snakeToCamelAliases = {
   'booked_end_at': 'bookedEndAt',
   'actual_started_at': 'actualStartedAt',
   'actual_completed_at': 'actualCompletedAt',
+  // Migration 122k: check-in is tracked separately from service start. An
+  // appointment can be checked in (status still `confirmed`) well before
+  // `actualStartedAt` is set.
+  'checked_in_at': 'checkedInAt',
+  'checked_in_by': 'checkedInBy',
   'maximum_concurrent_bookings': 'maximumConcurrentBookings',
   'use_custom_hours': 'useCustomHours',
   'online_booking_service_id': 'onlineBookingServiceId',
@@ -63,6 +79,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'is_full_day': 'isFullDay',
   'internal_reason': 'internalReason',
   'is_custom': 'isCustom',
+  'is_closed': 'isClosed',
   'starts_at': 'startsAt',
   'ends_at': 'endsAt',
   'item_count': 'itemCount',
@@ -77,6 +94,8 @@ const Map<String, String> _snakeToCamelAliases = {
   'photo_url': 'photoUrl',
   'profile_image_url': 'profileImageUrl',
   'receipt_number': 'receiptNumber',
+  'requested_therapist_id': 'requestedTherapistId',
+  'requested_gender': 'requestedGender',
   'room_id': 'roomId',
   'room_name': 'roomName',
   'room_unit_id': 'roomUnitId',
@@ -95,6 +114,8 @@ const Map<String, String> _snakeToCamelAliases = {
   'sst_amount': 'sstAmount',
   'sst_enabled': 'sstEnabled',
   'sst_pricing_mode': 'sstPricingMode',
+  'billplz_sst_pricing_mode': 'billplzSstPricingMode',
+  'counter_sst_pricing_mode': 'counterSstPricingMode',
   'sst_rate_percent': 'sstRatePercent',
   'sst_rounding_mode': 'sstRoundingMode',
   'start_at': 'startAt',
@@ -243,6 +264,18 @@ class SupabaseTableService {
     return _toMap(row);
   }
 
+  /// Updates a row and *verifies* that a row was actually written.
+  ///
+  /// The previous implementation fired the update without `.select()` and then
+  /// re-read the row, returning whatever came back. PostgREST answers an UPDATE
+  /// that matches zero rows with `204 No Content` and no error, so an update
+  /// blocked by RLS -- or filtered out by the `outlet_id` scope below -- looked
+  /// identical to a successful one: the caller got the *old* row back and no
+  /// exception. Appointment cancellation and therapist switching both surfaced
+  /// as "nothing happened, no error" because of this.
+  ///
+  /// Using `.select()` makes PostgREST return the updated rows, so an empty
+  /// result is an unambiguous signal that nothing matched.
   Future<Map<String, dynamic>> update(
     String id,
     Map<String, dynamic> values,
@@ -255,10 +288,31 @@ class SupabaseTableService {
         .update(toSupabaseValues(scopedValues))
         .eq('id', id);
     if (_isOutletScoped) query = query.eq('outlet_id', _activeOutletId);
-    await query;
-    final row = await getById(id);
-    if (row != null) return row;
-    return {'id': id, ...values};
+
+    final updated = await query.select();
+    final rows = (updated as List).cast<Object?>();
+
+    if (rows.isEmpty) {
+      // Distinguish "row is not visible//not in this outlet" from "row exists
+      // but the write was rejected", because the two need different fixes.
+      final existing = await getById(id);
+      if (existing == null) {
+        throw StateError(
+          'Update to $tableName $id changed no rows: the row does not exist, '
+          'is not visible under the current row-level security policy, or '
+          'belongs to a different outlet'
+          '${_isOutletScoped ? ' (active outlet: $_activeOutletId)' : ''}.',
+        );
+      }
+      throw StateError(
+        'Update to $tableName $id changed no rows even though the row is '
+        'readable. The write was rejected by row-level security or an outlet '
+        'scope mismatch'
+        '${_isOutletScoped ? ' (active outlet: $_activeOutletId, row outlet: ${existing['outletId']})' : ''}.',
+      );
+    }
+
+    return _toMap(rows.first);
   }
 
   Future<void> delete(String id) async {

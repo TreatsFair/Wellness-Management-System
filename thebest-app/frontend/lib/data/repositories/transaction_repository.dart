@@ -76,6 +76,38 @@ class TransactionRepository {
     return Future.value(const <Map<String, dynamic>>[]);
   }
 
+  Future<List<Map<String, dynamic>>> getLinkedAppointmentTransactionsBatch({
+    Iterable<String> appointmentIds = const [],
+    Iterable<String> appointmentGroupIds = const [],
+  }) async {
+    final ids = appointmentIds.where((id) => id.trim().isNotEmpty).toSet();
+    final groupIds = appointmentGroupIds
+        .where((id) => id.trim().isNotEmpty)
+        .toSet();
+    final results = await Future.wait([
+      _table.findIn('appointment_id', ids.cast<Object>().toList()),
+      _table.findIn(
+        'appointment_group_id',
+        groupIds.cast<Object>().toList(),
+      ),
+    ]);
+    final seen = <String>{};
+    final rows = <Map<String, dynamic>>[];
+    for (final row in [...results[0], ...results[1]]) {
+      final id = row['id']?.toString() ?? '';
+      if (id.isNotEmpty && !seen.add(id)) continue;
+      rows.add(row);
+    }
+    rows.sort((left, right) {
+      final leftAt = asDateTime(left['createdAt']);
+      final rightAt = asDateTime(right['createdAt']);
+      return (leftAt ?? DateTime.fromMillisecondsSinceEpoch(0)).compareTo(
+        rightAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      );
+    });
+    return rows;
+  }
+
   Future<Map<String, dynamic>> createTransaction(Map<String, dynamic> values) {
     return _table.create({
       ...values,

@@ -1,0 +1,4 @@
+-- The linked production migration history already contains version
+-- 20260720080808. Its versioned source is retained in
+-- ../sql/088_per_day_business_hours.sql. Migration 090 is self-contained and
+-- repairs/hardens that first deployment for both production and clean setups.

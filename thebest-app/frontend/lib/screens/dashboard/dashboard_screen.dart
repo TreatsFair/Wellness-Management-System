@@ -8,9 +8,12 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
+import '../../core/services/csp_service.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/auth_repository.dart';
+import '../../data/repositories/business_hours_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/notification_repository.dart';
@@ -98,17 +101,46 @@ class _DashboardStats {
 }
 
 class _TherapistStatus {
+  final String id;
   final String name;
+  final String imageUrl;
   final String status;
   final bool isFree;
   final int doneCount;
+  final int queuePosition;
+
+  /// True for the therapist whose turn is next in the live running queue
+  /// (the first free-now therapist, or the queue head while everyone is busy).
+  /// Drives the "Next" badge.
+  final bool isNext;
 
   const _TherapistStatus({
+    this.id = '',
     required this.name,
+    this.imageUrl = '',
     required this.status,
     required this.isFree,
     required this.doneCount,
+    this.queuePosition = 0,
+    this.isNext = false,
   });
+
+  _TherapistStatus copyWith({
+    String? status,
+    bool? isFree,
+    int? doneCount,
+    int? queuePosition,
+    bool? isNext,
+  }) => _TherapistStatus(
+    id: id,
+    name: name,
+    imageUrl: imageUrl,
+    status: status ?? this.status,
+    isFree: isFree ?? this.isFree,
+    doneCount: doneCount ?? this.doneCount,
+    queuePosition: queuePosition ?? this.queuePosition,
+    isNext: isNext ?? this.isNext,
+  );
 }
 
 class _BusinessProfile {
@@ -257,6 +289,15 @@ String _timeLabel(String value) {
   return DateFormat('h:mm a').format(DateTime(2026, 1, 1, hour, minute));
 }
 
+String _queueReservationLabel(TherapistQueueEntry entry) {
+  final start = entry.reservationStartAt;
+  final end = entry.reservationEndAt;
+  if (start != null && start.isNotEmpty && end != null && end.isNotEmpty) {
+    return 'Reserved ${_timeLabel(start)}–${_timeLabel(end)}';
+  }
+  return 'Reserved until ${_timeLabel(end ?? entry.freeAt ?? '')}';
+}
+
 bool _isCancelled(Map<String, dynamic> data) {
   final status = _asString(data['status']).toLowerCase().trim();
   return status == 'cancelled' || status == 'canceled';
@@ -288,6 +329,35 @@ bool _isVoidedPayment(Map<String, dynamic> data) {
   return _asString(data['paymentStatus']).toLowerCase().trim() == 'voided';
 }
 
+bool _isNoShow(Map<String, dynamic> data) {
+  final status = _asString(data['status']).toLowerCase().trim();
+  return status == 'no_show' || status == 'no-show' || status == 'noshow';
+}
+
+bool _isStartedServiceSession(Map<String, dynamic> data) {
+  return _asDateTime(data['actualStartedAt']) != null &&
+      !_isCancelled(data) &&
+      !_isVoidedPayment(data) &&
+      !_isNoShow(data);
+}
+
+Map<String, int> _startedServiceCounts(
+  Iterable<Map<String, dynamic>> appointments,
+  String dateKey,
+) {
+  final counts = <String, int>{};
+  for (final appointment in appointments) {
+    if (_asString(appointment['date']) != dateKey ||
+        !_isStartedServiceSession(appointment)) {
+      continue;
+    }
+    final therapistId = _asString(appointment['therapistId']);
+    if (therapistId.isEmpty) continue;
+    counts.update(therapistId, (value) => value + 1, ifAbsent: () => 1);
+  }
+  return counts;
+}
+
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
 
@@ -301,10 +371,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final _dashboardRepository = DashboardRepository();
   final _appointmentRepository = AppointmentRepository();
   final _settingsRepository = SettingsRepository();
-  final _businessHoursTable = SupabaseTableService('business_settings');
+
+  final _businessHoursTable = SupabaseTableService('business_hours');
   final _outletsTable = SupabaseTableService('outlets');
   _BusinessProfile _businessProfile = _placeholderBusinessProfile;
   _DashboardData _dashboardData = _DashboardData.empty;
+  List<_TherapistStatus> _therapistStatusSource = [];
   bool _isCurrentUserAdmin = false;
   String _currentUserRole = 'staff';
   String _currentUserEmail = 'No email';
@@ -312,9 +384,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _isLoadingDashboardData = true;
   String? _dashboardError;
   SharedPreferences? _dashboardPreferences;
-  List<_DashboardMainCard> _tabletMainOrder = [
-    ..._defaultTabletMainOrder,
-  ];
+  List<_DashboardMainCard> _tabletMainOrder = [..._defaultTabletMainOrder];
   List<_DashboardMainCard> _phoneMainOrder = [..._defaultPhoneMainOrder];
   List<_DashboardOtherCard> _tabletOtherOrder = [..._defaultOtherOrder];
   List<_DashboardOtherCard> _phoneOtherOrder = [..._defaultOtherOrder];
@@ -327,6 +397,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   List<AppNotification> _startingSoon = [];
   final Set<String> _startingSoonNotified = {};
   Timer? _startingSoonTimer;
+  Timer? _therapistQueueTimer;
+  bool _isRefreshingTherapistQueue = false;
 
   @override
   void initState() {
@@ -341,11 +413,16 @@ class _DashboardScreenState extends State<DashboardScreen> {
       const Duration(minutes: 1),
       (_) => _refreshStartingSoon(),
     );
+    _therapistQueueTimer = Timer.periodic(
+      const Duration(seconds: 30),
+      (_) => unawaited(_refreshTherapistQueueBoard()),
+    );
   }
 
   @override
   void dispose() {
     _startingSoonTimer?.cancel();
+    _therapistQueueTimer?.cancel();
     OutletContext.activeOutletId.removeListener(
       _onOutletChangedForNotifications,
     );
@@ -481,9 +558,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         if (!mounted) return;
         await Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => SalesHistoryScreen(userRole: role),
-          ),
+          MaterialPageRoute(builder: (_) => SalesHistoryScreen(userRole: role)),
         );
       }
     } else {
@@ -502,10 +577,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       await Navigator.push(
         context,
         MaterialPageRoute(
-          builder: (_) => AppointmentsScreen(
-            userRole: role,
-            initialDate: initialDate,
-          ),
+          builder: (_) =>
+              AppointmentsScreen(userRole: role, initialDate: initialDate),
         ),
       );
     }
@@ -593,10 +666,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     return next;
   }
 
-  Future<void> _saveDashboardOrder(
-    String layout,
-    Iterable<Enum> order,
-  ) async {
+  Future<void> _saveDashboardOrder(String layout, Iterable<Enum> order) async {
     final preferences =
         _dashboardPreferences ?? await SharedPreferences.getInstance();
     _dashboardPreferences = preferences;
@@ -607,44 +677,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _reorderTabletMain(String draggedId, String targetId) {
-    final next = _moveDashboardCard(
-      _tabletMainOrder,
-      draggedId,
-      targetId,
-    );
+    final next = _moveDashboardCard(_tabletMainOrder, draggedId, targetId);
     if (identical(next, _tabletMainOrder)) return;
     setState(() => _tabletMainOrder = next);
     unawaited(_saveDashboardOrder('tablet_main', next));
   }
 
   void _reorderPhoneMain(String draggedId, String targetId) {
-    final next = _moveDashboardCard(
-      _phoneMainOrder,
-      draggedId,
-      targetId,
-    );
+    final next = _moveDashboardCard(_phoneMainOrder, draggedId, targetId);
     if (identical(next, _phoneMainOrder)) return;
     setState(() => _phoneMainOrder = next);
     unawaited(_saveDashboardOrder('phone_main', next));
   }
 
   void _reorderTabletOther(String draggedId, String targetId) {
-    final next = _moveDashboardCard(
-      _tabletOtherOrder,
-      draggedId,
-      targetId,
-    );
+    final next = _moveDashboardCard(_tabletOtherOrder, draggedId, targetId);
     if (identical(next, _tabletOtherOrder)) return;
     setState(() => _tabletOtherOrder = next);
     unawaited(_saveDashboardOrder('tablet_other', next));
   }
 
   void _reorderPhoneOther(String draggedId, String targetId) {
-    final next = _moveDashboardCard(
-      _phoneOtherOrder,
-      draggedId,
-      targetId,
-    );
+    final next = _moveDashboardCard(_phoneOtherOrder, draggedId, targetId);
     if (identical(next, _phoneOtherOrder)) return;
     setState(() => _phoneOtherOrder = next);
     unawaited(_saveDashboardOrder('phone_other', next));
@@ -695,8 +749,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         (data) =>
             !_isCancelled(data) &&
             !_isVoidedPayment(data) &&
-            (!_isWalkInAppointment(data) ||
-                _isReservedWalkInAppointment(data)),
+            (!_isWalkInAppointment(data) || _isReservedWalkInAppointment(data)),
       );
       final todayAppointments = activeAppointments
           .where((data) => _asString(data['date']) == todayKey)
@@ -704,6 +757,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       final tomorrowAppointments = activeAppointments
           .where((data) => _asString(data['date']) == tomorrowKey)
           .toList();
+      final serviceCountsByTherapist = _startedServiceCounts(
+        appointments,
+        todayKey,
+      );
       final weekAppointments = activeAppointments.length;
       final doneAppointments = todayAppointments
           .where(
@@ -746,7 +803,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }).length;
 
       final nowMinutes = now.hour * 60 + now.minute;
-      final therapistStatuses = therapistRows.map((data) {
+      // Staff Availability is the therapist queue board -- counter/cashier
+      // staff are not part of the running queue, so keep them out of it.
+      final therapistStatuses = therapistRows.where((data) {
+        final role = _asString(data['role']).toLowerCase();
+        return !role.contains('counter') && !role.contains('cashier');
+      }).map((data) {
         final therapistId = _asString(data['id']);
         final therapistAppointments = todayAppointments
             .where(
@@ -754,28 +816,32 @@ class _DashboardScreenState extends State<DashboardScreen> {
                   _asString(appointment['therapistId']) == therapistId,
             )
             .toList();
-        final doneCount = therapistAppointments
-            .where(
-              (appointment) =>
-                  _asString(appointment['status']).toLowerCase() == 'completed',
-            )
-            .length;
+        final doneCount = serviceCountsByTherapist[therapistId] ?? 0;
         Map<String, dynamic>? currentAppointment;
+        Map<String, dynamic>? nextReservation;
+        var nextReservationStart = 24 * 60 + 1;
         for (final appointment in therapistAppointments) {
           final status = _asString(appointment['status']).toLowerCase();
           if (!_isPendingAppointmentStatus(status)) continue;
-          final actualStart = _asDateTime(appointment['actualStartedAt'])
-              ?.toLocal();
+          final actualStart = _asDateTime(
+            appointment['actualStartedAt'],
+          )?.toLocal();
           final expectedEnd = _asDateTime(appointment['endAt'])?.toLocal();
-          final start = actualStart == null
-              ? _timeToMinutes(_asString(appointment['startTime']))
-              : actualStart.hour * 60 + actualStart.minute;
+          final scheduledStart = _timeToMinutes(
+            _asString(appointment['startTime']),
+          );
           final end = expectedEnd == null
               ? _timeToMinutes(_asString(appointment['endTime']))
               : expectedEnd.hour * 60 + expectedEnd.minute;
-          if (start <= nowMinutes && end > nowMinutes) {
+          if (actualStart != null && end > nowMinutes) {
             currentAppointment = appointment;
             break;
+          }
+          if (actualStart == null &&
+              end > nowMinutes &&
+              scheduledStart < nextReservationStart) {
+            nextReservation = appointment;
+            nextReservationStart = scheduledStart;
           }
         }
 
@@ -792,19 +858,43 @@ class _DashboardScreenState extends State<DashboardScreen> {
             : liveEnd == null
             ? _asString(currentAppointment['endTime'])
             : DateFormat('HH:mm').format(liveEnd);
-        final status = isFree
+        final reservationEnd = nextReservation == null
+            ? ''
+            : _asString(nextReservation['endTime']);
+        final reservationRange = nextReservation == null
+            ? ''
+            : '${_timeLabel(_asString(nextReservation['startTime']))}–${_timeLabel(reservationEnd)}';
+        final status = currentAppointment != null
+            ? endTime.isEmpty
+                  ? 'Busy now'
+                  : 'Busy until ${_timeLabel(endTime)}'
+            : nextReservation != null
+            ? 'Reserved $reservationRange'
+            : isFree
             ? 'Free now'
-            : endTime.isEmpty
-            ? 'Busy now'
-            : 'Busy until ${_timeLabel(endTime)}';
+            : busyUntil.isEmpty
+            ? 'Unavailable now'
+            : 'Unavailable until ${_timeLabel(busyUntil)}';
 
         return _TherapistStatus(
+          id: therapistId,
           name: name,
+          imageUrl: _asString(
+            data['profileImageUrl'],
+            _asString(data['imageUrl']),
+          ),
           status: status,
           isFree: isFree,
           doneCount: doneCount,
         );
       }).toList();
+
+      // Order the staff board by the live running queue and flag whose turn is
+      // next (first free-now in rotation order). Best-effort: if the queue RPC
+      // is unavailable the board just keeps its default order.
+      final orderedTherapistStatuses =
+          await _applyQueueOrder(therapistStatuses) ??
+          const <_TherapistStatus>[];
 
       final transactionData = recentTransactionRows
           .where((data) => _isPaid(data))
@@ -884,9 +974,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       if (!mounted) return;
       setState(() {
+        _therapistStatusSource = therapistStatuses;
         _dashboardData = _DashboardData(
           stats: stats,
-          therapists: therapistStatuses,
+          therapists: orderedTherapistStatuses,
           recentTransactions: recentTransactions,
         );
         _todayAppointmentsCache = todayAppointments;
@@ -899,6 +990,107 @@ class _DashboardScreenState extends State<DashboardScreen> {
         _dashboardError = e.toString();
         _isLoadingDashboardData = false;
       });
+    }
+  }
+
+  /// Sorts the staff board by the live running queue (rotation order) and marks
+  /// the therapist whose turn is next. When nobody is free for the full
+  /// duration window, the first person in rotation remains Next so the board
+  /// never loses the live queue head. Only staff in the current shift-aware
+  /// queue are returned. Best-effort: any RPC failure returns the source list.
+  Future<List<_TherapistStatus>?> _applyQueueOrder(
+    List<_TherapistStatus> statuses,
+  ) async {
+    try {
+      final now = DateTime.now();
+      final queue = await CspService.getTherapistQueue(
+        outletId: OutletContext.activeOutletId.value,
+        date: DateFormat('yyyy-MM-dd').format(now),
+        nowTime: DateFormat('HH:mm:ss').format(now),
+        // The Dashboard has no selected service. A one-minute window answers
+        // the generic question "who is free right now" without hiding staff
+        // near the end of a shift behind an arbitrary 60-minute assumption.
+        duration: 1,
+      );
+      if (queue.isEmpty) return const <_TherapistStatus>[];
+
+      final rankById = <String, int>{};
+      String? nextId;
+      for (var i = 0; i < queue.length; i++) {
+        rankById[queue[i].therapistId] = i;
+        if (nextId == null && queue[i].isRecommended) {
+          nextId = queue[i].therapistId;
+        }
+      }
+      nextId ??= queue.first.therapistId;
+
+      final statusById = {for (final status in statuses) status.id: status};
+      final ordered = <_TherapistStatus>[];
+      for (final entry in queue) {
+        final status = statusById[entry.therapistId];
+        if (status == null) continue;
+        ordered.add(
+          status.copyWith(
+            status: entry.isFreeNow
+                ? status.status.startsWith('Reserved ')
+                      ? status.status
+                      : 'Free now'
+                : entry.isReserved || entry.isTentativeHold
+                ? status.status.startsWith('Reserved ')
+                      ? status.status
+                      : _queueReservationLabel(entry)
+                : entry.freeAt == null || entry.freeAt!.isEmpty
+                ? 'Busy now'
+                : 'Busy until ${_timeLabel(entry.freeAt!)}',
+            isFree: entry.isFreeNow,
+            isNext: entry.therapistId == nextId,
+          ),
+        );
+      }
+      ordered.sort((a, b) {
+        if (a.isNext != b.isNext) return a.isNext ? -1 : 1;
+        if (a.isFree != b.isFree) return a.isFree ? -1 : 1;
+        return (rankById[a.id] ?? 9999).compareTo(rankById[b.id] ?? 9999);
+      });
+      return [
+        for (var index = 0; index < ordered.length; index++)
+          ordered[index].copyWith(queuePosition: index + 1),
+      ];
+    } catch (error) {
+      debugPrint('Unable to apply live therapist queue order: $error');
+      return null;
+    }
+  }
+
+  Future<void> _refreshTherapistQueueBoard() async {
+    if (_isRefreshingTherapistQueue || _therapistStatusSource.isEmpty) {
+      return;
+    }
+    _isRefreshingTherapistQueue = true;
+    try {
+      final now = DateTime.now();
+      final todayKey = _dateKey(now);
+      final appointmentRows = await _dashboardRepository.appointmentsForDate(
+        todayKey,
+      );
+      final counts = _startedServiceCounts(appointmentRows, todayKey);
+      final updatedSource = [
+        for (final therapist in _therapistStatusSource)
+          therapist.copyWith(doneCount: counts[therapist.id] ?? 0),
+      ];
+      final therapists = await _applyQueueOrder(updatedSource);
+      if (therapists == null) return;
+      if (!mounted) return;
+      setState(() {
+        _therapistStatusSource = updatedSource;
+        _dashboardData = _DashboardData(
+          stats: _dashboardData.stats,
+          therapists: therapists,
+          recentTransactions: _dashboardData.recentTransactions,
+        );
+      });
+    } finally {
+      _isRefreshingTherapistQueue = false;
     }
   }
 
@@ -959,8 +1151,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     try {
       final hourRows = await _businessHoursTable.findBy(
-        'outlet_id',
-        activeOutlet.id,
+        'day_of_week',
+        DateTime.now().weekday % 7,
         limit: 1,
       );
       final hours = hourRows.isEmpty ? null : hourRows.first;
@@ -1038,24 +1230,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
         'address': profile.location,
       });
 
-      final hourRows = await _businessHoursTable.findBy(
-        'outlet_id',
-        profile.outletId,
-        limit: 1,
-      );
-      if (hourRows.isEmpty) {
-        await _businessHoursTable.create({
-          'outletId': profile.outletId,
-          'openTime': profile.openTime,
-          'closeTime': profile.closeTime,
-        });
-      } else {
-        await _businessHoursTable.update(_asString(hourRows.first['id']), {
-          'openTime': profile.openTime,
-          'closeTime': profile.closeTime,
-        });
-      }
-
       if (!mounted) return;
       setState(() {
         _businessProfile = profile.copyWith(
@@ -1103,6 +1277,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     await _loadDashboardData();
   }
 
+  Future<void> _openTodayQueueManager() async {
+    final changed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _TodayQueueManagementDialog(
+        outletId: OutletContext.activeOutletId.value,
+      ),
+    );
+    if (changed == true) {
+      await _loadDashboardData(showSpinner: false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final isTablet = _isTablet(context);
@@ -1120,6 +1307,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 notificationCount: _unreadNotifications + _startingSoon.length,
                 onOpenNotifications: _openNotificationCenter,
                 onRefreshDashboard: _loadDashboardData,
+                onManageTodayQueue: _openTodayQueueManager,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
                 mainOrder: _tabletMainOrder,
@@ -1138,6 +1326,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
                 notificationCount: _unreadNotifications + _startingSoon.length,
                 onOpenNotifications: _openNotificationCenter,
                 onRefreshDashboard: _loadDashboardData,
+                onManageTodayQueue: _openTodayQueueManager,
                 onOpenSettings: _openBusinessSettings,
                 onSwitchOutlet: _switchOutlet,
                 mainOrder: _phoneMainOrder,
@@ -1164,6 +1353,7 @@ class _TabletLayout extends StatelessWidget {
   final int notificationCount;
   final VoidCallback onOpenNotifications;
   final Future<void> Function() onRefreshDashboard;
+  final VoidCallback onManageTodayQueue;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
   final List<_DashboardMainCard> mainOrder;
@@ -1182,6 +1372,7 @@ class _TabletLayout extends StatelessWidget {
     required this.notificationCount,
     required this.onOpenNotifications,
     required this.onRefreshDashboard,
+    required this.onManageTodayQueue,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
     required this.mainOrder,
@@ -1190,10 +1381,7 @@ class _TabletLayout extends StatelessWidget {
     required this.onReorderOther,
   });
 
-  Widget _buildMainCard(
-    BuildContext context,
-    _DashboardMainCard card,
-  ) {
+  Widget _buildMainCard(BuildContext context, _DashboardMainCard card) {
     final child = switch (card) {
       _DashboardMainCard.quickBook => _TabletQuickBookCard(
         role: role,
@@ -1229,10 +1417,7 @@ class _TabletLayout extends StatelessWidget {
     );
   }
 
-  Widget _buildOtherCard(
-    BuildContext context,
-    _DashboardOtherCard card,
-  ) {
+  Widget _buildOtherCard(BuildContext context, _DashboardOtherCard card) {
     final child = switch (card) {
       _DashboardOtherCard.history => _TabletOtherCard(
         icon: Icons.history_outlined,
@@ -1241,9 +1426,7 @@ class _TabletLayout extends StatelessWidget {
         iconColor: const Color(0xFF5BA4B5),
         onTap: () => Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => SalesHistoryScreen(userRole: role),
-          ),
+          MaterialPageRoute(builder: (_) => SalesHistoryScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.members => _TabletOtherCard(
@@ -1263,9 +1446,7 @@ class _TabletLayout extends StatelessWidget {
         iconColor: const Color(0xFF4CAF50),
         onTap: () => Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => ManagementScreen(userRole: role),
-          ),
+          MaterialPageRoute(builder: (_) => ManagementScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.reports => _TabletOtherCard(
@@ -1300,10 +1481,7 @@ class _TabletLayout extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final visibleOtherOrder = otherOrder
-        .where(
-          (card) =>
-              role == 'admin' || card != _DashboardOtherCard.reports,
-        )
+        .where((card) => role == 'admin' || card != _DashboardOtherCard.reports)
         .toList();
     return Column(
       children: [
@@ -1339,7 +1517,11 @@ class _TabletLayout extends StatelessWidget {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      for (var index = 0; index < mainOrder.length; index++) ...[
+                      for (
+                        var index = 0;
+                        index < mainOrder.length;
+                        index++
+                      ) ...[
                         if (index > 0) const SizedBox(width: 16),
                         Expanded(
                           child: _buildMainCard(context, mainOrder[index]),
@@ -1351,13 +1533,10 @@ class _TabletLayout extends StatelessWidget {
 
                 const SizedBox(height: 32),
 
-                // Staff availability gets its own full-width section so
-                // every therapist is readable at a glance.
-                const _SectionLabel('Staff Availability'),
-                const SizedBox(height: 12),
                 _TabletStaffAvailabilityCard(
                   therapists: dashboardData.therapists,
                   isLoading: isLoadingDashboard,
+                  onManageTodayQueue: onManageTodayQueue,
                 ),
 
                 const SizedBox(height: 32),
@@ -1492,7 +1671,6 @@ class _DashboardTopBar extends StatelessWidget {
       ),
     );
   }
-
 
   @override
   Widget build(BuildContext context) {
@@ -1814,25 +1992,17 @@ class _TabletAppointmentCard extends StatelessWidget {
 class _TabletStaffAvailabilityCard extends StatelessWidget {
   final List<_TherapistStatus> therapists;
   final bool isLoading;
+  final VoidCallback onManageTodayQueue;
 
   const _TabletStaffAvailabilityCard({
     required this.therapists,
     required this.isLoading,
+    required this.onManageTodayQueue,
   });
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => const TherapistAvailabilityScreen(),
-          ),
-        ),
-        borderRadius: BorderRadius.circular(16),
-        child: _TabletCard(
+    return _TabletCard(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1853,22 +2023,34 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  const Text(
-                    'View all',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: Color(0xFF1B6B72),
+                  TextButton.icon(
+                    onPressed: onManageTodayQueue,
+                    icon: const Icon(Icons.tune_rounded, size: 16),
+                    label: const Text("Manage today's queue"),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF1B6B72),
+                      visualDensity: VisualDensity.compact,
                     ),
                   ),
-                  const Icon(
-                    Icons.chevron_right,
-                    size: 18,
-                    color: Color(0xFF1B6B72),
+                  const SizedBox(width: 4),
+                  TextButton(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const TherapistAvailabilityScreen(),
+                      ),
+                    ),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFF1B6B72),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('View all'),
                   ),
                 ],
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 12),
+              _LiveTherapistQueueSummary(therapists: therapists),
+              const SizedBox(height: 12),
               if (isLoading)
                 const Text(
                   'Loading staff status',
@@ -1876,39 +2058,21 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                 )
               else if (therapists.isEmpty)
                 const Text(
-                  'No staff yet',
+                  'No therapist is in the live queue right now',
                   style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
                 )
               else
                 LayoutBuilder(
                   builder: (context, constraints) {
-                    const gap = 24.0;
-                    final columnWidth = (constraints.maxWidth - gap) / 2;
-                    return Wrap(
-                      spacing: gap,
-                      runSpacing: 14,
-                      children: [
-                        for (final therapist in therapists)
-                          SizedBox(
-                            width: columnWidth,
-                            child: _TherapistRow(
-                              name: therapist.name,
-                              status: therapist.status,
-                              statusColor: therapist.isFree
-                                  ? const Color(0xFF4CAF50)
-                                  : const Color(0xFFF59E0B),
-                              done: '${therapist.doneCount} done',
-                            ),
-                          ),
-                      ],
+                    return _TherapistQueueGrid(
+                      therapists: therapists,
+                      twoColumns: constraints.maxWidth >= 680,
                     );
                   },
                 ),
             ],
           ),
-        ),
-      ),
-    );
+        );
   }
 }
 
@@ -1969,6 +2133,7 @@ class _PhoneLayout extends StatelessWidget {
   final int notificationCount;
   final VoidCallback onOpenNotifications;
   final Future<void> Function() onRefreshDashboard;
+  final VoidCallback onManageTodayQueue;
   final VoidCallback onOpenSettings;
   final Future<void> Function(String) onSwitchOutlet;
   final List<_DashboardMainCard> mainOrder;
@@ -1987,6 +2152,7 @@ class _PhoneLayout extends StatelessWidget {
     required this.notificationCount,
     required this.onOpenNotifications,
     required this.onRefreshDashboard,
+    required this.onManageTodayQueue,
     required this.onOpenSettings,
     required this.onSwitchOutlet,
     required this.mainOrder,
@@ -1995,10 +2161,7 @@ class _PhoneLayout extends StatelessWidget {
     required this.onReorderOther,
   });
 
-  Widget _buildMainCard(
-    BuildContext context,
-    _DashboardMainCard card,
-  ) {
+  Widget _buildMainCard(BuildContext context, _DashboardMainCard card) {
     final child = switch (card) {
       _DashboardMainCard.appointments => _PhoneAppointmentCard(
         role: role,
@@ -2029,10 +2192,7 @@ class _PhoneLayout extends StatelessWidget {
     );
   }
 
-  Widget _buildOtherCard(
-    BuildContext context,
-    _DashboardOtherCard card,
-  ) {
+  Widget _buildOtherCard(BuildContext context, _DashboardOtherCard card) {
     final child = switch (card) {
       _DashboardOtherCard.history => _PhoneOtherCard(
         icon: Icons.history_outlined,
@@ -2041,9 +2201,7 @@ class _PhoneLayout extends StatelessWidget {
         iconColor: const Color(0xFF5BA4B5),
         onTap: () => Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => SalesHistoryScreen(userRole: role),
-          ),
+          MaterialPageRoute(builder: (_) => SalesHistoryScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.members => _PhoneOtherCard(
@@ -2063,9 +2221,7 @@ class _PhoneLayout extends StatelessWidget {
         iconColor: const Color(0xFF4CAF50),
         onTap: () => Navigator.push(
           context,
-          MaterialPageRoute(
-            builder: (_) => ManagementScreen(userRole: role),
-          ),
+          MaterialPageRoute(builder: (_) => ManagementScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.reports => _PhoneOtherCard(
@@ -2131,8 +2287,7 @@ class _PhoneLayout extends StatelessWidget {
 
                 _DashboardCardGrid(
                   children: [
-                    for (final card in mainOrder)
-                      _buildMainCard(context, card),
+                    for (final card in mainOrder) _buildMainCard(context, card),
                   ],
                 ),
 
@@ -2149,12 +2304,11 @@ class _PhoneLayout extends StatelessWidget {
                 const SizedBox(height: 24),
 
                 // ── Staff Status section ──────────────────────
-                const _SectionLabel('Staff Status'),
-                const SizedBox(height: 12),
                 _PhoneStaffStatusCard(
                   role: role,
                   therapists: dashboardData.therapists,
                   isLoading: isLoadingDashboard,
+                  onManageTodayQueue: onManageTodayQueue,
                 ),
 
                 const SizedBox(height: 24),
@@ -2216,8 +2370,7 @@ class _ReorderableDashboardCard extends StatelessWidget {
       builder: (context, constraints) {
         return DragTarget<String>(
           onWillAcceptWithDetails: (details) =>
-              details.data.startsWith('$group:') &&
-              details.data != _dragData,
+              details.data.startsWith('$group:') && details.data != _dragData,
           onAcceptWithDetails: (details) {
             onReorder(details.data.substring(group.length + 1), id);
           },
@@ -2676,11 +2829,13 @@ class _PhoneStaffStatusCard extends StatelessWidget {
   final String role;
   final List<_TherapistStatus> therapists;
   final bool isLoading;
+  final VoidCallback onManageTodayQueue;
 
   const _PhoneStaffStatusCard({
     required this.role,
     required this.therapists,
     required this.isLoading,
+    required this.onManageTodayQueue,
   });
 
   @override
@@ -2690,7 +2845,6 @@ class _PhoneStaffStatusCard extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
                 'Staff Today',
@@ -2700,25 +2854,35 @@ class _PhoneStaffStatusCard extends StatelessWidget {
                   color: context.appText,
                 ),
               ),
-              GestureDetector(
-                onTap: () => Navigator.push(
+              const Spacer(),
+              IconButton(
+                tooltip: "Manage today's queue",
+                onPressed: onManageTodayQueue,
+                visualDensity: VisualDensity.compact,
+                icon: const Icon(
+                  Icons.tune_rounded,
+                  size: 19,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
+              TextButton(
+                onPressed: () => Navigator.push(
                   context,
                   MaterialPageRoute(
                     builder: (_) => const TherapistAvailabilityScreen(),
                   ),
                 ),
-                child: const Text(
-                  'View All',
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF1B6B72),
-                    fontWeight: FontWeight.w500,
-                  ),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  foregroundColor: const Color(0xFF1B6B72),
                 ),
+                child: const Text('View all'),
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 10),
+          _LiveTherapistQueueSummary(therapists: therapists, compact: true),
+          const SizedBox(height: 10),
           if (isLoading)
             const Text(
               'Loading staff status',
@@ -2726,23 +2890,900 @@ class _PhoneStaffStatusCard extends StatelessWidget {
             )
           else if (therapists.isEmpty)
             const Text(
-              'No staff yet',
+              'No therapist is in the live queue right now',
               style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
             )
           else
-            for (final therapist in therapists) ...[
-              _TherapistRow(
-                name: therapist.name,
-                status: therapist.status,
-                statusColor: therapist.isFree
-                    ? const Color(0xFF4CAF50)
-                    : const Color(0xFFF59E0B),
-                done: '${therapist.doneCount} done',
-              ),
-              if (therapist != therapists.last)
-                const Divider(height: 16, color: Color(0xFFF0F0F0)),
-            ],
+            _TherapistQueueGrid(therapists: therapists, twoColumns: false),
         ],
+      ),
+    );
+  }
+}
+
+class _TodayQueueManagementDialog extends StatefulWidget {
+  const _TodayQueueManagementDialog({required this.outletId});
+
+  final String outletId;
+
+  @override
+  State<_TodayQueueManagementDialog> createState() =>
+      _TodayQueueManagementDialogState();
+}
+
+class _TodayQueueManagementDialogState
+    extends State<_TodayQueueManagementDialog> {
+  TodayQueueManagement? _queue;
+  bool _loading = true;
+  bool _saving = false;
+  bool _changed = false;
+  String? _error;
+
+  String get _today => DateFormat('yyyy-MM-dd').format(DateTime.now());
+  String get _nowTime => DateFormat('HH:mm:ss').format(DateTime.now());
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    try {
+      final queue = await CspService.getTodayQueueManagement(
+        outletId: widget.outletId,
+        date: _today,
+        nowTime: _nowTime,
+      );
+      if (!mounted) return;
+      setState(() {
+        _queue = queue;
+        _loading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _error = error.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  Future<void> _runChange(Future<void> Function() action) async {
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    try {
+      await action();
+      _changed = true;
+      await _load();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _error = error.toString());
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  Future<void> _changeStarter() async {
+    final queue = _queue;
+    if (queue == null || queue.liveQueue.isEmpty) return;
+    final reasonController = TextEditingController();
+    var selectedId = queue.starter?.therapistId ?? '';
+    final request = await showDialog<_StarterQueueRequest>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text("Change today's starter"),
+          content: SizedBox(
+            width: 520,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Choose from therapists who are active, scheduled and currently on shift.',
+                    style: TextStyle(color: Color(0xFF64748B), height: 1.4),
+                  ),
+                  if (queue.requiresResetWarning) ...[
+                    const SizedBox(height: 14),
+                    const _QueueResetWarning(),
+                  ],
+                  const SizedBox(height: 14),
+                  for (final therapist in queue.liveQueue) ...[
+                    _QueueChoiceTile(
+                      therapist: therapist,
+                      selected: therapist.therapistId == selectedId,
+                      onTap: () => setDialogState(
+                        () => selectedId = therapist.therapistId,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                  ],
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: reasonController,
+                    maxLength: 500,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      labelText: 'Reason (optional)',
+                      hintText: 'Why is today starting differently?',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: selectedId.isEmpty
+                  ? null
+                  : () => Navigator.pop(
+                      dialogContext,
+                      _StarterQueueRequest(
+                        therapistId: selectedId,
+                        reason: reasonController.text,
+                        confirmReset: queue.requiresResetWarning,
+                      ),
+                    ),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF1B6B72),
+              ),
+              child: Text(
+                queue.requiresResetWarning
+                    ? 'Reset and change starter'
+                    : 'Change starter',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    reasonController.dispose();
+    if (request == null) return;
+    await _runChange(
+      () => CspService.changeTodayQueueStarter(
+        outletId: widget.outletId,
+        date: _today,
+        therapistId: request.therapistId,
+        reason: request.reason,
+        confirmReset: request.confirmReset,
+      ),
+    );
+  }
+
+  Future<void> _reorderQueue() async {
+    final queue = _queue;
+    if (queue == null || queue.liveQueue.length < 2) return;
+    final reordered = [...queue.liveQueue];
+    final request = await showDialog<_ReorderQueueRequest>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Text('Reorder current live queue'),
+          content: SizedBox(
+            width: 520,
+            height: 470,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Drag the currently on-shift therapists into the order the counter should follow.',
+                  style: TextStyle(color: Color(0xFF64748B), height: 1.4),
+                ),
+                const SizedBox(height: 14),
+                Expanded(
+                  child: ReorderableListView.builder(
+                    buildDefaultDragHandles: false,
+                    itemCount: reordered.length,
+                    onReorderItem: (oldIndex, newIndex) {
+                      setDialogState(() {
+                        final moved = reordered.removeAt(oldIndex);
+                        reordered.insert(newIndex, moved);
+                      });
+                    },
+                    itemBuilder: (context, index) {
+                      final therapist = reordered[index];
+                      return Padding(
+                        key: ValueKey(therapist.therapistId),
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _QueueReorderTile(
+                          therapist: therapist,
+                          dragHandle: ReorderableDragStartListener(
+                            index: index,
+                            child: const Padding(
+                              padding: EdgeInsets.all(10),
+                              child: Icon(
+                                Icons.drag_indicator_rounded,
+                                color: Color(0xFF64748B),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(
+                dialogContext,
+                _ReorderQueueRequest(
+                  therapistIds: [
+                    for (final therapist in reordered)
+                      therapist.therapistId,
+                  ],
+                ),
+              ),
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFF1B6B72),
+              ),
+              child: const Text('Save live order'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (request == null) return;
+    await _runChange(
+      () => CspService.reorderCurrentTherapistQueue(
+        outletId: widget.outletId,
+        date: _today,
+        therapistIds: request.therapistIds,
+      ),
+    );
+  }
+
+  Future<void> _resetAutomatic() async {
+    final queue = _queue;
+    if (queue == null) return;
+    final reasonController = TextEditingController();
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reset to automatic starter?'),
+        content: SizedBox(
+          width: 460,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                "Today's starter will be recalculated from the previous operating day's stored starter.",
+                style: TextStyle(color: Color(0xFF64748B), height: 1.4),
+              ),
+              if (queue.requiresResetWarning) ...[
+                const SizedBox(height: 14),
+                const _QueueResetWarning(),
+              ],
+              const SizedBox(height: 16),
+              TextField(
+                controller: reasonController,
+                maxLength: 500,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Reason (optional)',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(
+              backgroundColor: const Color(0xFF1B6B72),
+            ),
+            child: Text(
+              queue.requiresResetWarning
+                  ? 'Reset live order'
+                  : 'Reset to automatic',
+            ),
+          ),
+        ],
+      ),
+    );
+    final reason = reasonController.text;
+    reasonController.dispose();
+    if (confirmed != true) return;
+    await _runChange(
+      () => CspService.resetTodayQueueToAutomatic(
+        outletId: widget.outletId,
+        date: _today,
+        reason: reason,
+        confirmReset: queue.requiresResetWarning,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final queue = _queue;
+    return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 24),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 720, maxHeight: 760),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(24, 20, 24, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFE8F5F5),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.tune_rounded,
+                      color: Color(0xFF1B6B72),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  const Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          "Manage today's queue",
+                          style: TextStyle(
+                            fontSize: 20,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        SizedBox(height: 2),
+                        Text(
+                          '',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Close',
+                    onPressed: _saving
+                        ? null
+                        : () => Navigator.pop(context, _changed),
+                    icon: const Icon(Icons.close_rounded),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              if (_loading)
+                const Expanded(
+                  child: Center(child: CircularProgressIndicator()),
+                )
+              else if (queue == null)
+                Expanded(
+                  child: Center(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text("Unable to load today's queue."),
+                        const SizedBox(height: 10),
+                        OutlinedButton(
+                          onPressed: _load,
+                          child: const Text('Retry'),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _TodayQueueOverview(queue: queue),
+                        if (_error != null) ...[
+                          const SizedBox(height: 12),
+                          _QueueDialogError(message: _error!),
+                        ],
+                        const SizedBox(height: 18),
+                        _QueueManagementAction(
+                          icon: Icons.person_pin_circle_outlined,
+                          title: "Change today's starter",
+                          subtitle:
+                              'Choose a different scheduled, on-shift therapist.',
+                          onTap: _saving ? null : _changeStarter,
+                        ),
+                        const SizedBox(height: 10),
+                        _QueueManagementAction(
+                          icon: Icons.swap_vert_rounded,
+                          title: 'Reorder current live queue',
+                          subtitle:
+                              'Drag the visible live queue into a new today-only order.',
+                          onTap: _saving || queue.liveQueue.length < 2
+                              ? null
+                              : _reorderQueue,
+                        ),
+                        const SizedBox(height: 10),
+                        _QueueManagementAction(
+                          icon: Icons.restart_alt_rounded,
+                          title: 'Reset',
+                          subtitle:
+                              "Reset to use the original numbered order queue.",
+                          onTap: _saving ? null : _resetAutomatic,
+                        ),
+                        if (_saving) ...[
+                          const SizedBox(height: 16),
+                          const LinearProgressIndicator(minHeight: 2),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _StarterQueueRequest {
+  const _StarterQueueRequest({
+    required this.therapistId,
+    required this.reason,
+    required this.confirmReset,
+  });
+
+  final String therapistId;
+  final String reason;
+  final bool confirmReset;
+}
+
+class _ReorderQueueRequest {
+  const _ReorderQueueRequest({required this.therapistIds});
+
+  final List<String> therapistIds;
+}
+
+class _TodayQueueOverview extends StatelessWidget {
+  const _TodayQueueOverview({required this.queue});
+
+  final TodayQueueManagement queue;
+
+  @override
+  Widget build(BuildContext context) {
+    final changedAt = queue.changedAt?.toLocal();
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.appSurfaceRaised,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: 20,
+            runSpacing: 14,
+            children: [
+              _QueueOverviewPerson(
+                label: 'Stored starter',
+                therapist: queue.starter,
+              ),
+              _QueueOverviewPerson(
+                label: 'Current live Next',
+                therapist: queue.currentNext,
+                showNext: true,
+              ),
+              _QueueOverviewStatus(
+                isManual: queue.isManualOverride,
+                changedAt: changedAt,
+              ),
+            ],
+          ),
+          if ((queue.reason ?? '').trim().isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Text(
+              'Reason: ${queue.reason!.trim()}',
+              style: TextStyle(
+                fontSize: 11.5,
+                color: context.appMuted,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _QueueOverviewPerson extends StatelessWidget {
+  const _QueueOverviewPerson({
+    required this.label,
+    required this.therapist,
+    this.showNext = false,
+  });
+
+  final String label;
+  final TodayQueueTherapist? therapist;
+  final bool showNext;
+
+  @override
+  Widget build(BuildContext context) {
+    final person = therapist;
+    return SizedBox(
+      width: 190,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(fontSize: 10.5, color: context.appMuted),
+          ),
+          const SizedBox(height: 7),
+          Row(
+            children: [
+              _TodayQueueAvatar(therapist: person, size: 34),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  person?.name ?? 'Not set',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: context.appText,
+                  ),
+                ),
+              ),
+              if (showNext && person != null)
+                const Padding(
+                  padding: EdgeInsets.only(left: 5),
+                  child: Icon(
+                    Icons.auto_awesome,
+                    size: 15,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QueueOverviewStatus extends StatelessWidget {
+  const _QueueOverviewStatus({
+    required this.isManual,
+    required this.changedAt,
+  });
+
+  final bool isManual;
+  final DateTime? changedAt;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 190,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Starter source',
+            style: TextStyle(fontSize: 10.5, color: context.appMuted),
+          ),
+          const SizedBox(height: 7),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+            decoration: BoxDecoration(
+              color: isManual
+                  ? const Color(0xFFFFF7ED)
+                  : const Color(0xFFECFDF3),
+              borderRadius: BorderRadius.circular(999),
+            ),
+            child: Text(
+              isManual ? 'Manual override' : 'Automatic',
+              style: TextStyle(
+                fontSize: 10.5,
+                fontWeight: FontWeight.w800,
+                color: isManual
+                    ? const Color(0xFFB45309)
+                    : const Color(0xFF15803D),
+              ),
+            ),
+          ),
+          if (changedAt != null) ...[
+            const SizedBox(height: 5),
+            Text(
+              'Changed ${DateFormat('h:mm a').format(changedAt!)}',
+              style: TextStyle(fontSize: 10, color: context.appMuted),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _QueueManagementAction extends StatelessWidget {
+  const _QueueManagementAction({
+    required this.icon,
+    required this.title,
+    required this.subtitle,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String subtitle;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: context.appSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: context.appBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
+          child: Row(
+            children: [
+              Icon(icon, color: const Color(0xFF1B6B72), size: 21),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w800,
+                        color: context.appText,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: context.appMuted,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(
+                Icons.chevron_right_rounded,
+                color: Color(0xFF94A3B8),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueChoiceTile extends StatelessWidget {
+  const _QueueChoiceTile({
+    required this.therapist,
+    required this.selected,
+    required this.onTap,
+  });
+
+  final TodayQueueTherapist therapist;
+  final bool selected;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: selected ? const Color(0xFFE8F5F5) : Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(11),
+        side: BorderSide(
+          color: selected
+              ? const Color(0xFF1B6B72)
+              : const Color(0xFFE2E8F0),
+        ),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.all(10),
+          child: Row(
+            children: [
+              _TodayQueueAvatar(therapist: therapist, size: 38),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  therapist.name,
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+              ),
+              Icon(
+                selected ? Icons.check_circle : Icons.circle_outlined,
+                color: selected
+                    ? const Color(0xFF1B6B72)
+                    : const Color(0xFFCBD5E1),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QueueReorderTile extends StatelessWidget {
+  const _QueueReorderTile({
+    required this.therapist,
+    required this.dragHandle,
+  });
+
+  final TodayQueueTherapist therapist;
+  final Widget dragHandle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 8, 4, 8),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        children: [
+          _TodayQueueAvatar(therapist: therapist, size: 38),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              therapist.name,
+              style: const TextStyle(fontWeight: FontWeight.w700),
+            ),
+          ),
+          dragHandle,
+        ],
+      ),
+    );
+  }
+}
+
+class _TodayQueueAvatar extends StatelessWidget {
+  const _TodayQueueAvatar({required this.therapist, required this.size});
+
+  final TodayQueueTherapist? therapist;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final person = therapist;
+    final fallback = Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Color(0xFFE8F5F5),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        staffInitials(person?.name ?? '?'),
+        style: TextStyle(
+          fontSize: size * 0.3,
+          fontWeight: FontWeight.w800,
+          color: const Color(0xFF1B6B72),
+        ),
+      ),
+    );
+    final imageUrl = person?.profileImageUrl.trim() ?? '';
+    if (imageUrl.isEmpty) return fallback;
+    return ClipOval(
+      child: CachedNetworkImage(
+        imageUrl: imageUrl,
+        width: size,
+        height: size,
+        fit: BoxFit.cover,
+        placeholder: (_, _) => fallback,
+        errorWidget: (_, _, _) => fallback,
+      ),
+    );
+  }
+}
+
+class _QueueResetWarning extends StatelessWidget {
+  const _QueueResetWarning();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7ED),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFFDBA74)),
+      ),
+      child: const Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded, color: Color(0xFFD97706), size: 19),
+          SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              "Today's queue has already rotated. This action will reset the current live order for the rest of today.",
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.4,
+                color: Color(0xFF9A3412),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _QueueDialogError extends StatelessWidget {
+  const _QueueDialogError({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFEF2F2),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: const Color(0xFFFCA5A5)),
+      ),
+      child: Text(
+        message.contains('RESET_CONFIRMATION_REQUIRED')
+            ? "Today's queue has already rotated. Confirm the reset before continuing."
+            : 'Unable to update the live queue. Refresh and try again.',
+        style: const TextStyle(fontSize: 11.5, color: Color(0xFFB91C1C)),
       ),
     );
   }
@@ -3203,7 +4244,12 @@ class _NotificationDialogState extends State<_NotificationDialog> {
         width: 620,
         height: dialogHeight,
         child: Padding(
-          padding: EdgeInsets.fromLTRB(isPhone ? 12 : 18, 14, isPhone ? 12 : 18, 20),
+          padding: EdgeInsets.fromLTRB(
+            isPhone ? 12 : 18,
+            14,
+            isPhone ? 12 : 18,
+            20,
+          ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -3337,8 +4383,7 @@ class _NotificationFeedRow {
   final String? sectionLabel;
   final AppNotification? notification;
 
-  const _NotificationFeedRow.section(this.sectionLabel)
-    : notification = null;
+  const _NotificationFeedRow.section(this.sectionLabel) : notification = null;
 
   const _NotificationFeedRow.item(this.notification) : sectionLabel = null;
 }
@@ -3506,10 +4551,7 @@ class _NotificationTile extends StatelessWidget {
                       notification.body,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        color: context.appMuted,
-                      ),
+                      style: TextStyle(fontSize: 13, color: context.appMuted),
                     ),
                   ],
                   const SizedBox(height: 6),
@@ -3517,10 +4559,7 @@ class _NotificationTile extends StatelessWidget {
                     notification.type == AppNotification.startingSoonType
                         ? 'Now'
                         : timeLabel,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: context.appMuted,
-                    ),
+                    style: TextStyle(fontSize: 12, color: context.appMuted),
                   ),
                 ],
               ),
@@ -3595,41 +4634,42 @@ class _BusinessSettingsDialog extends StatefulWidget {
 class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
   final _authRepository = AuthRepository();
   final _imageUploadRepository = ImageUploadRepository();
+  final _hoursRepository = BusinessHoursRepository();
   late final TextEditingController _nameController;
   late final TextEditingController _locationController;
-  late final TextEditingController _openTimeController;
-  late final TextEditingController _closeTimeController;
   SelectedImage? _logoPreview;
   bool _logoRemoved = false;
+  bool _hoursLoading = true;
+  bool _hoursSaving = false;
+  final Set<int> _dirtyHourDays = <int>{};
+  bool _hoursExpanded = false;
+  String? _hoursError;
+  List<BusinessDayHours> _week = List.generate(7, BusinessDayHours.fallback);
+
+  static const _dayNames = [
+    'Sunday',
+    'Monday',
+    'Tuesday',
+    'Wednesday',
+    'Thursday',
+    'Friday',
+    'Saturday',
+  ];
+  static const _displayOrder = [1, 2, 3, 4, 5, 6, 0];
 
   @override
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.profile.name);
     _locationController = TextEditingController(text: widget.profile.location);
-    _openTimeController = TextEditingController(text: widget.profile.openTime);
-    _closeTimeController = TextEditingController(
-      text: widget.profile.closeTime,
-    );
+    unawaited(_loadHours());
   }
 
   @override
   void dispose() {
     _nameController.dispose();
     _locationController.dispose();
-    _openTimeController.dispose();
-    _closeTimeController.dispose();
     super.dispose();
-  }
-
-  String _normalizeSettingsTime(String value, String fallback) {
-    final raw = value.trim();
-    final match = RegExp(r'^(\d{1,2}):(\d{2})$').firstMatch(raw);
-    if (match == null) return fallback;
-    final hour = int.tryParse(match.group(1) ?? '') ?? -1;
-    final minute = int.tryParse(match.group(2) ?? '') ?? -1;
-    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) return fallback;
-    return '${hour.toString().padLeft(2, '0')}:${minute.toString().padLeft(2, '0')}';
   }
 
   Future<void> _pickLogo() async {
@@ -3655,15 +4695,144 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
     });
   }
 
-  void _save() {
-    if (!widget.isAdmin) return;
+  Future<void> _loadHours() async {
+    if (mounted) {
+      setState(() {
+        _hoursLoading = true;
+        _hoursError = null;
+      });
+    }
+    try {
+      final week = await _hoursRepository.listWeek();
+      if (!mounted) return;
+      setState(() {
+        _week = week;
+        _dirtyHourDays.clear();
+        _hoursLoading = false;
+      });
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _hoursError = error.toString();
+        _hoursLoading = false;
+      });
+    }
+  }
+
+  String _hoursLabel(BusinessDayHours day) {
+    if (day.isClosed) return 'Closed';
+    final open = _parseHoursTime(day.openTime).format(context);
+    final close = _parseHoursTime(day.closeTime).format(context);
+    return '$open – $close${day.isOvernight ? ' (+1)' : ''}';
+  }
+
+  String get _weekHoursSummary {
+    if (_hoursLoading) return 'Loading weekly hours…';
+    if (_hoursError != null) return 'Opening hours unavailable';
+    final groups = <String>[];
+    var runStart = 0;
+    for (var index = 1; index <= _displayOrder.length; index++) {
+      final same =
+          index < _displayOrder.length &&
+          _week[_displayOrder[index]].sameHoursAs(
+            _week[_displayOrder[runStart]],
+          );
+      if (same) continue;
+      final firstDay = _displayOrder[runStart];
+      final lastDay = _displayOrder[index - 1];
+      final label = firstDay == lastDay
+          ? _dayNames[firstDay].substring(0, 3)
+          : '${_dayNames[firstDay].substring(0, 3)}–'
+                '${_dayNames[lastDay].substring(0, 3)}';
+      groups.add('$label ${_hoursLabel(_week[firstDay])}');
+      runStart = index;
+    }
+    return groups.join(' · ');
+  }
+
+  TimeOfDay _parseHoursTime(String value) {
+    final parts = value.split(':');
+    return TimeOfDay(
+      hour: int.tryParse(parts.first) ?? 9,
+      minute: parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0,
+    );
+  }
+
+  Future<void> _editHours(int dayOfWeek) async {
+    if (!widget.isAdmin || _hoursSaving) return;
+    final result = await showDialog<BusinessDayHours>(
+      context: context,
+      builder: (_) => _DashboardDayHoursDialog(
+        title: _dayNames[dayOfWeek],
+        initial: _week[dayOfWeek],
+      ),
+    );
+    if (result == null) return;
+    setState(() {
+      _week = List<BusinessDayHours>.of(_week)..[dayOfWeek] = result;
+      _dirtyHourDays.add(dayOfWeek);
+    });
+  }
+
+  Future<void> _setAllHours() async {
+    if (!widget.isAdmin || _hoursSaving) return;
+    final result = await showDialog<BusinessDayHours>(
+      context: context,
+      builder: (_) => _DashboardDayHoursDialog(
+        title: 'All days',
+        initial: _week[_displayOrder.first],
+        confirmLabel: 'Set all days',
+        helperText: 'This replaces the schedule for every day of the week.',
+      ),
+    );
+    if (result == null) return;
+    setState(() {
+      _week = [
+        for (final day in _week)
+          day.copyWith(
+            openTime: result.openTime,
+            closeTime: result.closeTime,
+            isClosed: result.isClosed,
+          ),
+      ];
+      _dirtyHourDays
+        ..clear()
+        ..addAll(List<int>.generate(7, (day) => day));
+    });
+  }
+
+  Future<bool> _saveHours() async {
+    if (_dirtyHourDays.isEmpty) return true;
+    setState(() => _hoursSaving = true);
+    try {
+      await _hoursRepository.saveWeek([
+        for (final day in _week)
+          if (_dirtyHourDays.contains(day.dayOfWeek)) day,
+      ]);
+      final week = await _hoursRepository.listWeek();
+      if (!mounted) return false;
+      setState(() {
+        _week = week;
+        _dirtyHourDays.clear();
+      });
+      return true;
+    } catch (error) {
+      if (!mounted) return false;
+      AppToast.error(context, 'Unable to save opening hours: $error');
+      return false;
+    } finally {
+      if (mounted) setState(() => _hoursSaving = false);
+    }
+  }
+
+  Future<void> _save() async {
+    if (!widget.isAdmin || _hoursSaving) return;
+    if (!await _saveHours() || !mounted) return;
 
     Navigator.of(context).pop(
       widget.profile.copyWith(
         name: _nameController.text.trim(),
         location: _locationController.text.trim(),
-        openTime: _normalizeSettingsTime(_openTimeController.text, '09:00'),
-        closeTime: _normalizeSettingsTime(_closeTimeController.text, '21:00'),
         logoUrl: _logoRemoved ? '' : widget.profile.logoUrl,
         logoUpload: _logoPreview,
       ),
@@ -3762,7 +4931,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: const Text(
-                          'Only admins can edit business name, location, and logo.',
+                          'Only admins can edit business details and opening hours.',
                           style: TextStyle(
                             fontSize: 13,
                             color: Color(0xFF8A5A00),
@@ -3784,33 +4953,22 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                       enabled: widget.isAdmin,
                     ),
                     const SizedBox(height: 24),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: _BusinessSettingsField(
-                            label: 'Opening Time',
-                            controller: _openTimeController,
-                            enabled: widget.isAdmin,
-                            hint: '09:00',
-                            keyboardType: TextInputType.datetime,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _BusinessSettingsField(
-                            label: 'Closing Time',
-                            controller: _closeTimeController,
-                            enabled: widget.isAdmin,
-                            hint: '21:00',
-                            keyboardType: TextInputType.datetime,
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    const Text(
-                      'Timetable lines follow these hours. For an overnight close, enter the next-day time (for example, 02:30 means 2:30 AM the following day).',
-                      style: TextStyle(fontSize: 13, color: Color(0xFF5F6B7A)),
+                    _DashboardBusinessHoursEditor(
+                      week: _week,
+                      loading: _hoursLoading,
+                      saving: _hoursSaving,
+                      expanded: _hoursExpanded,
+                      summary: _weekHoursSummary,
+                      error: _hoursError,
+                      isAdmin: widget.isAdmin,
+                      dayNames: _dayNames,
+                      displayOrder: _displayOrder,
+                      hoursLabel: _hoursLabel,
+                      onEdit: _editHours,
+                      onSetAll: _setAllHours,
+                      onRetry: _loadHours,
+                      onToggle: () =>
+                          setState(() => _hoursExpanded = !_hoursExpanded),
                     ),
                     const SizedBox(height: 24),
                     const Text(
@@ -3881,7 +5039,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                     ),
                     const SizedBox(height: 12),
                     const Text(
-                      'Recommended: Square image, min 200x200px',
+                      '',
                       style: TextStyle(fontSize: 14, color: Color(0xFF5F6B7A)),
                     ),
                     const SizedBox(height: 24),
@@ -3933,7 +5091,7 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                   const SizedBox(width: 16),
                   Expanded(
                     child: ElevatedButton(
-                      onPressed: widget.isAdmin ? _save : null,
+                      onPressed: widget.isAdmin && !_hoursSaving ? _save : null,
                       style: ElevatedButton.styleFrom(
                         minimumSize: const Size.fromHeight(56),
                         backgroundColor: const Color(0xFF1B6B72),
@@ -3949,7 +5107,16 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
                           fontWeight: FontWeight.w600,
                         ),
                       ),
-                      child: const Text('Save Changes'),
+                      child: _hoursSaving
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.4,
+                                color: Colors.white,
+                              ),
+                            )
+                          : const Text('Save Changes'),
                     ),
                   ),
                 ],
@@ -3962,19 +5129,416 @@ class _BusinessSettingsDialogState extends State<_BusinessSettingsDialog> {
   }
 }
 
+class _DashboardBusinessHoursEditor extends StatelessWidget {
+  const _DashboardBusinessHoursEditor({
+    required this.week,
+    required this.loading,
+    required this.saving,
+    required this.expanded,
+    required this.summary,
+    required this.error,
+    required this.isAdmin,
+    required this.dayNames,
+    required this.displayOrder,
+    required this.hoursLabel,
+    required this.onEdit,
+    required this.onSetAll,
+    required this.onRetry,
+    required this.onToggle,
+  });
+
+  final List<BusinessDayHours> week;
+  final bool loading;
+  final bool saving;
+  final bool expanded;
+  final String summary;
+  final String? error;
+  final bool isAdmin;
+  final List<String> dayNames;
+  final List<int> displayOrder;
+  final String Function(BusinessDayHours day) hoursLabel;
+  final ValueChanged<int> onEdit;
+  final VoidCallback onSetAll;
+  final VoidCallback onRetry;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    const border = Color(0xFFE0E0E0);
+    const muted = Color(0xFF5F6B7A);
+    const ink = Color(0xFF1A1A2E);
+    const accent = Color(0xFF1B6B72);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'Opening Hours',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w600,
+            color: muted,
+          ),
+        ),
+        const SizedBox(height: 10),
+        Material(
+          color: Colors.transparent,
+          child: InkWell(
+            onTap: onToggle,
+            borderRadius: BorderRadius.circular(14),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(14, 13, 12, 13),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF6F7F8),
+                border: Border.all(color: border),
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.only(top: 1),
+                    child: Icon(Icons.schedule_outlined, color: accent),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Text(
+                      summary,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        height: 1.35,
+                        color: ink,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  AnimatedRotation(
+                    turns: expanded ? 0.5 : 0,
+                    duration: const Duration(milliseconds: 180),
+                    child: const Icon(Icons.expand_more, color: muted),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOutCubic,
+          alignment: Alignment.topCenter,
+          child: !expanded
+              ? const SizedBox(width: double.infinity)
+              : Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: error != null
+                      ? Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF6F7F8),
+                            border: Border.all(color: border),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.error_outline, color: muted),
+                              const SizedBox(width: 10),
+                              const Expanded(
+                                child: Text(
+                                  'Opening hours could not be loaded.',
+                                  style: TextStyle(color: muted, fontSize: 13),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: loading ? null : onRetry,
+                                child: const Text('Retry'),
+                              ),
+                            ],
+                          ),
+                        )
+                      : loading
+                      ? const Padding(
+                          padding: EdgeInsets.all(18),
+                          child: Center(child: CircularProgressIndicator()),
+                        )
+                      : Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            Align(
+                              alignment: Alignment.centerRight,
+                              child: TextButton.icon(
+                                onPressed: isAdmin && !saving ? onSetAll : null,
+                                icon: const Icon(
+                                  Icons.copy_all_outlined,
+                                  size: 17,
+                                ),
+                                label: const Text('Set all days'),
+                              ),
+                            ),
+                            Container(
+                              decoration: BoxDecoration(
+                                border: Border.all(color: border),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              clipBehavior: Clip.antiAlias,
+                              child: Column(
+                                children: [
+                                  for (
+                                    var index = 0;
+                                    index < displayOrder.length;
+                                    index++
+                                  )
+                                    _DashboardBusinessHoursRow(
+                                      day: dayNames[displayOrder[index]],
+                                      hours: hoursLabel(
+                                        week[displayOrder[index]],
+                                      ),
+                                      closed:
+                                          week[displayOrder[index]].isClosed,
+                                      isLast: index == displayOrder.length - 1,
+                                      onEdit: isAdmin && !saving
+                                          ? () => onEdit(displayOrder[index])
+                                          : null,
+                                    ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            const Text(
+                              'Hours are saved with Save Changes. Private '
+                              'custom staff hours remain unchanged.',
+                              style: TextStyle(fontSize: 12, color: muted),
+                            ),
+                          ],
+                        ),
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DashboardBusinessHoursRow extends StatelessWidget {
+  const _DashboardBusinessHoursRow({
+    required this.day,
+    required this.hours,
+    required this.closed,
+    required this.isLast,
+    required this.onEdit,
+  });
+
+  final String day;
+  final String hours;
+  final bool closed;
+  final bool isLast;
+  final VoidCallback? onEdit;
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.fromLTRB(13, 7, 5, 7),
+    decoration: BoxDecoration(
+      border: isLast
+          ? null
+          : const Border(bottom: BorderSide(color: Color(0xFFE6E8EB))),
+    ),
+    child: Row(
+      children: [
+        SizedBox(
+          width: 86,
+          child: Text(
+            day,
+            style: const TextStyle(
+              color: Color(0xFF1A1A2E),
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            hours,
+            style: TextStyle(
+              color: closed ? const Color(0xFF7A8492) : const Color(0xFF1A1A2E),
+              fontSize: 13,
+              fontStyle: closed ? FontStyle.italic : FontStyle.normal,
+            ),
+          ),
+        ),
+        IconButton(
+          onPressed: onEdit,
+          tooltip: 'Edit $day',
+          icon: const Icon(Icons.edit_outlined, size: 18),
+          color: const Color(0xFF1B6B72),
+        ),
+      ],
+    ),
+  );
+}
+
+class _DashboardDayHoursDialog extends StatefulWidget {
+  const _DashboardDayHoursDialog({
+    required this.title,
+    required this.initial,
+    this.confirmLabel = 'Save',
+    this.helperText,
+  });
+
+  final String title;
+  final BusinessDayHours initial;
+  final String confirmLabel;
+  final String? helperText;
+
+  @override
+  State<_DashboardDayHoursDialog> createState() =>
+      _DashboardDayHoursDialogState();
+}
+
+class _DashboardDayHoursDialogState extends State<_DashboardDayHoursDialog> {
+  late TimeOfDay _open = _parse(widget.initial.openTime);
+  late TimeOfDay _close = _parse(widget.initial.closeTime);
+  late bool _closed = widget.initial.isClosed;
+
+  static TimeOfDay _parse(String value) {
+    final parts = value.split(':');
+    return TimeOfDay(
+      hour: int.tryParse(parts.first) ?? 9,
+      minute: parts.length > 1 ? int.tryParse(parts[1]) ?? 0 : 0,
+    );
+  }
+
+  static String _storage(TimeOfDay time) =>
+      '${time.hour.toString().padLeft(2, '0')}:'
+      '${time.minute.toString().padLeft(2, '0')}';
+
+  Future<void> _pick({required bool opening}) async {
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: opening ? _open : _close,
+    );
+    if (picked == null) return;
+    setState(() {
+      if (opening) {
+        _open = picked;
+      } else {
+        _close = picked;
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final overnight =
+        _close.hour * 60 + _close.minute <= _open.hour * 60 + _open.minute;
+    return AlertDialog(
+      title: Text(widget.title),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (widget.helperText != null) ...[
+            Text(
+              widget.helperText!,
+              style: const TextStyle(color: Color(0xFF5F6B7A), fontSize: 12),
+            ),
+            const SizedBox(height: 8),
+          ],
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Closed'),
+            subtitle: const Text('No staff or customer bookings can be taken'),
+            value: _closed,
+            onChanged: (value) => setState(() => _closed = value),
+          ),
+          if (!_closed) ...[
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                Expanded(
+                  child: _DashboardHoursTimeField(
+                    label: 'Opens',
+                    time: _open,
+                    onTap: () => _pick(opening: true),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _DashboardHoursTimeField(
+                    label: 'Closes',
+                    time: _close,
+                    onTap: () => _pick(opening: false),
+                  ),
+                ),
+              ],
+            ),
+            if (overnight) ...[
+              const SizedBox(height: 8),
+              const Text(
+                'Closes after midnight, on the following day.',
+                style: TextStyle(color: Color(0xFF5F6B7A), fontSize: 12),
+              ),
+            ],
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(
+            context,
+            widget.initial.copyWith(
+              openTime: _storage(_open),
+              closeTime: _storage(_close),
+              isClosed: _closed,
+            ),
+          ),
+          child: Text(widget.confirmLabel),
+        ),
+      ],
+    );
+  }
+}
+
+class _DashboardHoursTimeField extends StatelessWidget {
+  const _DashboardHoursTimeField({
+    required this.label,
+    required this.time,
+    required this.onTap,
+  });
+
+  final String label;
+  final TimeOfDay time;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) => InkWell(
+    onTap: onTap,
+    borderRadius: BorderRadius.circular(10),
+    child: InputDecorator(
+      decoration: InputDecoration(
+        labelText: label,
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+      child: Text(
+        time.format(context),
+        style: const TextStyle(fontWeight: FontWeight.w600),
+      ),
+    ),
+  );
+}
+
 class _BusinessSettingsField extends StatelessWidget {
   final String label;
   final TextEditingController controller;
   final bool enabled;
-  final String? hint;
-  final TextInputType? keyboardType;
 
   const _BusinessSettingsField({
     required this.label,
     required this.controller,
     required this.enabled,
-    this.hint,
-    this.keyboardType,
   });
 
   @override
@@ -3994,10 +5558,8 @@ class _BusinessSettingsField extends StatelessWidget {
         TextField(
           controller: controller,
           enabled: enabled,
-          keyboardType: keyboardType,
           style: const TextStyle(fontSize: 16, color: Color(0xFF1A1A2E)),
           decoration: InputDecoration(
-            hintText: hint,
             filled: true,
             fillColor: enabled ? Colors.white : const Color(0xFFF6F7F8),
             disabledBorder: OutlineInputBorder(
@@ -4133,10 +5695,7 @@ class _AppointmentRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(
-          label,
-          style: TextStyle(fontSize: 14, color: context.appText),
-        ),
+        Text(label, style: TextStyle(fontSize: 14, color: context.appText)),
         Text(
           count,
           style: const TextStyle(
@@ -4150,69 +5709,319 @@ class _AppointmentRow extends StatelessWidget {
   }
 }
 
-class _TherapistRow extends StatelessWidget {
-  final String name;
-  final String status;
-  final Color statusColor;
-  final String done;
-
-  const _TherapistRow({
-    required this.name,
-    required this.status,
-    required this.statusColor,
-    required this.done,
+class _LiveTherapistQueueSummary extends StatelessWidget {
+  const _LiveTherapistQueueSummary({
+    required this.therapists,
+    this.compact = false,
   });
+
+  final List<_TherapistStatus> therapists;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      children: [
-        // Status dot
-        Container(
-          width: 8,
-          height: 8,
-          decoration: BoxDecoration(shape: BoxShape.circle, color: statusColor),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+    final free = therapists.where((therapist) => therapist.isFree).length;
+    final busy = therapists.length - free;
+
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 10 : 12,
+        vertical: compact ? 7 : 8,
+      ),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: context.appBorder),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.025),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Wrap(
+        spacing: compact ? 8 : 10,
+        runSpacing: 6,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
             children: [
+              const _LiveQueueDot(),
+              const SizedBox(width: 7),
               Text(
-                name,
+                'Live therapist queue',
                 style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
+                  fontSize: 11.5,
+                  fontWeight: FontWeight.w800,
                   color: context.appText,
-                ),
-              ),
-              Text(
-                status,
-                style: TextStyle(
-                  fontSize: 11,
-                  color: statusColor,
-                  fontWeight: FontWeight.w500,
                 ),
               ),
             ],
           ),
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: context.appSurfaceRaised,
-            borderRadius: BorderRadius.circular(8),
+          _QueueCount(label: 'Free', value: free, color: const Color(0xFF16A34A)),
+          _QueueCount(label: 'Busy', value: busy, color: const Color(0xFFD97706)),
+          _QueueCount(
+            label: 'Total',
+            value: therapists.length,
+            color: context.appMuted,
           ),
-          child: Text(
-            done,
-            style: TextStyle(
-              fontSize: 11,
-              color: context.appMuted,
-              fontWeight: FontWeight.w500,
+        ],
+      ),
+    );
+  }
+}
+
+class _LiveQueueDot extends StatelessWidget {
+  const _LiveQueueDot();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 7,
+      height: 7,
+      decoration: const BoxDecoration(
+        color: Color(0xFF22C55E),
+        shape: BoxShape.circle,
+      ),
+    );
+  }
+}
+
+class _QueueCount extends StatelessWidget {
+  const _QueueCount({
+    required this.label,
+    required this.value,
+    required this.color,
+  });
+
+  final String label;
+  final int value;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Text(
+        '$label $value',
+        style: TextStyle(
+          fontSize: 10.5,
+          fontWeight: FontWeight.w800,
+          color: color,
+        ),
+      ),
+    );
+  }
+}
+
+class _TherapistQueueGrid extends StatelessWidget {
+  const _TherapistQueueGrid({
+    required this.therapists,
+    required this.twoColumns,
+  });
+
+  final List<_TherapistStatus> therapists;
+  final bool twoColumns;
+
+  Widget _column(List<_TherapistStatus> items) {
+    return Column(
+      children: [
+        for (var index = 0; index < items.length; index++) ...[
+          _TherapistQueueCard(therapist: items[index]),
+          if (index != items.length - 1) const SizedBox(height: 8),
+        ],
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!twoColumns || therapists.length < 2) return _column(therapists);
+
+    // Column-major layout: finish the left column top-to-bottom, then read the
+    // right column top-to-bottom. This preserves the queue's visible order.
+    final split = (therapists.length + 1) ~/ 2;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Expanded(child: _column(therapists.take(split).toList())),
+        const SizedBox(width: 12),
+        Expanded(child: _column(therapists.skip(split).toList())),
+      ],
+    );
+  }
+}
+
+class _TherapistQueueCard extends StatelessWidget {
+  const _TherapistQueueCard({required this.therapist});
+
+  final _TherapistStatus therapist;
+
+  @override
+  Widget build(BuildContext context) {
+    final statusColor = therapist.status.startsWith('Reserved ')
+        ? const Color(0xFF2563EB)
+        : therapist.isFree
+        ? const Color(0xFF16A34A)
+        : const Color(0xFFD97706);
+    final serviceLabel = therapist.doneCount == 1
+        ? '1 service today'
+        : '${therapist.doneCount} services today';
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(
+          color: therapist.isNext
+              ? const Color(0xFF1B6B72)
+              : context.appBorder,
+          width: therapist.isNext ? 1.4 : 1,
+        ),
+      ),
+      child: Row(
+        children: [
+          _TherapistQueueAvatar(therapist: therapist),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        therapist.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: context.appText,
+                        ),
+                      ),
+                    ),
+                    if (therapist.isNext) ...[
+                      const SizedBox(width: 6),
+                      const Icon(
+                        Icons.auto_awesome,
+                        size: 15,
+                        color: Color(0xFF1B6B72),
+                      ),
+                      const SizedBox(width: 5),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 7,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1B6B72),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: const Text(
+                          'Next',
+                          style: TextStyle(
+                            fontSize: 9,
+                            fontWeight: FontWeight.w800,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Row(
+                  children: [
+                    Container(
+                      width: 6,
+                      height: 6,
+                      decoration: BoxDecoration(
+                        color: statusColor,
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Flexible(
+                      child: Text(
+                        therapist.status,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          fontWeight: FontWeight.w600,
+                          color: statusColor,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
             ),
           ),
+          const SizedBox(width: 8),
+          Text(
+            serviceLabel,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: context.appMuted,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TherapistQueueAvatar extends StatelessWidget {
+  const _TherapistQueueAvatar({required this.therapist});
+
+  final _TherapistStatus therapist;
+
+  @override
+  Widget build(BuildContext context) {
+    final fallback = Container(
+      width: 36,
+      height: 36,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(
+        color: Color(0xFFE8F5F5),
+        shape: BoxShape.circle,
+      ),
+      child: Text(
+        staffInitials(therapist.name),
+        style: const TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w800,
+          color: Color(0xFF1B6B72),
         ),
-      ],
+      ),
+    );
+    final imageUrl = therapist.imageUrl.trim();
+    if (imageUrl.isEmpty) return fallback;
+
+    return ClipOval(
+      child: CachedNetworkImage(
+        imageUrl: imageUrl,
+        width: 36,
+        height: 36,
+        fit: BoxFit.cover,
+        placeholder: (_, _) => fallback,
+        errorWidget: (_, _, _) => fallback,
+      ),
     );
   }
 }
@@ -4227,10 +6036,7 @@ class _AnalyticsStat extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: TextStyle(fontSize: 11, color: context.appMuted),
-        ),
+        Text(label, style: TextStyle(fontSize: 11, color: context.appMuted)),
         const SizedBox(height: 4),
         Text(
           value,

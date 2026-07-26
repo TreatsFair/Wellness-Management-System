@@ -1,7 +1,9 @@
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
+import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/online_booking_repository.dart';
 import '../../widgets/adaptive_detail_surface.dart';
 import '../../widgets/app_toast.dart';
@@ -23,11 +25,21 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   Map<String, dynamic>? _data;
   bool _loading = true;
   _OnlineBookingSection _section = _OnlineBookingSection.rules;
+  final _serviceSearchController = TextEditingController();
+  bool _servicesGridView = true;
+  String? _serviceCategoryFilter;
+
+  @override
+  void dispose() {
+    _serviceSearchController.dispose();
+    super.dispose();
+  }
 
   @override
   void initState() {
     super.initState();
     _outletId = OutletContext.activeOutletId.value;
+    _serviceSearchController.addListener(() => setState(() {}));
     _load();
   }
 
@@ -51,11 +63,29 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   List<Map<String, dynamic>> _list(String key) =>
       List<Map<String, dynamic>>.from(_data?[key] as List? ?? const []);
 
+  List<String> _serviceCategories(
+    List<Map<String, dynamic>> catalogue,
+    List<Map<String, dynamic>> services,
+  ) {
+    final categories = <String>{};
+    for (final item in catalogue) {
+      final internal = services
+          .where((s) => s['id'] == item['service_id'])
+          .firstOrNull;
+      final category = internal?['category']?.toString().trim() ?? '';
+      if (category.isNotEmpty) categories.add(category);
+    }
+    final sorted = categories.toList()..sort();
+    return sorted;
+  }
+
   @override
   Widget build(BuildContext context) {
     final outlet = OutletContext.outletById(_outletId);
     final catalogue = _list('catalogue');
     final closures = _list('closures');
+    final services = _list('services');
+    final serviceCategories = _serviceCategories(catalogue, services);
     final contentTitle = switch (_section) {
       _OnlineBookingSection.rules => 'Outlet rules',
       _OnlineBookingSection.services => 'Public services',
@@ -94,6 +124,34 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
       primaryAction: primaryAction,
       navigation: _navigation(catalogue.length, closures.length),
       mobileNavigation: _mobileNavigation(),
+      headerActions: _section == _OnlineBookingSection.services
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SizedBox(
+                  width: 190,
+                  child: CatalogueSearchField(
+                    controller: _serviceSearchController,
+                    hintText: 'Search public services...',
+                  ),
+                ),
+                const SizedBox(width: 8),
+                CatalogueViewSwitch(
+                  gridView: _servicesGridView,
+                  onChanged: (value) =>
+                      setState(() => _servicesGridView = value),
+                ),
+              ],
+            )
+          : null,
+      toolbar: _section == _OnlineBookingSection.services
+          ? _CategoryTabs(
+              categories: serviceCategories,
+              selected: _serviceCategoryFilter,
+              onSelected: (value) =>
+                  setState(() => _serviceCategoryFilter = value),
+            )
+          : null,
       content: _loading
           ? const Center(child: CircularProgressIndicator())
           : _data == null
@@ -119,11 +177,14 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
               ),
               _OnlineBookingSection.services => _ServicesPane(
                 catalogue: catalogue,
-                services: _list('services'),
+                services: services,
                 rooms: _list('rooms'),
                 roomLinks: _list('roomLinks'),
                 hours: _list('hours'),
                 onView: _viewService,
+                gridView: _servicesGridView,
+                search: _serviceSearchController.text,
+                categoryFilter: _serviceCategoryFilter,
               ),
               _OnlineBookingSection.closures => _ClosuresPane(
                 closures: closures,
@@ -209,13 +270,25 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
       ),
     );
     if (result == null) return;
-    await _repository.saveService(
+    final catalogueId = await _repository.saveService(
       outletId: _outletId,
       id: item?['id']?.toString(),
       values: result.values,
       roomIds: result.roomIds,
       hours: result.hours,
     );
+    final previousUrl = item?['public_image_url']?.toString() ?? '';
+    if (result.imagePreview != null) {
+      final url = await ImageUploadRepository().uploadImage(
+        image: result.imagePreview!,
+        folder: 'online-booking',
+        id: catalogueId,
+        previousUrl: previousUrl,
+      );
+      await _repository.updateServiceImage(catalogueId, url);
+    } else if (result.imageRemoved && previousUrl.isNotEmpty) {
+      await ImageUploadRepository().removePublicUrl(previousUrl);
+    }
     await _load();
   }
 
@@ -696,6 +769,67 @@ class _SettingsPaneState extends State<_SettingsPane> {
   );
 }
 
+class _CategoryTabs extends StatelessWidget {
+  const _CategoryTabs({
+    required this.categories,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final List<String> categories;
+  final String? selected;
+  final ValueChanged<String?> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final tabs = <String?>[null, ...categories];
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: tabs.map((tab) {
+          final active = selected == tab;
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: InkWell(
+              onTap: () => onSelected(tab),
+              borderRadius: BorderRadius.circular(8),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      tab ?? 'All',
+                      style: TextStyle(
+                        fontSize: 13.5,
+                        fontWeight: FontWeight.w800,
+                        color: active
+                            ? context.appColors.primary
+                            : context.appMuted,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    AnimatedContainer(
+                      duration: const Duration(milliseconds: 160),
+                      height: 3,
+                      width: active ? 32 : 0,
+                      decoration: BoxDecoration(
+                        color: context.appColors.primary,
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
 class _ServicesPane extends StatelessWidget {
   const _ServicesPane({
     required this.catalogue,
@@ -704,79 +838,410 @@ class _ServicesPane extends StatelessWidget {
     required this.roomLinks,
     required this.hours,
     required this.onView,
+    required this.gridView,
+    required this.search,
+    required this.categoryFilter,
   });
   final List<Map<String, dynamic>> catalogue, services, rooms, roomLinks, hours;
   final void Function(Map<String, dynamic>) onView;
+  final bool gridView;
+  final String search;
+  final String? categoryFilter;
+
+  Map<String, dynamic>? _internalFor(Map<String, dynamic> item) =>
+      services.where((s) => s['id'] == item['service_id']).firstOrNull;
+
   @override
-  Widget build(BuildContext context) => ListView(
-    padding: const EdgeInsets.all(20),
-    children: [
-      if (catalogue.isEmpty)
-        _card(
-          const Padding(
-            padding: EdgeInsets.all(20),
-            child: Center(child: Text('No public services configured yet.')),
-          ),
+  Widget build(BuildContext context) {
+    if (catalogue.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Text('No public services configured yet.'),
         ),
-      ...catalogue.map((item) {
-        final internal = services
-            .where((s) => s['id'] == item['service_id'])
-            .firstOrNull;
-        final live = item['enabled'] == true;
-        return Padding(
-          padding: const EdgeInsets.only(bottom: 12),
-          child: _card(
-            Material(
-              color: Colors.transparent,
-              child: InkWell(
+      );
+    }
+    final query = search.trim().toLowerCase();
+    final visible = catalogue.where((item) {
+      final internal = _internalFor(item);
+      if (categoryFilter != null &&
+          (internal?['category']?.toString().trim() ?? '') !=
+              categoryFilter) {
+        return false;
+      }
+      if (query.isEmpty) return true;
+      final publicName = (item['public_name']?.toString() ?? '')
+          .toLowerCase();
+      final internalName = (internal?['name']?.toString() ?? '')
+          .toLowerCase();
+      return publicName.contains(query) || internalName.contains(query);
+    }).toList();
+
+    if (visible.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Text('No public services match this filter.'),
+        ),
+      );
+    }
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final padding = constraints.maxWidth >= 900 ? 24.0 : 16.0;
+        final cardHeight =
+            context.managementCatalogueCardHeight +
+            (constraints.maxWidth < 600 ? 16 : 20);
+        if (!gridView) {
+          return ListView.separated(
+            padding: EdgeInsets.fromLTRB(padding, 16, padding, 28),
+            itemCount: visible.length,
+            separatorBuilder: (_, _) => const SizedBox(height: 10),
+            itemBuilder: (context, index) {
+              final item = visible[index];
+              return _PublicServiceListTile(
+                item: item,
+                internal: _internalFor(item),
                 onTap: () => onView(item),
-                borderRadius: BorderRadius.circular(10),
-                child: ListTile(
-                  minTileHeight: context.managementCatalogueListHeight,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
+              );
+            },
+          );
+        }
+        return GridView.builder(
+          padding: EdgeInsets.fromLTRB(padding, 16, padding, 28),
+          gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+            maxCrossAxisExtent: 330,
+            mainAxisExtent: cardHeight,
+            crossAxisSpacing: 12,
+            mainAxisSpacing: 12,
+          ),
+          itemCount: visible.length,
+          itemBuilder: (context, index) {
+            final item = visible[index];
+            return _PublicServiceCard(
+              item: item,
+              internal: _internalFor(item),
+              onTap: () => onView(item),
+            );
+          },
+        );
+      },
+    );
+  }
+}
+
+class _PublicServiceCard extends StatelessWidget {
+  const _PublicServiceCard({
+    required this.item,
+    required this.internal,
+    required this.onTap,
+  });
+
+  final Map<String, dynamic> item;
+  final Map<String, dynamic>? internal;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final narrowGrid = MediaQuery.sizeOf(context).width < 600;
+    final name = (item['public_name'] as String?)?.trim().isNotEmpty == true
+        ? item['public_name'] as String
+        : 'Draft public service';
+    final live = item['enabled'] == true;
+    final category = internal?['category']?.toString().trim() ?? '';
+    return Material(
+      color: context.appSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        side: BorderSide(color: context.appBorder),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.all(narrowGrid ? 12 : 15),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _PublicServiceAvatar(
+                    name: name,
+                    imageUrl: item['public_image_url']?.toString() ?? '',
+                    size: narrowGrid ? 40 : 46,
                   ),
-                  leading: CircleAvatar(
-                    backgroundColor: live
-                        ? context.appColors.primary.withValues(alpha: 0.12)
-                        : context.appCanvas,
-                    child: Icon(
-                      live ? Icons.public : Icons.public_off,
-                      color: live
-                          ? context.appColors.primary
-                          : context.appMuted,
+                  SizedBox(width: narrowGrid ? 8 : 11),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          name,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: context.appText,
+                            fontWeight: FontWeight.w800,
+                            height: 1.2,
+                          ),
+                        ),
+                        if (category.isNotEmpty) ...[
+                          const SizedBox(height: 6),
+                          _PublicCategoryBadge(category: category),
+                        ],
+                      ],
                     ),
                   ),
-                  title: Text(
-                    (item['public_name'] as String?)?.trim().isNotEmpty == true
-                        ? item['public_name']
-                        : 'Draft public service',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: context.appText,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  subtitle: Text(
-                    '${internal?['name'] ?? 'Missing internal service'} · ${internal?['duration'] ?? 0} min · RM ${item['display_price'] ?? 0}',
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(color: context.appMuted),
-                  ),
-                  trailing: Icon(
-                    Icons.chevron_right_rounded,
+                  Icon(
+                    Icons.chevron_right,
+                    size: narrowGrid ? 18 : 20,
                     color: context.appMuted,
                   ),
+                ],
+              ),
+              const Spacer(),
+              Text(
+                '${internal?['name'] ?? 'Missing internal service'} · ${internal?['duration'] ?? 0} min',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(color: context.appMuted, fontSize: 12),
+              ),
+              const SizedBox(height: 5),
+              Text(
+                'RM ${item['display_price'] ?? 0}',
+                style: TextStyle(
+                  color: context.appText,
+                  fontSize: 16,
+                  fontWeight: FontWeight.w800,
                 ),
               ),
-            ),
+              SizedBox(height: narrowGrid ? 8 : 12),
+              Align(
+                alignment: Alignment.centerRight,
+                child: _PublicStatusBadge(live: live),
+              ),
+            ],
           ),
-        );
-      }),
-    ],
-  );
+        ),
+      ),
+    );
+  }
+}
+
+class _PublicServiceListTile extends StatelessWidget {
+  const _PublicServiceListTile({
+    required this.item,
+    required this.internal,
+    required this.onTap,
+  });
+
+  final Map<String, dynamic> item;
+  final Map<String, dynamic>? internal;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final name = (item['public_name'] as String?)?.trim().isNotEmpty == true
+        ? item['public_name'] as String
+        : 'Draft public service';
+    final live = item['enabled'] == true;
+    final category = internal?['category']?.toString().trim() ?? '';
+    return Material(
+      color: context.appSurface,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        side: BorderSide(color: context.appBorder),
+      ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(AppRadius.card),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Row(
+            children: [
+              _PublicServiceAvatar(
+                name: name,
+                imageUrl: item['public_image_url']?.toString() ?? '',
+                size: 48,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: context.appText,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 5,
+                      children: [
+                        if (category.isNotEmpty)
+                          _PublicCategoryBadge(category: category),
+                        _PublicStatusBadge(live: live),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${internal?['name'] ?? 'Missing internal service'} · ${internal?['duration'] ?? 0} min · RM ${item['display_price'] ?? 0}',
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: context.appMuted, fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 6),
+              Icon(Icons.chevron_right, color: context.appMuted),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PublicServiceAvatar extends StatelessWidget {
+  const _PublicServiceAvatar({
+    required this.name,
+    required this.imageUrl,
+    required this.size,
+    this.preview,
+    this.imageRemoved = false,
+  });
+
+  final String name;
+  final String imageUrl;
+  final double size;
+  final SelectedImage? preview;
+  final bool imageRemoved;
+
+  @override
+  Widget build(BuildContext context) {
+    final url = imageRemoved ? '' : imageUrl;
+    final fallback = Container(
+      width: size,
+      height: size,
+      color: _publicAvatarColor(name),
+      alignment: Alignment.center,
+      child: Text(
+        _publicServiceInitials(name),
+        style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w800),
+      ),
+    );
+    return ClipOval(
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: preview != null
+            ? Image.memory(preview!.bytes, fit: BoxFit.cover)
+            : url.isNotEmpty
+            ? CachedNetworkImage(
+                imageUrl: url,
+                fit: BoxFit.cover,
+                placeholder: (_, _) => fallback,
+                errorWidget: (_, _, _) => fallback,
+              )
+            : fallback,
+      ),
+    );
+  }
+}
+
+class _PublicCategoryBadge extends StatelessWidget {
+  const _PublicCategoryBadge({required this.category});
+
+  final String category;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = _publicCategoryColor(category);
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 190),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.11),
+          borderRadius: BorderRadius.circular(AppRadius.pill),
+        ),
+        child: Text(
+          category,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            color: color,
+            fontSize: 10.5,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _PublicStatusBadge extends StatelessWidget {
+  const _PublicStatusBadge({required this.live});
+
+  final bool live;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = live ? AppColors.success : context.appMuted;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 5),
+        Text(
+          live ? 'Live' : 'Not published',
+          style: TextStyle(color: color, fontSize: 11, fontWeight: FontWeight.w800),
+        ),
+      ],
+    );
+  }
+}
+
+Color _publicCategoryColor(String category) {
+  final value = category.toLowerCase();
+  if (value.contains('package')) return const Color(0xFF7C3AED);
+  if (value.contains('add')) return const Color(0xFFD97706);
+  if (value.contains('massage')) return const Color(0xFF2563EB);
+  return AppColors.primary;
+}
+
+Color _publicAvatarColor(String seed) {
+  const colors = [
+    AppColors.primary,
+    Color(0xFF2563EB),
+    Color(0xFF7C3AED),
+    Color(0xFFD97706),
+    Color(0xFFBE185D),
+  ];
+  final sum = seed.codeUnits.fold<int>(0, (total, value) => total + value);
+  return colors[sum % colors.length];
+}
+
+String _publicServiceInitials(String name) {
+  final parts = name
+      .trim()
+      .split(RegExp(r'\s+'))
+      .where((part) => part.isNotEmpty)
+      .toList();
+  if (parts.isEmpty) return '?';
+  if (parts.length == 1) return parts.first.substring(0, 1).toUpperCase();
+  return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
 }
 
 class _PublicServiceDetails extends StatelessWidget {
@@ -1012,10 +1477,18 @@ class _DangerZone extends StatelessWidget {
 }
 
 class _ServiceDraft {
-  const _ServiceDraft(this.values, this.roomIds, this.hours);
+  const _ServiceDraft(
+    this.values,
+    this.roomIds,
+    this.hours, {
+    this.imagePreview,
+    this.imageRemoved = false,
+  });
   final Map<String, dynamic> values;
   final Set<String> roomIds;
   final List<Map<String, dynamic>> hours;
+  final SelectedImage? imagePreview;
+  final bool imageRemoved;
 }
 
 class _OnlineServiceDialog extends StatefulWidget {
@@ -1038,17 +1511,14 @@ class _OnlineServiceDialog extends StatefulWidget {
 
 class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
   final form = GlobalKey<FormState>();
+  final _imageRepository = ImageUploadRepository();
   late String? serviceId;
-  late final TextEditingController name,
-      description,
-      image,
-      price,
-      order,
-      capacity,
-      start,
-      end;
+  late final TextEditingController name, description, price, order, capacity, start, end;
   late bool enabled, showPrice, custom;
   late Set<String> roomIds;
+  late String _existingImageUrl;
+  SelectedImage? _imagePreview;
+  bool _imageRemoved = false;
   final weekdays = <int>{0, 1, 2, 3, 4, 5, 6};
   @override
   void initState() {
@@ -1059,9 +1529,7 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
     description = TextEditingController(
       text: i['short_description']?.toString() ?? '',
     );
-    image = TextEditingController(
-      text: i['public_image_url']?.toString() ?? '',
-    );
+    _existingImageUrl = i['public_image_url']?.toString() ?? '';
     price = TextEditingController(text: '${i['display_price'] ?? ''}');
     order = TextEditingController(text: '${i['display_order'] ?? 0}');
     capacity = TextEditingController(
@@ -1095,7 +1563,6 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
     for (final c in [
       name,
       description,
-      image,
       price,
       order,
       capacity,
@@ -1178,7 +1645,47 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
               lines: 3,
             ),
             const SizedBox(height: 12),
-            _field(image, 'Public image URL', 'https://…', required: true),
+            Text(
+              'Public image',
+              style: TextStyle(
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+                fontSize: 12,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _PublicServiceAvatar(
+                  name: name.text.trim().isEmpty ? 'Service' : name.text.trim(),
+                  imageUrl: _existingImageUrl,
+                  size: 64,
+                  preview: _imagePreview,
+                  imageRemoved: _imageRemoved,
+                ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      OutlinedButton.icon(
+                        onPressed: _pickImage,
+                        icon: const Icon(Icons.upload_outlined, size: 18),
+                        label: Text(_hasImage ? 'Replace Image' : 'Upload Image'),
+                      ),
+                      if (_hasImage)
+                        TextButton.icon(
+                          onPressed: _removeImage,
+                          icon: const Icon(Icons.delete_outline, size: 18),
+                          label: const Text('Remove Image'),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
             const SizedBox(height: 12),
             Row(
               children: [
@@ -1232,9 +1739,15 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
                 Expanded(
                   child: _field(
                     capacity,
-                    'Maximum concurrent',
+                    'Max bookings per timeslot',
                     '3',
                     number: true,
+                    helper:
+                        'How many of this service the website may sell at the '
+                        'same time. Counts online bookings only — walk-ins and '
+                        'staff-created appointments are not deducted. Therapist '
+                        'and room availability still apply on top, so a slot can '
+                        'show fewer than this.',
                   ),
                 ),
               ],
@@ -1328,6 +1841,29 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
     );
   }
 
+  bool get _hasImage =>
+      _imagePreview != null || (!_imageRemoved && _existingImageUrl.isNotEmpty);
+
+  Future<void> _pickImage() async {
+    try {
+      final image = await _imageRepository.pickImage();
+      if (image == null || !mounted) return;
+      setState(() {
+        _imagePreview = image;
+        _imageRemoved = false;
+      });
+    } catch (error) {
+      if (mounted) AppToast.error(context, error.toString());
+    }
+  }
+
+  void _removeImage() {
+    setState(() {
+      _imagePreview = null;
+      _imageRemoved = true;
+    });
+  }
+
   void _saveDraft(Map<String, dynamic>? internal) {
     if (!form.currentState!.validate() ||
         serviceId == null ||
@@ -1336,6 +1872,10 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
         context,
         'Complete the public fields and select at least one room.',
       );
+      return;
+    }
+    if (!_hasImage) {
+      AppToast.error(context, 'Add a public image before saving.');
       return;
     }
     final configuredHours = custom
@@ -1356,7 +1896,8 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
           'service_id': serviceId,
           'public_name': name.text.trim(),
           'short_description': description.text.trim(),
-          'public_image_url': image.text.trim(),
+          if (_imagePreview == null)
+            'public_image_url': _imageRemoved ? '' : _existingImageUrl,
           'display_price': double.tryParse(price.text) ?? 0,
           'display_order': int.tryParse(order.text) ?? 0,
           'show_price': showPrice,
@@ -1372,6 +1913,8 @@ class _OnlineServiceDialogState extends State<_OnlineServiceDialog> {
         },
         roomIds,
         configuredHours,
+        imagePreview: _imagePreview,
+        imageRemoved: _imageRemoved,
       ),
     );
   }
@@ -1479,6 +2022,7 @@ Widget _field(
   bool number = false,
   bool required = false,
   int lines = 1,
+  String? helper,
   String? Function(String?)? validator,
 }) => TextFormField(
   controller: controller,
@@ -1487,6 +2031,8 @@ Widget _field(
   decoration: InputDecoration(
     labelText: label,
     hintText: hint,
+    helperText: helper,
+    helperMaxLines: 4,
     border: const OutlineInputBorder(),
   ),
   validator:

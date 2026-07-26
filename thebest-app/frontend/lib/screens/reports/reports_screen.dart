@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -1321,11 +1322,7 @@ class _StaffCommission {
     required this.commission,
   });
 
-  String get initials {
-    final parts = name.trim().split(RegExp(r'\s+'));
-    if (parts.length >= 2) return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
-    return name.isEmpty ? 'S' : name[0].toUpperCase();
-  }
+  String get initials => staffInitials(name, fallback: 'S');
 }
 
 class _MutableServicePerformance {

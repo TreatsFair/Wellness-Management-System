@@ -297,6 +297,353 @@ class WalkInRoomAvailability {
   final String? freeAt;
 }
 
+class TherapistQueueEntry {
+  const TherapistQueueEntry({
+    required this.therapistId,
+    required this.name,
+    required this.gender,
+    required this.queuePosition,
+    required this.status,
+    required this.protectedTurnOwed,
+    required this.isRecommended,
+    this.freeAt,
+    this.reservationStartAt,
+    this.reservationEndAt,
+    this.freeInMinutes = 0,
+  });
+
+  factory TherapistQueueEntry.fromMap(Map<String, dynamic> row) {
+    return TherapistQueueEntry(
+      therapistId:
+          row['therapist_id']?.toString() ??
+          row['therapistId']?.toString() ??
+          '',
+      name: row['name']?.toString() ?? '',
+      gender: row['gender']?.toString() ?? '',
+      queuePosition: _asInt(row['queue_position'] ?? row['queuePosition']),
+      status: row['status']?.toString() ?? 'busy',
+      protectedTurnOwed:
+          row['protected_turn_owed'] == true ||
+          row['protectedTurnOwed'] == true,
+      isRecommended:
+          row['is_recommended'] == true || row['isRecommended'] == true,
+      freeAt: _nullableCleanTime(row['free_at'] ?? row['freeAt']),
+      reservationStartAt: _nullableCleanTime(
+        row['reservation_start_at'] ?? row['reservationStartAt'],
+      ),
+      reservationEndAt: _nullableCleanTime(
+        row['reservation_end_at'] ?? row['reservationEndAt'],
+      ),
+      freeInMinutes: _asInt(row['free_in_minutes'] ?? row['freeInMinutes']),
+    );
+  }
+
+  final String therapistId;
+  final String name;
+  final String gender;
+  final int queuePosition;
+  final String status;
+  final bool protectedTurnOwed;
+  final bool isRecommended;
+  final String? freeAt;
+  final String? reservationStartAt;
+  final String? reservationEndAt;
+  final int freeInMinutes;
+
+  bool get isFreeNow => status == 'free_now';
+  bool get isBusyNow => status == 'busy_now' || status == 'busy';
+  bool get isReserved => status == 'reserved';
+  bool get isTentativeHold => status == 'tentative_hold';
+}
+
+class TodayQueueTherapist {
+  const TodayQueueTherapist({
+    required this.therapistId,
+    required this.name,
+    this.profileImageUrl = '',
+    this.status = '',
+    this.isRecommended = false,
+    this.protectedTurnOwed = false,
+  });
+
+  factory TodayQueueTherapist.fromMap(Map<String, dynamic> row) {
+    return TodayQueueTherapist(
+      therapistId:
+          row['therapist_id']?.toString() ??
+          row['therapistId']?.toString() ??
+          '',
+      name: row['name']?.toString() ?? '',
+      profileImageUrl:
+          row['profile_image_url']?.toString() ??
+          row['profileImageUrl']?.toString() ??
+          '',
+      status: row['status']?.toString() ?? '',
+      isRecommended:
+          row['is_recommended'] == true || row['isRecommended'] == true,
+      protectedTurnOwed:
+          row['protected_turn_owed'] == true ||
+          row['protectedTurnOwed'] == true,
+    );
+  }
+
+  final String therapistId;
+  final String name;
+  final String profileImageUrl;
+  final String status;
+  final bool isRecommended;
+  final bool protectedTurnOwed;
+}
+
+class TodayQueueManagement {
+  const TodayQueueManagement({
+    required this.queueDate,
+    required this.isManualOverride,
+    required this.requiresResetWarning,
+    required this.liveQueue,
+    this.starter,
+    this.currentNext,
+    this.changedBy,
+    this.changedAt,
+    this.reason,
+    this.firstTurnConsumedAt,
+  });
+
+  factory TodayQueueManagement.fromMap(Map<String, dynamic> row) {
+    final starter = _nullableMap(row['starter']);
+    final currentNext = _nullableMap(
+      row['current_next'] ?? row['currentNext'],
+    );
+    final queue = row['live_queue'] ?? row['liveQueue'];
+    return TodayQueueManagement(
+      queueDate:
+          row['queue_date']?.toString() ?? row['queueDate']?.toString() ?? '',
+      isManualOverride:
+          row['is_manual_override'] == true || row['isManualOverride'] == true,
+      requiresResetWarning:
+          row['requires_reset_warning'] == true ||
+          row['requiresResetWarning'] == true,
+      starter: starter == null ? null : TodayQueueTherapist.fromMap(starter),
+      currentNext: currentNext == null
+          ? null
+          : TodayQueueTherapist.fromMap(currentNext),
+      liveQueue: queue is List
+          ? queue
+                .whereType<Map>()
+                .map(
+                  (item) => TodayQueueTherapist.fromMap(
+                    Map<String, dynamic>.from(item),
+                  ),
+                )
+                .toList()
+          : const [],
+      changedBy:
+          row['changed_by']?.toString() ?? row['changedBy']?.toString(),
+      changedAt: DateTime.tryParse(
+        row['changed_at']?.toString() ?? row['changedAt']?.toString() ?? '',
+      ),
+      reason: row['reason']?.toString(),
+      firstTurnConsumedAt: DateTime.tryParse(
+        row['first_turn_consumed_at']?.toString() ??
+            row['firstTurnConsumedAt']?.toString() ??
+            '',
+      ),
+    );
+  }
+
+  final String queueDate;
+  final TodayQueueTherapist? starter;
+  final bool isManualOverride;
+  final TodayQueueTherapist? currentNext;
+  final String? changedBy;
+  final DateTime? changedAt;
+  final String? reason;
+  final DateTime? firstTurnConsumedAt;
+  final bool requiresResetWarning;
+  final List<TodayQueueTherapist> liveQueue;
+}
+
+class CounterCapacitySlot {
+  const CounterCapacitySlot({
+    required this.startTime,
+    required this.endTime,
+    required this.therapistFree,
+    required this.roomFree,
+    this.isAvailable = true,
+    this.unavailableDimension,
+    this.unavailableAt,
+    this.conflictTherapistId,
+    this.conflictStart,
+    this.conflictEnd,
+  });
+
+  factory CounterCapacitySlot.fromMap(Map<String, dynamic> row) {
+    return CounterCapacitySlot(
+      startTime: _cleanTime(row['start_time'] ?? row['startTime']),
+      endTime: _cleanTime(row['end_time'] ?? row['endTime']),
+      therapistFree: _asInt(row['therapist_free'] ?? row['therapistFree']),
+      roomFree: _asInt(row['room_free'] ?? row['roomFree']),
+      isAvailable:
+          row['is_available'] == null ||
+          row['is_available'] == true ||
+          row['isAvailable'] == true,
+      unavailableDimension:
+          row['unavailable_dimension']?.toString() ??
+          row['unavailableDimension']?.toString(),
+      unavailableAt: _nullableDateTime(
+        row['unavailable_at'] ?? row['unavailableAt'],
+      ),
+      conflictTherapistId:
+          row['conflict_therapist_id']?.toString() ??
+          row['conflictTherapistId']?.toString(),
+      conflictStart: _nullableCleanTime(
+        row['conflict_start'] ?? row['conflictStart'],
+      ),
+      conflictEnd: _nullableCleanTime(
+        row['conflict_end'] ?? row['conflictEnd'],
+      ),
+    );
+  }
+
+  final String startTime;
+  final String endTime;
+  final int therapistFree;
+  final int roomFree;
+  final bool isAvailable;
+  final String? unavailableDimension;
+  final DateTime? unavailableAt;
+  final String? conflictTherapistId;
+  final String? conflictStart;
+  final String? conflictEnd;
+}
+
+class CounterCapacityRequirement {
+  const CounterCapacityRequirement({
+    required this.paxIndex,
+    required this.serviceIds,
+    required this.durationMinutes,
+    required this.roomType,
+    this.bufferAfterMinutes = 0,
+    this.assignmentSource = 'queue',
+    this.requestedGender,
+    this.requestedTherapistId,
+  });
+
+  final int paxIndex;
+  final List<String> serviceIds;
+  final int durationMinutes;
+  final int bufferAfterMinutes;
+  final String roomType;
+  final String assignmentSource;
+  final String? requestedGender;
+  final String? requestedTherapistId;
+
+  Map<String, dynamic> toRpcMap() => {
+    'pax_index': paxIndex,
+    'service_ids': serviceIds,
+    'duration_minutes': durationMinutes,
+    'buffer_after_minutes': bufferAfterMinutes,
+    'room_type': roomType,
+    'assignment_source': assignmentSource,
+    'requested_gender': requestedGender,
+    'requested_therapist_id': requestedTherapistId,
+  };
+}
+
+List<Map<String, dynamic>> serializeCounterCapacityRequirements(
+  List<CounterCapacityRequirement> requirements,
+) {
+  return [
+    for (final requirement in requirements)
+      if (requirement.paxIndex < 1)
+        throw ArgumentError.value(
+          requirement.paxIndex,
+          'paxIndex',
+          'Every pax requirement must use a one-based pax index.',
+        )
+      else
+        requirement.toRpcMap(),
+  ];
+}
+
+class ProvisionalAllocation {
+  const ProvisionalAllocation({
+    required this.paxIndex,
+    required this.therapistId,
+    required this.roomId,
+    required this.endTime,
+  });
+
+  factory ProvisionalAllocation.fromMap(Map<String, dynamic> row) {
+    return ProvisionalAllocation(
+      paxIndex: _asInt(row['pax_index'] ?? row['paxIndex']),
+      therapistId:
+          row['therapist_id']?.toString() ??
+          row['therapistId']?.toString() ??
+          '',
+      roomId: row['room_id']?.toString() ?? row['roomId']?.toString() ?? '',
+      endTime: _nullableCleanTime(row['end_time'] ?? row['endTime']),
+    );
+  }
+
+  final int paxIndex;
+  final String therapistId;
+  final String roomId;
+  final String? endTime;
+}
+
+class QueueScheduleStatus {
+  const QueueScheduleStatus({
+    required this.activeCount,
+    required this.scheduledCount,
+    required this.unscheduledActiveCount,
+  });
+
+  factory QueueScheduleStatus.fromMap(Map<String, dynamic> row) {
+    return QueueScheduleStatus(
+      activeCount: _asInt(row['active_count'] ?? row['activeCount']),
+      scheduledCount: _asInt(row['scheduled_count'] ?? row['scheduledCount']),
+      unscheduledActiveCount: _asInt(
+        row['unscheduled_active_count'] ?? row['unscheduledActiveCount'],
+      ),
+    );
+  }
+
+  final int activeCount;
+  final int scheduledCount;
+  final int unscheduledActiveCount;
+}
+
+class TherapistSwitchResult {
+  const TherapistSwitchResult({
+    required this.success,
+    this.commissionMethod,
+    this.errorCode,
+    this.errorMessage,
+  });
+
+  factory TherapistSwitchResult.fromMap(Map<String, dynamic> row) {
+    return TherapistSwitchResult(
+      success: row['success'] == true,
+      commissionMethod:
+          row['commission_method']?.toString() ??
+          row['commissionMethod']?.toString(),
+      errorCode: row['error_code']?.toString() ?? row['errorCode']?.toString(),
+      errorMessage:
+          row['error_message']?.toString() ?? row['errorMessage']?.toString(),
+    );
+  }
+
+  final bool success;
+  final String? commissionMethod;
+  final String? errorCode;
+  final String? errorMessage;
+
+  String get message => friendlyBookingErrorMessage(
+    errorMessage ?? errorCode,
+    fallback: 'Unable to switch therapist',
+  );
+}
+
 class RoomUnitAvailability {
   const RoomUnitAvailability({
     required this.id,
@@ -431,6 +778,9 @@ class CspService {
     int itemCount = 1,
     String notes = '',
     String? appointmentGroupId,
+    String assignmentSource = 'queue',
+    String? requestedTherapistId,
+    String? requestedGender,
   }) async {
     final rows = await _client.rpc(
       'create_appointment_with_csp',
@@ -450,6 +800,9 @@ class CspService {
         'p_item_count': itemCount,
         'p_notes': notes,
         'p_appointment_group_id': _nullIfBlank(appointmentGroupId),
+        'p_assignment_source': assignmentSource,
+        'p_requested_therapist_id': _nullIfBlank(requestedTherapistId),
+        'p_requested_gender': requestedGender,
       },
     );
     return CspCreateResult.fromMap(_firstMap(rows));
@@ -462,6 +815,9 @@ class CspService {
     required String date,
     required String startTime,
     required String endTime,
+    String? assignmentSource,
+    String? requestedTherapistId,
+    String? requestedGender,
   }) async {
     final rows = await _client.rpc(
       'update_appointment_with_csp',
@@ -472,6 +828,9 @@ class CspService {
         'p_date': date,
         'p_start_time': startTime,
         'p_end_time': endTime,
+        'p_assignment_source': assignmentSource,
+        'p_requested_therapist_id': _nullIfBlank(requestedTherapistId),
+        'p_requested_gender': requestedGender,
       },
     );
     return CspCreateResult.fromMap(_firstMap(rows));
@@ -645,6 +1004,152 @@ class CspService {
     return _asMapList(rows).map(RoomUnitAvailability.fromMap).toList();
   }
 
+  /// Live rotating queue for one outlet/day, joined with duration-aware
+  /// availability for [date]+[nowTime]+[duration]. Ordered so the recommended
+  /// therapist (first free-now in rotation order) sorts first.
+  static Future<List<TherapistQueueEntry>> getTherapistQueue({
+    required String outletId,
+    required String date,
+    required String nowTime,
+    required int duration,
+  }) async {
+    final rows = await _client.rpc(
+      'get_therapist_queue',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_now_time': nowTime,
+        'p_duration': duration,
+      },
+    );
+    return _asMapList(rows).map(TherapistQueueEntry.fromMap).toList();
+  }
+
+  static Future<TodayQueueManagement> getTodayQueueManagement({
+    required String outletId,
+    required String date,
+    required String nowTime,
+  }) async {
+    final result = await _client.rpc(
+      'get_today_queue_management',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_now_time': nowTime,
+      },
+    );
+    return TodayQueueManagement.fromMap(_firstMap(result));
+  }
+
+  static Future<void> changeTodayQueueStarter({
+    required String outletId,
+    required String date,
+    required String therapistId,
+    String? reason,
+    bool confirmReset = false,
+  }) async {
+    await _client.rpc(
+      'change_today_queue_starter',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_starter_therapist_id': therapistId,
+        'p_reason': _nullIfBlank(reason),
+        'p_confirm_reset': confirmReset,
+      },
+    );
+  }
+
+  static Future<void> reorderCurrentTherapistQueue({
+    required String outletId,
+    required String date,
+    required List<String> therapistIds,
+  }) async {
+    await _client.rpc(
+      'reorder_current_therapist_queue',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_therapist_ids': therapistIds,
+      },
+    );
+  }
+
+  static Future<void> resetTodayQueueToAutomatic({
+    required String outletId,
+    required String date,
+    String? reason,
+    bool confirmReset = false,
+  }) async {
+    await _client.rpc(
+      'reset_today_queue_to_automatic',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_reason': _nullIfBlank(reason),
+        'p_confirm_reset': confirmReset,
+      },
+    );
+  }
+
+  /// Capacity-based 30-minute grid for a counter booking. Every pax keeps its
+  /// own service duration, cleanup buffer, and required room type.
+  static Future<List<CounterCapacitySlot>> getCounterCapacitySlots({
+    required String outletId,
+    required String date,
+    required List<CounterCapacityRequirement> requirements,
+    String? excludeGroupId,
+    String? excludeId,
+  }) async {
+    final rows = await _client.rpc(
+      'get_counter_preference_capacity_slots',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_requirements': serializeCounterCapacityRequirements(requirements),
+        'p_exclude_appointment_group_id': _nullIfBlank(excludeGroupId),
+        'p_exclude_appointment_id': _nullIfBlank(excludeId),
+      },
+    );
+    return _asMapList(rows).map(CounterCapacitySlot.fromMap).toList();
+  }
+
+  /// Silently picks a provisional therapist and correctly typed room/zone for
+  /// each pax at one shared start time. Longer windows are allocated first.
+  static Future<List<ProvisionalAllocation>> allocateProvisionalSlots({
+    required String outletId,
+    required String date,
+    required String startTime,
+    required List<CounterCapacityRequirement> requirements,
+    String? excludeGroupId,
+  }) async {
+    final rows = await _client.rpc(
+      'allocate_preference_provisional_slots',
+      params: {
+        'p_outlet_id': outletId,
+        'p_date': date,
+        'p_start_time': startTime,
+        'p_requirements': serializeCounterCapacityRequirements(requirements),
+        'p_exclude_appointment_group_id': _nullIfBlank(excludeGroupId),
+      },
+    );
+    return _asMapList(rows).map(ProvisionalAllocation.fromMap).toList();
+  }
+
+  /// Diagnostic counts for an outlet/date so the picker can explain an empty
+  /// queue: whether nobody is scheduled today vs. whether therapist working
+  /// hours simply haven't been configured.
+  static Future<QueueScheduleStatus> getQueueScheduleStatus({
+    required String outletId,
+    required String date,
+  }) async {
+    final rows = await _client.rpc(
+      'get_queue_schedule_status',
+      params: {'p_outlet_id': outletId, 'p_date': date},
+    );
+    return QueueScheduleStatus.fromMap(_firstMap(rows));
+  }
+
   static Future<void> releaseStaffWalkInDraft({
     required String draftSessionId,
     int? paxIndex,
@@ -672,6 +1177,11 @@ Map<String, dynamic> _firstMap(Object? rows) {
   return list.isEmpty ? <String, dynamic>{} : list.first;
 }
 
+Map<String, dynamic>? _nullableMap(Object? value) {
+  if (value is! Map) return null;
+  return Map<String, dynamic>.from(value);
+}
+
 String? _nullIfBlank(String? value) {
   final trimmed = value?.trim() ?? '';
   if (trimmed.isEmpty || trimmed == 'walk_in_guest') return null;
@@ -689,6 +1199,11 @@ int? _nullableInt(Object? value) {
   if (value is int) return value;
   if (value is num) return value.round();
   return int.tryParse(value.toString());
+}
+
+DateTime? _nullableDateTime(Object? value) {
+  if (value == null) return null;
+  return DateTime.tryParse(value.toString());
 }
 
 String? _nullableCleanTime(Object? value) {

@@ -7,6 +7,7 @@ import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
 import '../../core/utils/error_message.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/customer_repository.dart';
@@ -14,6 +15,7 @@ import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/therapist_queue_picker.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -110,6 +112,8 @@ class _WalkInTherapist {
   final String busyUntil;
   final int freeInMinutes;
   final Map<String, double> serviceCommissions;
+  final String assignmentSource;
+  final String? requestedGender;
 
   const _WalkInTherapist({
     required this.id,
@@ -119,6 +123,8 @@ class _WalkInTherapist {
     required this.busyUntil,
     required this.freeInMinutes,
     required this.serviceCommissions,
+    this.assignmentSource = 'queue',
+    this.requestedGender,
   });
 
   factory _WalkInTherapist.fromMap(
@@ -139,20 +145,30 @@ class _WalkInTherapist {
     );
   }
 
+  _WalkInTherapist withAssignment({
+    required String source,
+    String? requestedGender,
+  }) {
+    return _WalkInTherapist(
+      id: id,
+      name: name,
+      isFree: isFree,
+      availabilityStatus: availabilityStatus,
+      busyUntil: busyUntil,
+      freeInMinutes: freeInMinutes,
+      serviceCommissions: serviceCommissions,
+      assignmentSource: source,
+      requestedGender: requestedGender,
+    );
+  }
+
   Map<String, dynamic> get commissionData => {
     'id': id,
     'name': name,
     'serviceCommissions': serviceCommissions,
   };
 
-  String get initials {
-    final p = name.trim().split(' ');
-    return p.length >= 2
-        ? '${p[0][0]}${p[1][0]}'.toUpperCase()
-        : name.isNotEmpty
-        ? name[0].toUpperCase()
-        : '?';
-  }
+  String get initials => staffInitials(name);
 
   Color get avatarColor {
     final colors = [
@@ -284,8 +300,12 @@ class _WalkInAllocation {
       )
       .toList();
 
-  Map<String, dynamic> toCspAllocation({required String notes}) {
+  Map<String, dynamic> toCspAllocation({
+    required String notes,
+    required int paxIndex,
+  }) {
     return {
+      'pax_index': paxIndex,
       'therapist_id': therapist.id,
       'room_id': zone.id,
       'room_unit_id': roomUnit?.id,
@@ -297,6 +317,12 @@ class _WalkInAllocation {
       'service_items': serviceItems,
       'item_count': services.length,
       'notes': notes,
+      'assignment_source': therapist.assignmentSource,
+      'requested_therapist_id':
+          therapist.assignmentSource == 'specific_customer_request'
+          ? therapist.id
+          : null,
+      'requested_gender': therapist.requestedGender,
     };
   }
 }
@@ -577,8 +603,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   void _filterCustomers() {
     final q = _searchController.text.trim().toLowerCase();
     setState(() {
-      if (_selectedCustomer != null &&
-          q != _selectedCustomer!.name.toLowerCase()) {
+      final selected = _selectedCustomer;
+      final matchesSelected = selected != null &&
+          (q == selected.name.toLowerCase() ||
+              q == selected.phone.toLowerCase());
+      if (selected != null && !matchesSelected) {
         _selectedCustomer = null;
       }
       _filteredCustomers = _customers
@@ -610,12 +639,43 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       return;
     }
 
+    _searchController.text = savedCustomer.phone.isNotEmpty
+        ? savedCustomer.phone
+        : savedCustomer.name;
     setState(() {
       _customers = [..._customers, savedCustomer]
         ..sort((a, b) => a.name.compareTo(b.name));
       _filteredCustomers = _customers;
       _selectedCustomer = savedCustomer;
-      _searchController.text = savedCustomer.name;
+    });
+  }
+
+  void _selectWalkInCustomer(_WalkInCustomer customer) {
+    _searchController.text = customer.phone.isNotEmpty
+        ? customer.phone
+        : customer.name;
+    setState(() {
+      _selectedCustomer = customer;
+      _filteredCustomers = _customers;
+    });
+  }
+
+  void _selectWalkInGuest() {
+    FocusManager.instance.primaryFocus?.unfocus();
+    // TextEditingController listeners run synchronously. Clearing the search
+    // after setting Guest used to clear the new selection in the same tap.
+    _searchController.clear();
+    setState(() {
+      _selectedCustomer = _WalkInCustomer.anonymous;
+      _filteredCustomers = _customers;
+    });
+  }
+
+  void _clearWalkInCustomer() {
+    _searchController.clear();
+    setState(() {
+      _selectedCustomer = null;
+      _filteredCustomers = _customers;
     });
   }
 
@@ -712,7 +772,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     if (!_heldPaxIndexes.contains(_activePaxIndex)) return;
     await CspService.releaseStaffWalkInDraft(
       draftSessionId: _draftSessionId,
-      paxIndex: _activePaxIndex,
+      paxIndex: _activePaxIndex + 1,
     );
     _heldPaxIndexes.remove(_activePaxIndex);
   }
@@ -808,6 +868,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   bool get _hasCurrentAllocation =>
       _selectedServices.isNotEmpty &&
+      _hasCompatibleRoomType &&
       _selectedTherapist != null &&
       _selectedZone != null &&
       _selectedStartTime != null;
@@ -977,15 +1038,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     }
   }
 
-  int? _reservedPaxForTherapist(String therapistId) {
-    for (var i = 0; i < _paxAllocations.length; i++) {
-      if (i == _activePaxIndex) continue;
-      final allocation = _paxAllocations[i];
-      if (allocation?.therapist.id == therapistId) return i + 1;
-    }
-    return null;
-  }
-
   Future<bool> _reserveAllocation(
     _WalkInAllocation allocation, {
     required int index,
@@ -995,7 +1047,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     try {
       final result = await CspService.reserveStaffWalkInAllocation(
         draftSessionId: _draftSessionId,
-        paxIndex: index,
+        paxIndex: index + 1,
         outletId: OutletContext.activeOutletId.value,
         customerId: customer.id,
         customerName: customer.name,
@@ -1060,7 +1112,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _clearPax(int index) async {
     await CspService.releaseStaffWalkInDraft(
       draftSessionId: _draftSessionId,
-      paxIndex: index,
+      paxIndex: index + 1,
     );
     _heldPaxIndexes.remove(index);
     if (!mounted) return;
@@ -1077,7 +1129,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       for (var index = count; index < _paxAllocations.length; index++) {
         await CspService.releaseStaffWalkInDraft(
           draftSessionId: _draftSessionId,
-          paxIndex: index,
+          paxIndex: index + 1,
         );
         _heldPaxIndexes.remove(index);
       }
@@ -1112,12 +1164,24 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   String get _requiredRoomType {
-    final types = _selectedServices
-        .map((service) => service.roomType)
-        .where((type) => type.isNotEmpty)
-        .toSet();
+    final types = _selectedRoomTypes;
     return types.length == 1 ? types.first : '';
   }
+
+  Set<String> get _selectedRoomTypes => _selectedServices
+      .map((service) => service.roomType)
+      .where((type) => type.isNotEmpty)
+      .toSet();
+
+  bool get _hasMissingRoomType =>
+      _selectedServices.any((service) => service.roomType.isEmpty);
+
+  bool get _hasMixedRoomTypes => _selectedRoomTypes.length > 1;
+
+  bool get _hasCompatibleRoomType =>
+      _selectedServices.isNotEmpty &&
+      !_hasMissingRoomType &&
+      _selectedRoomTypes.length == 1;
 
   double get _orderServicePrice => _checkoutAllocations.fold(
     0,
@@ -1174,6 +1238,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           customerId: _selectedCustomer!.id,
           therapistId: allocation.therapist.id,
           roomId: allocation.zone.id,
+          roomUnitId: allocation.roomUnit?.id,
           serviceId: allocation.primaryService.id,
           date: date,
           startTime: allocation.startTimeValue,
@@ -1194,6 +1259,13 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           transactionNotes: notes,
           startImmediately: startImmediately,
           draftSessionId: _draftSessionId,
+          assignmentSource: allocation.therapist.assignmentSource,
+          requestedTherapistId:
+              allocation.therapist.assignmentSource ==
+                  'specific_customer_request'
+              ? allocation.therapist.id
+              : null,
+          requestedGender: allocation.therapist.requestedGender,
         );
       } else {
         paymentResult =
@@ -1203,7 +1275,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
               paxCount: allocations.length,
               date: date,
               allocations: allocations
-                  .map((allocation) => allocation.toCspAllocation(notes: notes))
+                  .asMap()
+                  .entries
+                  .map(
+                    (entry) => entry.value.toCspAllocation(
+                      notes: notes,
+                      paxIndex: entry.key + 1,
+                    ),
+                  )
                   .toList(),
               notes: notes,
               customerName: _selectedCustomer!.name,
@@ -1518,177 +1597,24 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           controller: _searchController,
           customers: _filteredCustomers,
           selected: _selectedCustomer,
-          onSelect: (c) => setState(() {
-            _selectedCustomer = c;
-            _searchController.text = c.name;
-            _filteredCustomers = _customers;
-          }),
-          onClear: () => setState(() {
-            _selectedCustomer = null;
-            _searchController.clear();
-          }),
+          onSelect: _selectWalkInCustomer,
+          onClear: _clearWalkInCustomer,
         ),
         const SizedBox(height: 12),
         const _OrDivider(),
         const SizedBox(height: 12),
-        // Walk-in no account option
-        GestureDetector(
-          onTap: () => setState(() {
-            _selectedCustomer = _WalkInCustomer.anonymous;
-            _searchController.clear();
-          }),
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: _selectedCustomer?.id == 'walk_in_guest'
-                  ? const Color(0xFF1B6B72).withValues(alpha: 0.06)
-                  : const Color(0xFFF8F8F8),
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: _selectedCustomer?.id == 'walk_in_guest'
-                    ? const Color(0xFF1B6B72)
-                    : const Color(0xFFEEEEEE),
-              ),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: const Color(0xFFF0F0F0),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Icon(
-                    Icons.person_outline,
-                    size: 18,
-                    color: Color(0xFF9E9E9E),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text(
-                        'Walk-in (No Account)',
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A2E),
-                        ),
-                      ),
-                      const Text(
-                        'Anonymous guest — no customer profile needed',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF9E9E9E),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
+        _WalkInGuestPaxRow(
+          isGuestSelected: _selectedCustomer?.id == 'walk_in_guest',
+          configuredCount: _checkoutAllocations.length,
+          paxCount: _paxCount,
+          onGuestTap: _selectWalkInGuest,
+          onAddCustomer: _openAddCustomerDialog,
+          onRemovePax: _paxCount <= 1
+              ? null
+              : () => unawaited(_setPaxCount(_paxCount - 1)),
+          onAddPax: () => unawaited(_setPaxCount(_paxCount + 1)),
         ),
-        const SizedBox(height: 8),
-        GestureDetector(
-          onTap: _openAddCustomerDialog,
-          child: const Text(
-            '+ Add New Customer',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF1B6B72),
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        _buildPaxCountControl(),
       ],
-    );
-  }
-
-  Widget _buildPaxCountControl() {
-    final configuredCount = _checkoutAllocations.length;
-
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE2E8F0)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE8F5F5),
-                  borderRadius: BorderRadius.circular(9),
-                ),
-                child: const Icon(
-                  Icons.groups_2_outlined,
-                  size: 18,
-                  color: Color(0xFF1B6B72),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Pax',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      '$configuredCount of $_paxCount configured',
-                      style: const TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: Color(0xFF64748B),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              _PaxStepperButton(
-                icon: Icons.remove,
-                onTap: _paxCount <= 1
-                    ? null
-                    : () => _setPaxCount(_paxCount - 1),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10),
-                child: Text(
-                  '$_paxCount',
-                  style: const TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-              ),
-              _PaxStepperButton(
-                icon: Icons.add,
-                onTap: () => _setPaxCount(_paxCount + 1),
-              ),
-            ],
-          ),
-        ],
-      ),
     );
   }
 
@@ -1772,6 +1698,42 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Widget _buildAvailabilitySection() {
+    if (_selectedServices.isNotEmpty && !_hasCompatibleRoomType) {
+      final message = _hasMixedRoomTypes
+          ? 'This person has both body-room and foot-zone services. Split them into separate pax entries so each service receives the correct resource.'
+          : 'One or more selected services has no room type. Configure its room requirement before assigning capacity.';
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(14),
+        decoration: BoxDecoration(
+          color: const Color(0xFFFFF8E8),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: const Color(0xFFF2C56B)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Icon(
+              Icons.warning_amber_rounded,
+              size: 20,
+              color: Color(0xFFB45309),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                message,
+                style: const TextStyle(
+                  color: Color(0xFF8A4B08),
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w700,
+                  height: 1.4,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
     final compatibleZones = _zones
         .where((z) => _requiredRoomType.isEmpty || z.type == _requiredRoomType)
         .toList();
@@ -1779,30 +1741,38 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Based on real-time therapist and room availability',
-          style: TextStyle(fontSize: 12, color: Color(0xFF9E9E9E)),
+        TherapistQueuePicker(
+          outletId: OutletContext.activeOutletId.value,
+          date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
+          startTime: DateFormat('HH:mm:ss').format(DateTime.now()),
+          durationMinutes: _selectedDurationMinutes,
+          selectedTherapistId: _selectedTherapist?.id,
+          excludedTherapistIds: {
+            for (var i = 0; i < _paxAllocations.length; i++)
+              if (i != _activePaxIndex && _paxAllocations[i] != null)
+                _paxAllocations[i]!.therapist.id,
+          },
+          onSelected: (pick) {
+            final match = _therapists.firstWhere(
+              (t) => t.id == pick.therapistId,
+              orElse: () => _WalkInTherapist(
+                id: pick.therapistId,
+                name: pick.therapistName,
+                isFree: true,
+                availabilityStatus: 'free_now',
+                busyUntil: '',
+                freeInMinutes: 0,
+                serviceCommissions: const {},
+              ),
+            );
+            _onTherapistSelected(
+              match.withAssignment(
+                source: pick.assignmentSource,
+                requestedGender: pick.requestedGender,
+              ),
+            );
+          },
         ),
-        const SizedBox(height: 14),
-
-        const _WalkInSubLabel('Available Therapists Now'),
-        const SizedBox(height: 10),
-        ..._therapists.map((t) {
-          final reservedByPax = _reservedPaxForTherapist(t.id);
-          final unavailable = !t.isFree && t.freeInMinutes <= 0;
-          return Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: _WalkInTherapistRow(
-              therapist: t,
-              isSelected: _selectedTherapist?.id == t.id,
-              isDisabled: unavailable || reservedByPax != null,
-              reservedByPax: reservedByPax,
-              onTap: unavailable || reservedByPax != null
-                  ? null
-                  : () => _onTherapistSelected(t),
-            ),
-          );
-        }),
         const SizedBox(height: 18),
         const _WalkInSubLabel('Room / Zone Availability'),
         const SizedBox(height: 10),
@@ -2507,7 +2477,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                             _checkoutAllocations.every(
                               (allocation) => allocation.startTime.isNow,
                             )
-                        ? 'Pay & Start Service'
+                        ? 'Confirm Payment & Start Service'
                         : 'Pay & Reserve',
                     style: const TextStyle(
                       fontSize: 15,
@@ -3422,6 +3392,239 @@ class _OrDivider extends StatelessWidget {
   }
 }
 
+class _WalkInGuestPaxRow extends StatelessWidget {
+  const _WalkInGuestPaxRow({
+    required this.isGuestSelected,
+    required this.configuredCount,
+    required this.paxCount,
+    required this.onGuestTap,
+    required this.onAddCustomer,
+    required this.onRemovePax,
+    required this.onAddPax,
+  });
+
+  final bool isGuestSelected;
+  final int configuredCount;
+  final int paxCount;
+  final VoidCallback onGuestTap;
+  final VoidCallback onAddCustomer;
+  final VoidCallback? onRemovePax;
+  final VoidCallback? onAddPax;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final compact = constraints.maxWidth < 540;
+        final sectionPadding = EdgeInsets.all(compact ? 12 : 16);
+
+        final guestSection = GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: onGuestTap,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 150),
+            color: isGuestSelected
+                ? const Color(0xFF1B6B72).withValues(alpha: 0.055)
+                : Colors.white,
+            padding: sectionPadding,
+            child: Row(
+              children: [
+                Container(
+                  width: compact ? 38 : 44,
+                  height: compact ? 38 : 44,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFE8F5F5),
+                    borderRadius: BorderRadius.circular(11),
+                  ),
+                  child: const Icon(
+                    Icons.person_outline,
+                    size: 21,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                const Expanded(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Guest',
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w800,
+                          color: Color(0xFF1A1A2E),
+                        ),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'No customer profile needed',
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: Color(0xFF7C8798),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (isGuestSelected) ...[
+                  const SizedBox(width: 6),
+                  const Icon(
+                    Icons.check_circle,
+                    size: 20,
+                    color: Color(0xFF1B6B72),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+
+        final paxIdentity = Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Container(
+              width: compact ? 38 : 44,
+              height: compact ? 38 : 44,
+              decoration: BoxDecoration(
+                color: const Color(0xFFE8F5F5),
+                borderRadius: BorderRadius.circular(11),
+              ),
+              child: const Icon(
+                Icons.groups_2_outlined,
+                size: 21,
+                color: Color(0xFF1B6B72),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Flexible(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Pax',
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: Color(0xFF1A1A2E),
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '$configuredCount configured',
+                    style: const TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: Color(0xFF64748B),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+
+        final paxControls = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _PaxStepperButton(icon: Icons.remove, onTap: onRemovePax),
+            SizedBox(
+              width: compact ? 36 : 44,
+              child: Text(
+                '$paxCount',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 19,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+            ),
+            _PaxStepperButton(icon: Icons.add, onTap: onAddPax),
+          ],
+        );
+
+        final paxSection = Padding(
+          padding: sectionPadding,
+          child: compact
+              ? Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    paxIdentity,
+                    const SizedBox(height: 12),
+                    Align(alignment: Alignment.centerRight, child: paxControls),
+                  ],
+                )
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(child: paxIdentity),
+                    const SizedBox(width: 12),
+                    paxControls,
+                  ],
+                ),
+        );
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              clipBehavior: Clip.antiAlias,
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isGuestSelected
+                      ? const Color(0xFF1B6B72).withValues(alpha: 0.55)
+                      : const Color(0xFFE2E8F0),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.035),
+                    blurRadius: 10,
+                    offset: const Offset(0, 3),
+                  ),
+                ],
+              ),
+              child: IntrinsicHeight(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(flex: compact ? 11 : 10, child: guestSection),
+                    Container(width: 1, color: const Color(0xFFE2E8F0)),
+                    Expanded(flex: compact ? 9 : 10, child: paxSection),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: onAddCustomer,
+              child: const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 2, vertical: 7),
+                child: Text(
+                  '+ Add New Customer',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Color(0xFF1B6B72),
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
 class _WalkInCustomerSearch extends StatelessWidget {
   final TextEditingController controller;
   final List<_WalkInCustomer> customers;
@@ -3445,7 +3648,7 @@ class _WalkInCustomerSearch extends StatelessWidget {
           controller: controller,
           style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
           decoration: InputDecoration(
-            hintText: 'Search existing customer...',
+            hintText: 'Search by phone or name...',
             hintStyle: const TextStyle(color: Color(0xFFBDBDBD), fontSize: 14),
             prefixIcon: const Icon(
               Icons.search,
@@ -3516,14 +3719,14 @@ class _WalkInCustomerSearch extends StatelessWidget {
                         ),
                       ),
                       title: Text(
-                        c.name,
+                        c.phone.isEmpty ? 'No phone number' : c.phone,
                         style: const TextStyle(
                           fontSize: 14,
-                          fontWeight: FontWeight.w500,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                       subtitle: Text(
-                        c.phone,
+                        c.name,
                         style: const TextStyle(fontSize: 12),
                       ),
                       onTap: () => onSelect(c),
@@ -3712,130 +3915,6 @@ class _WalkInServiceImage extends StatelessWidget {
   }
 }
 
-class _WalkInTherapistRow extends StatelessWidget {
-  final _WalkInTherapist therapist;
-  final bool isSelected;
-  final bool isDisabled;
-  final int? reservedByPax;
-  final VoidCallback? onTap;
-
-  const _WalkInTherapistRow({
-    required this.therapist,
-    required this.isSelected,
-    required this.isDisabled,
-    this.reservedByPax,
-    required this.onTap,
-  });
-
-  String get _statusLabel {
-    if (reservedByPax != null) return 'Reserved by Pax $reservedByPax';
-    if (therapist.availabilityStatus == 'on_leave') return 'On leave';
-    if (therapist.isFree) return 'Available immediately';
-    if (therapist.freeInMinutes > 0) {
-      return 'Free in ${therapist.freeInMinutes} min';
-    }
-    return 'Unavailable';
-  }
-
-  Color get _statusColor {
-    if (reservedByPax != null) return const Color(0xFF1B6B72);
-    if (therapist.isFree) return const Color(0xFF4CAF50);
-    if (therapist.freeInMinutes > 0) return const Color(0xFFF59E0B);
-    return const Color(0xFF9E9E9E);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: isDisabled ? null : onTap,
-      child: AnimatedOpacity(
-        duration: const Duration(milliseconds: 150),
-        opacity: isDisabled ? 0.4 : 1.0,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-          decoration: BoxDecoration(
-            color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: isSelected
-                  ? const Color(0xFF1B6B72)
-                  : const Color(0xFFEEEEEE),
-              width: isSelected ? 2 : 1,
-            ),
-          ),
-          child: Row(
-            children: [
-              CircleAvatar(
-                radius: 20,
-                backgroundColor: isDisabled
-                    ? const Color(0xFFBDBDBD)
-                    : therapist.avatarColor,
-                child: Text(
-                  therapist.initials,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                  ),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          therapist.name,
-                          style: const TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: Color(0xFF1A1A2E),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Row(
-                      children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            color: _statusColor,
-                          ),
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          _statusLabel,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: _statusColor,
-                            fontWeight: FontWeight.w500,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              if (!therapist.isFree && therapist.freeInMinutes > 0)
-                Icon(
-                  Icons.schedule_outlined,
-                  size: 16,
-                  color: const Color(0xFFF59E0B),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _WalkInZoneCard extends StatelessWidget {
   final _WalkInZone zone;

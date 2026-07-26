@@ -1,3 +1,4 @@
+import '../../core/outlets/outlet_context.dart';
 import '../services/supabase_table_service.dart';
 import 'appointment_repository.dart';
 import 'repository_utils.dart';
@@ -47,6 +48,19 @@ class TherapistRepository {
 
   Future<Map<String, dynamic>?> getTherapist(String id) => _table.getById(id);
 
+  Future<bool> isTherapistRotationNumberAvailable(
+    int rotationNumber, {
+    String? excludingTherapistId,
+  }) async {
+    final rows = await getTherapists();
+    return !rows.any(
+      (row) =>
+          _isTherapistRole(row) &&
+          asString(row['id']) != excludingTherapistId &&
+          asInt(row['displayOrder']) == rotationNumber,
+    );
+  }
+
   Future<Map<String, dynamic>> addTherapist(Map<String, dynamic> values) async {
     if (values.containsKey('displayOrder')) return _table.create(values);
     final role = asString(values['role'], 'Therapist').trim();
@@ -80,10 +94,18 @@ class TherapistRepository {
 
   Future<void> deleteTherapist(String id) => _table.delete(id);
 
-  Future<void> updateTherapistOrder(List<String> therapistIds) async {
-    for (var index = 0; index < therapistIds.length; index++) {
-      await _table.update(therapistIds[index], {'displayOrder': index});
-    }
+  Future<void> updateTherapistOrder(
+    List<String> therapistIds,
+    List<int> displayOrders,
+  ) async {
+    await _table.client.rpc(
+      'reorder_staff_display_order',
+      params: {
+        'p_outlet_id': OutletContext.activeOutletId.value,
+        'p_staff_ids': therapistIds,
+        'p_display_orders': displayOrders,
+      },
+    );
   }
 
   Future<Map<String, dynamic>> getTherapistAppointmentStats(

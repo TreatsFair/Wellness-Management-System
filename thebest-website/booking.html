@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -20,11 +20,12 @@
   </head>
   <body>
     <header class="booking-header">
-      <a class="brand" href="./index.html" aria-label="The Best Family Wellness home">
-        <img
-          src="./pics/transparent logo.png"
-          alt="The Best Family Wellness"
-        />
+      <a
+        class="brand"
+        href="./index.html"
+        aria-label="The Best Family Wellness home"
+      >
+        <img src="./pics/transparent logo.png" alt="The Best Family Wellness" />
       </a>
       <nav class="booking-nav" aria-label="Main navigation">
         <a href="./index.html">Home</a>
@@ -38,8 +39,8 @@
     <main class="booking-shell">
       <section class="booking-intro">
         <p class="eyebrow">Reserve your time to unwind</p>
-        <h1>Your moment of calm,<br /><em>beautifully planned.</em></h1>
-        <p>Plan treatments for one or more guests, then reserve one shared time.</p>
+        <h1>Relaxation,<br /><em>made simple.</em></h1>
+        <p>Choose your treatments and reserve your preferred time.</p>
       </section>
 
       <div class="mobile-progress" aria-live="polite">
@@ -62,7 +63,7 @@
         </button>
         <i></i>
         <button class="step" data-step-target="2" type="button" disabled>
-          <span>2</span><b>Guests & Masseurs</b>
+          <span>2</span><b>Guests</b>
         </button>
         <i></i>
         <button class="step" data-step-target="3" type="button" disabled>
@@ -90,9 +91,16 @@
             </div>
 
             <div class="outlet-grid" id="outlet-options">
-              <button class="outlet-card" type="button" data-outlet="taman-wahyu">
+              <button
+                class="outlet-card"
+                type="button"
+                data-outlet="taman-wahyu"
+              >
                 <span class="card-image">
-                  <img src="./pics/thebestwellness_outside.jpg" alt="The Best Family Wellness Kepong exterior" />
+                  <img
+                    src="./pics/thebestwellness_outside.jpg"
+                    alt="The Best Family Wellness Kepong exterior"
+                  />
                   <span class="open-pill"><i></i> Open today</span>
                 </span>
                 <span class="card-body">
@@ -101,14 +109,19 @@
                     <small>Kuala Lumpur</small>
                     <strong>Kepong · Taman Wahyu</strong>
                     <span>50G, Jalan Seri Utara 1, Taman Wahyu</span>
-                    <span class="card-meta" data-outlet-hours>11:00 AM – 11:00 PM</span>
+                    <span class="card-meta" data-outlet-hours
+                      >11:00 AM – 11:00 PM</span
+                    >
                   </span>
                 </span>
               </button>
 
               <button class="outlet-card" type="button" data-outlet="pv128">
                 <span class="card-image">
-                  <img src="./pics/thebest_setapak_outside.jpg" alt="The Best Family Wellness Setapak exterior" />
+                  <img
+                    src="./pics/thebest_setapak_outside.jpg"
+                    alt="The Best Family Wellness Setapak exterior"
+                  />
                   <span class="open-pill"><i></i> Open today</span>
                 </span>
                 <span class="card-body">
@@ -117,7 +130,9 @@
                     <small>Kuala Lumpur</small>
                     <strong>Setapak · PV128</strong>
                     <span>G13-A, PV128, Jalan Genting Kelang</span>
-                    <span class="card-meta" data-outlet-hours>10:30 AM – 12:00 AM</span>
+                    <span class="card-meta" data-outlet-hours
+                      >10:30 AM – 12:00 AM</span
+                    >
                   </span>
                 </span>
               </button>
@@ -132,15 +147,26 @@
               </div>
               <p>Choose your group size.</p>
             </div>
-            <div class="pax-picker" id="pax-picker" role="radiogroup" aria-label="Number of guests"></div>
-            <p class="pax-hint" id="pax-hint">Groups share one visit time — every guest starts together.</p>
+            <div
+              class="pax-picker"
+              id="pax-picker"
+              role="radiogroup"
+              aria-label="Number of guests"
+            ></div>
+            <p class="pax-hint" id="pax-hint">
+              Groups share one visit time — every guest starts together.
+            </p>
 
             <div class="guest-names" id="guest-names">
               <div class="guest-names-heading">
                 <h3>Guest Details</h3>
-                <span>Preferences are subject to therapist availability.</span>
+                <span></span>
               </div>
-              <div class="guest-preview" id="guest-preview" aria-label="Guest details"></div>
+              <div
+                class="guest-preview"
+                id="guest-preview"
+                aria-label="Guest details"
+              ></div>
             </div>
             <p class="preference-warning" id="preference-warning" hidden></p>
           </section>
@@ -157,9 +183,17 @@
             <label class="same-toggle" id="same-treatment-row" hidden>
               <input type="checkbox" id="same-treatment-checkbox" />
               <i aria-hidden="true"></i>
-              <span><strong>Same treatment for everyone</strong><small>Pick once and it applies to all guests.</small></span>
+              <span
+                ><strong>Same treatment for everyone</strong
+                ><small>Pick once and it applies to all guests.</small></span
+              >
             </label>
-            <div class="guest-tabs" id="treatment-guest-tabs" role="tablist" aria-label="Choose guest"></div>
+            <div
+              class="guest-tabs"
+              id="treatment-guest-tabs"
+              role="tablist"
+              aria-label="Choose guest"
+            ></div>
             <p class="active-guest-label" id="treatment-guest-heading"></p>
             <div class="service-list" id="service-options"></div>
           </section>
@@ -177,12 +211,19 @@
               <div class="date-section">
                 <h3>Available dates</h3>
                 <div class="date-strip" id="date-options"></div>
-                <p class="availability-note">More dates will be available when live scheduling is connected.</p>
+                <p class="availability-note">
+                  More dates will be available when live scheduling is
+                  connected.
+                </p>
               </div>
               <div class="time-section">
                 <div class="time-heading">
                   <h3>Available times</h3>
-                  <span><i></i> Available</span>
+                  <div class="time-legend">
+                    <span class="is-available"><i></i> Available</span>
+                    <span class="is-selling"><i></i> Selling fast</span>
+                    <span class="is-full"><i></i> Full</span>
+                  </div>
                 </div>
                 <div class="time-groups" id="time-options"></div>
               </div>
@@ -201,19 +242,40 @@
             <form class="details-form" id="details-form">
               <label class="field field-wide">
                 <span>Full name</span>
-                <input name="name" autocomplete="name" placeholder="e.g. Sarah Tan" required />
+                <input
+                  name="name"
+                  autocomplete="name"
+                  placeholder="e.g. Sarah Tan"
+                  required
+                />
               </label>
               <label class="field">
                 <span>Mobile number</span>
-                <input name="phone" autocomplete="tel" inputmode="tel" placeholder="+60 12 345 6789" required />
+                <input
+                  name="phone"
+                  autocomplete="tel"
+                  inputmode="tel"
+                  placeholder="+60 12 345 6789"
+                  required
+                />
               </label>
               <label class="field">
                 <span>Email address</span>
-                <input name="email" autocomplete="email" type="email" placeholder="sarah@example.com" required />
+                <input
+                  name="email"
+                  autocomplete="email"
+                  type="email"
+                  placeholder="sarah@example.com"
+                  required
+                />
               </label>
               <label class="field field-wide">
                 <span>Anything we should know? <small>Optional</small></span>
-                <textarea name="notes" rows="3" placeholder="Preferences, accessibility needs or special requests"></textarea>
+                <textarea
+                  name="notes"
+                  rows="3"
+                  placeholder="Preferences, accessibility needs or special requests"
+                ></textarea>
               </label>
               <label class="booking-honeypot" aria-hidden="true">
                 Website
@@ -221,28 +283,55 @@
               </label>
               <label class="consent field-wide">
                 <input type="checkbox" required />
-                <span>I agree to the booking and cancellation terms and understand that changes are handled by the selected outlet.</span>
+                <span
+                  >I agree to the
+                  <button type="button" class="terms-link" id="terms-link">
+                    Terms and Conditions
+                  </button>
+                  and acknowledge that all payments are final and non-refundable.
+                  </span
+                >
               </label>
             </form>
-
           </section>
 
           <div class="panel-actions">
             <button class="text-button" id="back-button" type="button" hidden>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6" /></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
               Back
             </button>
-            <button class="primary-button" id="continue-button" type="button" disabled>
+            <button
+              class="primary-button"
+              id="continue-button"
+              type="button"
+              disabled
+            >
               Continue
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m9 18 6-6-6-6" />
+              </svg>
             </button>
           </div>
         </div>
 
-        <aside class="booking-summary" id="booking-summary" aria-labelledby="review-title" aria-live="polite">
+        <aside
+          class="booking-summary"
+          id="booking-summary"
+          aria-labelledby="review-title"
+          aria-live="polite"
+        >
           <div class="summary-sheet-handle" aria-hidden="true"></div>
-          <button class="summary-close" id="summary-close" type="button" aria-label="Close booking summary">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>
+          <button
+            class="summary-close"
+            id="summary-close"
+            type="button"
+            aria-label="Close booking summary"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="m6 6 12 12M18 6 6 18" />
+            </svg>
           </button>
           <article class="review-card">
             <div class="review-heading">
@@ -251,44 +340,154 @@
                 <h3 id="review-title">Booking summary</h3>
               </div>
               <span class="review-secure">
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3m-9 0h8a2 2 0 0 1 2 2v7H6v-7a2 2 0 0 1 2-2Z" /></svg>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path
+                    d="M7 10V7a5 5 0 0 1 10 0v3m-9 0h8a2 2 0 0 1 2 2v7H6v-7a2 2 0 0 1 2-2Z"
+                  />
+                </svg>
                 Secure checkout
               </span>
             </div>
             <dl class="review-details">
-              <div><dt>Outlet</dt><dd id="review-outlet">&mdash;</dd></div>
-              <div><dt>Guests</dt><dd id="review-guests">1 guest</dd></div>
-              <div><dt>Date & time</dt><dd id="review-datetime">&mdash;</dd></div>
+              <div>
+                <dt>Outlet</dt>
+                <dd id="review-outlet">&mdash;</dd>
+              </div>
+              <div>
+                <dt>Guests</dt>
+                <dd id="review-guests">1 guest</dd>
+              </div>
+              <div>
+                <dt>Date & time</dt>
+                <dd id="review-datetime">&mdash;</dd>
+              </div>
             </dl>
             <div class="review-guest-list" id="review-guest-list"></div>
             <div class="review-total">
-              <span><small>Estimated duration</small><b id="review-duration">0 minutes</b></span>
-              <span><small>Total payable</small><strong id="review-total">RM 0</strong></span>
+              <span
+                ><small>Estimated duration</small
+                ><b id="review-duration">0 minutes</b></span
+              >
+              <span
+                ><small>Total payable</small
+                ><strong id="review-total">RM 0</strong></span
+              >
             </div>
-            <p class="review-note">Your selected time will be held for 10 minutes when you continue to Billplz payment.</p>
+            <p class="review-note">
+              Your selected time will be held for 10 minutes when you continue
+              to payment.
+            </p>
           </article>
         </aside>
       </div>
 
       <div class="summary-overlay" id="summary-overlay"></div>
-      <button class="mobile-summary-bar" id="mobile-summary-toggle" type="button" aria-controls="booking-summary" aria-expanded="false">
+      <button
+        class="mobile-summary-bar"
+        id="mobile-summary-toggle"
+        type="button"
+        aria-controls="booking-summary"
+        aria-expanded="false"
+      >
         <span>
           <small>Booking summary</small>
           <b id="mobile-summary-caption">Choose an outlet</b>
         </span>
         <strong id="mobile-summary-total">RM 0</strong>
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m9 18 6-6-6-6" />
+        </svg>
       </button>
     </main>
 
     <dialog class="confirmation-dialog" id="confirmation-dialog">
       <div class="success-mark">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="m7 12 3 3 7-7" />
+        </svg>
       </div>
       <p class="eyebrow" id="confirmation-eyebrow">Preview complete</p>
       <h2 id="confirmation-title">Your booking flow is ready.</h2>
-      <p id="confirmation-message">No payment or confirmed appointment has been created.</p>
-      <button class="primary-button" id="close-dialog" type="button">Return to booking</button>
+      <p id="confirmation-message">
+        No payment or confirmed appointment has been created.
+      </p>
+      <button class="primary-button" id="close-dialog" type="button">
+        Return to booking
+      </button>
+    </dialog>
+
+    <dialog class="terms-dialog" id="terms-dialog">
+      <div class="terms-dialog-head">
+        <h2>Booking Terms &amp; Conditions</h2>
+        <button
+          class="terms-dialog-close"
+          id="terms-dialog-close"
+          type="button"
+          aria-label="Close terms and conditions"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="m6 6 12 12M18 6 6 18" />
+          </svg>
+        </button>
+      </div>
+      <div class="terms-body">
+        <h3>Booking &amp; Confirmation</h3>
+        <p>
+          Please check your outlet, service, date and time carefully before
+          paying. Your selected slot is held for 10 minutes while you complete
+          payment — your appointment is only confirmed once payment is
+          successful and a booking confirmation is shown. Please keep your
+          booking reference for any enquiries.
+        </p>
+
+        <h3>Prices &amp; Payment</h3>
+        <p>
+          All prices are in Malaysian Ringgit and any applicable SST is shown
+          before you pay. Payments are processed securely through Billplz — we
+          do not collect or store your card, bank or e-wallet login details. A
+          pending, failed or abandoned payment does not confirm a booking.
+        </p>
+
+        <h3>Cancellations, No-Shows &amp; Refunds</h3>
+        <p>
+          Payments are final and non-refundable for cancellations, no-shows,
+          late arrivals we can't accommodate, incorrect booking details, or a
+          change of mind. To reschedule, please contact your selected outlet as
+          early as possible — this is subject to availability. If we need to
+          cancel or change your appointment, we'll offer a new time or an
+          equivalent service in exchange.
+        </p>
+
+        <h3>Late Arrival</h3>
+        <p>
+          Please arrive at least 10 minutes early. We will only hold your slot up to 10 minutes after your scheduled time. If you arrive late, your service may be shortened or rescheduled to avoid delaying other
+          customers. The appointment end time will only be extended when staff
+          and room availability allow.
+        </p>
+
+        <h3>Health &amp; Conduct</h3>
+        <p>
+          Please tell our staff about any medical condition, injury, pregnancy
+          or allergy that could affect your treatment — our services are not a
+          substitute for medical care. We may refuse or stop a service for
+          safety reasons, or where a customer behaves inappropriately toward
+          staff or other customers; payment is non-refundable in these cases.
+        </p>
+
+        <h3>Personal Information</h3>
+        <p>
+          We may collect your name, contact information, booking detailsand
+          booking status you provide to manage your appointment, process payment
+          (via Billplz) and contact you about your booking. We keep this
+          information secure and only use it for these purposes.
+        </p>
+
+        <h3>Booking Enquiries</h3>
+        <p>
+          For any booking enquires, please contact your selected outlet
+          directly.
+        </p>
+      </div>
     </dialog>
 
     <script src="./js/booking-config.js"></script>

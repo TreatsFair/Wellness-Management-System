@@ -176,6 +176,79 @@ function normalizeMyPhone(value: string): string {
   return `60${digits}`;
 }
 
+// Billplz caps the bill description at 200 characters and shows it verbatim on the
+// payment page and on its own receipt, so it is the only place we can tell the
+// customer what they actually paid for. Fields come from
+// get_booking_hold_for_payment / get_booking_group_for_payment (090, 091); each one
+// is optional so an older deployed RPC degrades to the previous short reference
+// instead of printing "undefined" on a live receipt.
+//
+// Deliberately omitted, both confirmed against a real rendered bill page:
+//  - Guest name/email/mobile: Billplz already shows these as their own fields.
+//  - A booking reference: Billplz already shows its own "Bill ID", which (prefixed
+//    "BP-") is exactly the receipt_number the app displays once paid. A second,
+//    different-looking reference here (sliced from our token, since Billplz hasn't
+//    assigned its id yet when this text is built) only reads as a mismatch next to
+//    Billplz's real one — see get_booking_hold_for_payment / _group_for_payment
+//    (092) for where the matching app reference is actually surfaced, on our own
+//    site's post-payment confirmation.
+const BILLPLZ_DESCRIPTION_LIMIT = 200;
+
+// Billplz renders the description as one unbroken line, so " | " plus a label per
+// segment ("Date:", "Notes:") is what gives it visible structure — real line
+// breaks aren't an option on a page we don't control.
+function billDescription(hold: Record<string, unknown>): string {
+  const text = (value: unknown) => String(value ?? "").trim();
+  // Notes are free-typed by the customer; strip characters that would fake another
+  // segment or break the line the receipt renders as.
+  const sanitize = (value: string) => value.replace(/[\r\n|]+/g, " ").replace(/\s+/g, " ").trim();
+
+  const outlet = text(hold.outlet_name);
+  const service = text(hold.service_summary);
+  const pax = Number(hold.pax_count);
+  let serviceLine = service;
+  if (service) {
+    // The group summary already carries its own per-guest counts and durations.
+    const minutes = Number(hold.duration_minutes);
+    serviceLine = Number.isFinite(minutes) && minutes > 0 && !/\dmin/.test(service)
+      ? `${service} ${minutes}min`
+      : service;
+    if (Number.isFinite(pax) && pax > 1) serviceLine += ` for ${pax} pax`;
+  }
+
+  let whenLine = "";
+  const startAt = text(hold.start_at);
+  if (startAt) {
+    const when = new Date(startAt);
+    if (!Number.isNaN(when.getTime())) {
+      // Guests read the receipt in Malaysian time, not the server's UTC.
+      whenLine = new Intl.DateTimeFormat("en-MY", {
+        timeZone: "Asia/Kuala_Lumpur",
+        weekday: "short", day: "numeric", month: "short",
+        hour: "numeric", minute: "2-digit", hour12: true,
+      }).format(when);
+    }
+  }
+
+  // Always short, always kept in full and in this order.
+  const before = [
+    outlet ? `The Best Wellness ${outlet}` : "The Best Wellness",
+    serviceLine,
+    whenLine ? `Date: ${whenLine}` : "",
+  ].filter(Boolean);
+
+  const notes = sanitize(text(hold.notes));
+  if (!notes) return before.join(" | ");
+
+  // Notes are open-ended text, so they're the only segment that can overflow the
+  // limit — trim the note itself rather than truncating the core details above.
+  const fixedLength = before.join(" | ").length;
+  const budget = BILLPLZ_DESCRIPTION_LIMIT - fixedLength - " | Notes: ".length;
+  if (budget < 10) return before.join(" | ");
+  const notesLine = notes.length <= budget ? notes : `${notes.slice(0, budget - 1).trimEnd()}…`;
+  return [...before, `Notes: ${notesLine}`].join(" | ");
+}
+
 async function fingerprint(request: Request): Promise<string> {
   const address = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
   const salt = Deno.env.get("BOOKING_RATE_LIMIT_SALT") || supabaseUrl;
@@ -281,13 +354,14 @@ async function route(request: Request): Promise<Response> {
     const allocations = groupAllocations(body?.allocations);
     const date = String(body?.date ?? "");
     if (!allocations || !DATE.test(date)) return fail(request, "Treatments and date are required");
-    const slots = await rpc("get_public_booking_group_slots_v1", {
+    const slots = await rpc("get_public_booking_group_slot_status_v1", {
       p_allocations: allocations,
       p_date: date,
     }) as Array<Record<string, unknown>>;
     return json(request, { slots: slots.map((row) => ({
       start_at: row.start_at,
       end_at: row.end_at,
+      status: row.status,
     })) });
   }
   if (request.method === "POST" && path === "/booking-groups") {
@@ -308,10 +382,14 @@ async function route(request: Request): Promise<Response> {
       }) as Array<Record<string, unknown>>;
       const hold = rows[0];
       if (!hold) return fail(request, "Unable to reserve this group time", 500);
+      const paymentRows = await rpc("get_booking_group_for_payment", {
+        p_token: hold.group_token,
+      }) as Array<Record<string, unknown>>;
+      const payment = paymentRows[0];
       return json(request, { hold: {
         token: hold.group_token,
         expires_at: hold.hold_expires_at,
-        total_price: Number(hold.total_price),
+        total_price: Number(payment?.total_amount ?? hold.total_price),
         guest_count: Number(hold.guest_count),
         status: "pending_payment",
       } }, 201);
@@ -339,9 +417,13 @@ async function route(request: Request): Promise<Response> {
       }) as Array<Record<string, unknown>>;
       const hold = rows[0];
       if (!hold) return fail(request, "Unable to reserve this time", 500);
+      const paymentRows = await rpc("get_booking_hold_for_payment", {
+        p_token: hold.hold_token,
+      }) as Array<Record<string, unknown>>;
+      const payment = paymentRows[0];
       return json(request, { hold: {
         token: hold.hold_token, expires_at: hold.hold_expires_at,
-        total_price: Number(hold.total_price),
+        total_price: Number(payment?.total_amount ?? hold.total_price),
         duration_minutes: Number(hold.duration_minutes), status: "pending_payment",
       } }, 201);
     } catch (error) {
@@ -377,7 +459,7 @@ async function route(request: Request): Promise<Response> {
         name: String(hold.customer_name ?? ""),
         amount: String(amountCents),
         callback_url: callbackUrl,
-        description: `The Best Wellness online booking ${token.slice(0, 8).toUpperCase()}`,
+        description: billDescription(hold),
       };
       if (BOOKING_REDIRECT_BASE) {
         billParams.redirect_url = `${BOOKING_REDIRECT_BASE}/booking.html?bp_token=${token}`;
@@ -479,18 +561,30 @@ async function route(request: Request): Promise<Response> {
     const token = uuid(url.searchParams.get("token"));
     if (!token) return fail(request, "A valid booking reference is required");
     await rpc("expire_stale_booking_holds");
+    let groupBooking = true;
     let rows = await rpc("get_public_booking_group_status_v1", { p_token: token }) as Array<Record<string, unknown>>;
-    if (!rows[0]) rows = await rpc("get_public_booking_hold_status_v2", { p_token: token }) as Array<Record<string, unknown>>;
+    if (!rows[0]) {
+      groupBooking = false;
+      rows = await rpc("get_public_booking_hold_status_v2", { p_token: token }) as Array<Record<string, unknown>>;
+    }
     if (!rows[0]) return fail(request, "Booking reference not found", 404);
     const hold = rows[0];
+    const paymentRows = await rpc(
+      groupBooking ? "get_booking_group_for_payment" : "get_booking_hold_for_payment",
+      { p_token: token },
+    ) as Array<Record<string, unknown>>;
+    const payment = paymentRows[0];
     return json(request, { hold: {
       token: hold.token,
       status: hold.status,
       expires_at: hold.expires_at,
-      total_price: Number(hold.total_price),
+      total_price: Number(payment?.total_amount ?? hold.total_price),
       start_at: hold.start_at,
       end_at: hold.end_at,
       guest_count: Number(hold.guest_count ?? 1),
+      // Same receipt_number staff see in the app's transaction record — null until
+      // the Billplz webhook has confirmed payment and created that row.
+      receipt_number: payment?.receipt_number ?? null,
     } });
   }
   return fail(request, "Not found", 404);

@@ -6,12 +6,14 @@ import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/services/supabase_table_service.dart';
 import '../../widgets/detail_drawer_layout.dart';
+import '../../widgets/therapist_queue_picker.dart';
 import '../booking/booking_screen.dart';
 import '../customers/customer_screen.dart';
 import 'appointment_checkin_logic.dart';
@@ -102,9 +104,55 @@ double _readDouble(Object? value) {
 
 String _moneyAmount(double value) => 'RM ${value.toStringAsFixed(2)}';
 
+List<Map<String, dynamic>> _linkedTransactions(
+  Iterable<_ScheduleAppointment> appointments,
+) {
+  final seen = <String>{};
+  final rows = <Map<String, dynamic>>[];
+  for (final appointment in appointments) {
+    for (final row in appointment.transactions) {
+      final id = row['id']?.toString() ?? '';
+      final receipt = row['receiptNumber']?.toString() ?? '';
+      final key = id.isNotEmpty ? id : receipt;
+      if (key.isNotEmpty && !seen.add(key)) continue;
+      rows.add(row);
+    }
+  }
+  rows.sort((left, right) {
+    final leftAddon =
+        left['source']?.toString().toLowerCase() == 'appointment_addon';
+    final rightAddon =
+        right['source']?.toString().toLowerCase() == 'appointment_addon';
+    if (leftAddon != rightAddon) return leftAddon ? 1 : -1;
+    final leftAt = _readDateTime(left['createdAt'] ?? left['created_at']);
+    final rightAt = _readDateTime(right['createdAt'] ?? right['created_at']);
+    return (leftAt ?? DateTime.fromMillisecondsSinceEpoch(0)).compareTo(
+      rightAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+    );
+  });
+  return rows;
+}
+
+List<Map<String, dynamic>> _mergeLinkedTransactions(
+  Iterable<Map<String, dynamic>> groupRows,
+  Iterable<Map<String, dynamic>> appointmentRows,
+) {
+  final seen = <String>{};
+  final merged = <Map<String, dynamic>>[];
+  for (final row in [...groupRows, ...appointmentRows]) {
+    final id = row['id']?.toString() ?? '';
+    final receipt = row['receiptNumber']?.toString() ?? '';
+    final key = id.isNotEmpty ? id : receipt;
+    if (key.isNotEmpty && !seen.add(key)) continue;
+    merged.add(row);
+  }
+  return merged;
+}
+
 bool _showsOperationalStatus(String status) {
   final normalized = status.trim().toLowerCase();
-  return normalized != 'payment pending' &&
+  return normalized != 'confirmed' &&
+      normalized != 'payment pending' &&
       normalized != 'pending payment' &&
       normalized != 'unpaid';
 }
@@ -135,6 +183,7 @@ class _ScheduleAppointment {
   final String bookedDateKey;
   final String bookedStartTime;
   final String bookedEndTime;
+  final DateTime? checkedInAt;
   final DateTime? actualStartedAt;
   final DateTime? actualCompletedAt;
   final int bufferAfterMinutes;
@@ -149,8 +198,15 @@ class _ScheduleAppointment {
   final String therapistId;
   final String therapistName;
   final List<String> therapistNames;
+  final String assignmentSource;
+  final String? requestedGender;
+  final String therapistAssignmentState;
   final String roomId;
   final String roomName;
+  final String roomAllocationMode;
+  final String roomUnitId;
+  final String roomUnitName;
+  final String roomAssignmentState;
   final String notes;
   final double price;
   final String receiptNumber;
@@ -162,14 +218,13 @@ class _ScheduleAppointment {
   final List<Map<String, dynamic>> serviceItems;
   final List<Map<String, dynamic>> bookedServiceItems;
   final List<Map<String, dynamic>> paidServiceItems;
+  final List<Map<String, dynamic>> transactions;
   final Map<String, dynamic> therapistCommissionData;
   final int lateGraceMinutes;
   final int delayWarningMinutes;
 
-  double get chargedTotal => appointmentChargedTotal(
-    scheduledAmount: price,
-    paidAmount: paidAmount,
-  );
+  double get chargedTotal =>
+      appointmentChargedTotal(scheduledAmount: price, paidAmount: paidAmount);
 
   const _ScheduleAppointment({
     required this.id,
@@ -184,6 +239,7 @@ class _ScheduleAppointment {
     required this.bookedDateKey,
     required this.bookedStartTime,
     required this.bookedEndTime,
+    required this.checkedInAt,
     required this.actualStartedAt,
     required this.actualCompletedAt,
     required this.bufferAfterMinutes,
@@ -198,8 +254,15 @@ class _ScheduleAppointment {
     required this.therapistId,
     required this.therapistName,
     required this.therapistNames,
+    required this.assignmentSource,
+    required this.requestedGender,
+    required this.therapistAssignmentState,
     required this.roomId,
     required this.roomName,
+    required this.roomAllocationMode,
+    required this.roomUnitId,
+    required this.roomUnitName,
+    required this.roomAssignmentState,
     required this.notes,
     required this.price,
     required this.receiptNumber,
@@ -211,6 +274,7 @@ class _ScheduleAppointment {
     required this.serviceItems,
     required this.bookedServiceItems,
     required this.paidServiceItems,
+    required this.transactions,
     required this.therapistCommissionData,
     required this.lateGraceMinutes,
     required this.delayWarningMinutes,
@@ -240,7 +304,11 @@ class _ScheduleAppointment {
         customerId.trim().isEmpty || customerId == 'walk_in_guest';
     final rawCustomerName =
         data['customerName']?.toString() ?? customer?['name']?.toString();
-    final customerName = isGuestCustomer && _isGuestName(rawCustomerName)
+    final storedGuestName = data['guestName']?.toString().trim() ?? '';
+    final storedGuestPhone = data['guestPhone']?.toString().trim() ?? '';
+    final customerName = storedGuestName.isNotEmpty
+        ? storedGuestName
+        : isGuestCustomer && _isGuestName(rawCustomerName)
         ? 'Guest'
         : rawCustomerName ?? 'Customer';
     final allocationRows = List<Map<String, dynamic>>.from(therapistAllocations)
@@ -286,11 +354,22 @@ class _ScheduleAppointment {
         : transactions.isNotEmpty
         ? transactions.first
         : null;
+    final currentServiceItems = _readServiceItems(
+      data['serviceItems'],
+      serviceId: serviceId,
+      serviceName:
+          data['serviceName']?.toString() ??
+          service?['name']?.toString() ??
+          'Service',
+      services: services,
+      fallbackPrice: _readDouble(data['totalPrice'] ?? data['price']),
+    );
     final bookedServiceItems = <Map<String, dynamic>>[
       for (final transaction in primaryTransactions)
         ...transactionItemsForAppointment(
           transaction: transaction,
           appointmentId: appointmentId,
+          fallbackAppointmentItems: currentServiceItems,
         ),
     ];
     final paidServiceItems = <Map<String, dynamic>>[
@@ -298,6 +377,7 @@ class _ScheduleAppointment {
         ...transactionItemsForAppointment(
           transaction: transaction,
           appointmentId: appointmentId,
+          fallbackAppointmentItems: currentServiceItems,
         ),
     ];
 
@@ -321,6 +401,7 @@ class _ScheduleAppointment {
           data['bookedEndTime']?.toString() ??
           data['endTime']?.toString() ??
           '10:00',
+      checkedInAt: _readDateTime(data['checkedInAt']),
       actualStartedAt: _readDateTime(data['actualStartedAt']),
       actualCompletedAt: _readDateTime(data['actualCompletedAt']),
       bufferAfterMinutes: _readInt(data['bufferAfterMinutes'], 0),
@@ -328,6 +409,7 @@ class _ScheduleAppointment {
       type: data['type']?.toString().trim().toLowerCase() ?? '',
       customerName: customerName,
       customerPhone:
+          (storedGuestPhone.isNotEmpty ? storedGuestPhone : null) ??
           data['customerPhone']?.toString() ??
           customer?['phone']?.toString() ??
           '-',
@@ -349,9 +431,21 @@ class _ScheduleAppointment {
       therapistId: therapistId,
       therapistName: primaryTherapistName,
       therapistNames: allocationNames,
+      assignmentSource: data['assignmentSource']?.toString() ?? 'queue',
+      requestedGender: data['requestedGender']?.toString(),
+      therapistAssignmentState:
+          data['therapistAssignmentState']?.toString() ?? 'confirmed',
       roomId: roomId,
       roomName:
           data['roomName']?.toString() ?? room?['name']?.toString() ?? 'Room',
+      roomAllocationMode:
+          room?['allocationMode']?.toString() ??
+          room?['allocation_mode']?.toString() ??
+          'capacity',
+      roomUnitId: data['roomUnitId']?.toString() ?? '',
+      roomUnitName: data['roomUnitName']?.toString() ?? '',
+      roomAssignmentState:
+          data['roomAssignmentState']?.toString() ?? 'confirmed',
       notes: data['notes']?.toString() ?? '',
       price: _readDouble(data['totalPrice'] ?? data['price']),
       receiptNumber: displayTransaction?['receiptNumber']?.toString() ?? '',
@@ -368,6 +462,7 @@ class _ScheduleAppointment {
             transactionAmountForAppointment(
               transaction: transaction,
               appointmentId: appointmentId,
+              fallbackAppointmentItems: currentServiceItems,
             ),
       ),
       originalPaidAmount: primaryTransactions.fold<double>(
@@ -377,6 +472,7 @@ class _ScheduleAppointment {
             transactionAmountForAppointment(
               transaction: transaction,
               appointmentId: appointmentId,
+              fallbackAppointmentItems: currentServiceItems,
             ),
       ),
       paidAddOnAmount: paidTransactions
@@ -392,20 +488,21 @@ class _ScheduleAppointment {
                 transactionAmountForAppointment(
                   transaction: transaction,
                   appointmentId: appointmentId,
+                  fallbackAppointmentItems: currentServiceItems,
                 ),
           ),
-      serviceItems: _readServiceItems(
-        data['serviceItems'],
-        serviceId: serviceId,
-        serviceName:
-            data['serviceName']?.toString() ??
-            service?['name']?.toString() ??
-            'Service',
-        service: service,
-        fallbackPrice: _readDouble(data['totalPrice'] ?? data['price']),
-      ),
+      serviceItems: currentServiceItems,
       bookedServiceItems: bookedServiceItems,
       paidServiceItems: paidServiceItems,
+      transactions: List<Map<String, dynamic>>.unmodifiable(
+        [...transactions]..sort((left, right) {
+          final leftAt = _readDateTime(left['createdAt'] ?? left['created_at']);
+          final rightAt = _readDateTime(right['createdAt'] ?? right['created_at']);
+          return (leftAt ?? DateTime.fromMillisecondsSinceEpoch(0)).compareTo(
+            rightAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+          );
+        }),
+      ),
       therapistCommissionData: {
         'id': therapistId,
         'name': therapist?['name'],
@@ -416,19 +513,51 @@ class _ScheduleAppointment {
     );
   }
 
+  bool get isTherapistConfirmed => therapistAssignmentState == 'confirmed';
+  bool get isRoomConfirmed => roomAssignmentState == 'confirmed';
+  bool get isFlexibleTherapistAssignment =>
+      !isWalkIn && !isFixedTherapistAssignmentSource(assignmentSource);
+
+  String get therapistDisplayName {
+    if (actualStartedAt == null && isFlexibleTherapistAssignment) {
+      final gender = requestedGender?.trim();
+      if (assignmentSource.toLowerCase() == 'gender_preference' &&
+          gender != null &&
+          gender.isNotEmpty) {
+        return 'Auto assign at start · $gender';
+      }
+      return 'Auto assign at start';
+    }
+    switch (therapistAssignmentState) {
+      case 'auto_assigned':
+        return '$therapistName · Auto assigned';
+      case 'pending':
+        return 'Auto assign at start';
+      default:
+        return '$therapistName · Confirmed';
+    }
+  }
+
+  String get roomDisplayName => isRoomConfirmed
+      ? '$roomName · Confirmed'
+      : 'Unassigned';
+  bool get showRoomAssignment => isRoomConfirmed;
+
   static List<Map<String, dynamic>> _readServiceItems(
     Object? value, {
     required String serviceId,
     required String serviceName,
-    required Map<String, dynamic>? service,
+    required Map<String, Map<String, dynamic>> services,
     required double fallbackPrice,
   }) {
+    final primaryService = services[serviceId];
     if (value is List && value.isNotEmpty) {
       return value.whereType<Map>().map((item) {
         final data = Map<String, dynamic>.from(item);
         final itemId =
             data['id']?.toString() ?? data['serviceId']?.toString() ?? '';
-        final linkedService = itemId == serviceId ? service : null;
+        final linkedService = services[itemId] ??
+            (itemId == serviceId ? primaryService : null);
         return {
           ...data,
           'id': itemId,
@@ -445,6 +574,10 @@ class _ScheduleAppointment {
             0,
           ),
           'price': _readDouble(data['price'] ?? linkedService?['price']),
+          'category':
+              data['category']?.toString() ??
+              linkedService?['category']?.toString() ??
+              'Services',
           'therapistCommission': _readDouble(
             data['therapistCommission'] ??
                 linkedService?['therapistCommission'],
@@ -452,6 +585,13 @@ class _ScheduleAppointment {
           'counterCommission': _readDouble(
             data['counterCommission'] ?? linkedService?['counterCommission'],
           ),
+          'imageUrl':
+              data['imageUrl'] ??
+              data['image_url'] ??
+              data['publicImageUrl'] ??
+              data['public_image_url'] ??
+              linkedService?['imageUrl'] ??
+              linkedService?['publicImageUrl'],
         };
       }).toList();
     }
@@ -460,14 +600,88 @@ class _ScheduleAppointment {
       {
         'id': serviceId,
         'name': serviceName,
-        'duration': _readInt(service?['duration'], 60),
-        'bufferAfterMinutes': _readInt(service?['bufferAfterMinutes'], 0),
+        'duration': _readInt(primaryService?['duration'], 60),
+        'bufferAfterMinutes': _readInt(
+          primaryService?['bufferAfterMinutes'],
+          0,
+        ),
         'price': fallbackPrice > 0
             ? fallbackPrice
-            : _readDouble(service?['price']),
-        'therapistCommission': _readDouble(service?['therapistCommission']),
-        'counterCommission': _readDouble(service?['counterCommission']),
+            : _readDouble(primaryService?['price']),
+        'category': primaryService?['category']?.toString() ?? 'Services',
+        'therapistCommission': _readDouble(
+          primaryService?['therapistCommission'],
+        ),
+        'counterCommission': _readDouble(primaryService?['counterCommission']),
+        'imageUrl':
+            primaryService?['imageUrl'] ?? primaryService?['publicImageUrl'],
       },
+    ];
+  }
+
+  List<Map<String, dynamic>> get displayServiceItems {
+    final bookedById = <String, List<Map<String, dynamic>>>{};
+    final paidCounts = <String, int>{};
+    for (final item in bookedServiceItems) {
+      final id = serviceItemId(item);
+      if (id.isNotEmpty) bookedById.putIfAbsent(id, () => []).add(item);
+    }
+    for (final item in paidServiceItems) {
+      final id = serviceItemId(item);
+      if (id.isNotEmpty) paidCounts[id] = (paidCounts[id] ?? 0) + 1;
+    }
+    final hasBookedSnapshot = bookedById.isNotEmpty;
+    return [
+      for (final item in serviceItems)
+        () {
+          final id = serviceItemId(item);
+          final lineType =
+              item['lineType']?.toString().toLowerCase() ??
+              item['line_type']?.toString().toLowerCase() ??
+              '';
+          final explicitlyAdded = lineType == 'addon' || lineType == 'add_on';
+          final bookedQueue = bookedById[id];
+          final bookedItem = bookedQueue == null || bookedQueue.isEmpty
+              ? null
+              : bookedQueue.removeAt(0);
+          final category =
+              item['category']?.toString().trim().toLowerCase() ?? '';
+          final categoryIsAddon =
+              category == 'add-ons' ||
+              category == 'add ons' ||
+              category == 'addon' ||
+              category == 'add-on';
+          final categoryIsPackage =
+              category == 'packages' || category == 'package';
+          final isBooked = bookedItem != null;
+          final isAddon =
+              categoryIsAddon ||
+              explicitlyAdded ||
+              (hasBookedSnapshot && !isBooked && !categoryIsPackage);
+          final paidRemaining = paidCounts[id] ?? 0;
+          final paid = isBooked || paidRemaining > 0 ||
+              (hasPayment && !isAddon && !hasBookedSnapshot);
+          if (paidRemaining > 0) paidCounts[id] = paidRemaining - 1;
+          final bookedPrice = _readDouble(bookedItem?['price']);
+          return {
+            ...item,
+            ...?bookedItem,
+            'name': item['name'],
+            'category': item['category'],
+            'imageUrl': item['imageUrl'],
+            'duration': _readInt(
+              bookedItem?['duration'] ?? item['duration'],
+              0,
+            ),
+            'price': bookedPrice > 0 ? bookedPrice : item['price'],
+            'lineType': isAddon
+                ? 'addon'
+                : categoryIsPackage
+                ? 'package'
+                : 'main',
+            'paymentStatus': paid ? 'paid' : 'unpaid',
+          };
+        }(),
     ];
   }
 
@@ -596,6 +810,7 @@ class _ScheduleAppointment {
     }
     return actualStart.add(Duration(minutes: scheduledServiceMinutes));
   }
+
   String get actualServiceTimeRange {
     final started = actualStartedAt?.toLocal();
     final ended = actualServiceEndAt;
@@ -669,8 +884,11 @@ class _ScheduleAppointment {
 
   bool get isPending =>
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
-  // Staff only need to confirm payment or check in; completion is automatic.
-  bool get canAdvance => isPending && isServiceDateToday;
+  bool get canFinalizeAndStart =>
+      isPending && isServiceDateToday && actualStartedAt == null;
+  bool get canAdvance => canFinalizeAndStart;
+  bool get usesSpecificRoom =>
+      roomAllocationMode.toLowerCase() == 'specific_room';
   // payment_status on the appointment (043) is the single source of truth.
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
   bool get isRefunded => paymentStatus.toLowerCase() == 'refunded';
@@ -812,9 +1030,14 @@ class _AppointmentGroup {
   bool get isInProgress => appointments.any((a) => a.isInProgress);
   bool get isPending =>
       !isCompleted && !isInProgress && !isCancelled && !isNoShow;
-  // Staff only need to confirm payment or check in; completion is automatic.
-  bool get canAdvance => isPending && primary.isServiceDateToday;
-  bool get hasPayment => appointments.every((appointment) => appointment.hasPayment);
+  bool get canFinalizeAndStart =>
+      appointments.every(
+        (a) => a.canFinalizeAndStart || a.actualStartedAt != null,
+      ) &&
+      appointments.any((a) => a.actualStartedAt == null);
+  bool get canAdvance => canFinalizeAndStart;
+  bool get hasPayment =>
+      appointments.every((appointment) => appointment.hasPayment);
   bool get isRefunded => primary.isRefunded;
   bool get isAwaiting => appointments.any((a) => a.isAwaiting);
   int get arrivalDelayMinutes => appointments.fold<int>(
@@ -837,8 +1060,10 @@ class _AppointmentGroup {
   String get paymentMethod => primary.paymentMethod;
   String get paymentStatus => primary.paymentStatus;
   String get paymentStatusLabel => primary.paymentStatusLabel;
-  double get paidAmount =>
-      appointments.fold(0, (total, appointment) => total + appointment.paidAmount);
+  double get paidAmount => appointments.fold(
+    0,
+    (total, appointment) => total + appointment.paidAmount,
+  );
   double get originalPaidAmount => appointments.fold(
     0,
     (total, appointment) => total + appointment.originalPaidAmount,
@@ -847,6 +1072,32 @@ class _AppointmentGroup {
     0,
     (total, appointment) => total + appointment.paidAddOnAmount,
   );
+  List<Map<String, dynamic>> get transactions {
+    final seen = <String>{};
+    final rows = <Map<String, dynamic>>[];
+    for (final appointment in appointments) {
+      for (final transaction in appointment.transactions) {
+        final id = transaction['id']?.toString() ?? '';
+        final fallback = transaction['receiptNumber']?.toString() ?? '';
+        final key = id.isNotEmpty ? id : fallback;
+        if (key.isNotEmpty && !seen.add(key)) continue;
+        rows.add(transaction);
+      }
+    }
+    rows.sort((left, right) {
+      final leftAddon =
+          left['source']?.toString().toLowerCase() == 'appointment_addon';
+      final rightAddon =
+          right['source']?.toString().toLowerCase() == 'appointment_addon';
+      if (leftAddon != rightAddon) return leftAddon ? 1 : -1;
+      final leftAt = _readDateTime(left['createdAt'] ?? left['created_at']);
+      final rightAt = _readDateTime(right['createdAt'] ?? right['created_at']);
+      return (leftAt ?? DateTime.fromMillisecondsSinceEpoch(0)).compareTo(
+        rightAt ?? DateTime.fromMillisecondsSinceEpoch(0),
+      );
+    });
+    return rows;
+  }
   String get statusLabel => isCompleted
       ? 'Completed'
       : isInProgress
@@ -909,6 +1160,61 @@ class _AppointmentGroup {
     return '$count staff assigned';
   }
 
+  String get therapistDisplayName {
+    if (!isGroup) return primary.therapistDisplayName;
+    if (appointments.every(
+      (appointment) =>
+          appointment.actualStartedAt == null &&
+          appointment.isFlexibleTherapistAssignment,
+    )) {
+      final genders = appointments
+          .where(
+            (appointment) =>
+                appointment.assignmentSource.toLowerCase() ==
+                'gender_preference',
+          )
+          .map((appointment) => appointment.requestedGender?.trim())
+          .whereType<String>()
+          .where((gender) => gender.isNotEmpty)
+          .toSet();
+      if (genders.length == 1 &&
+          appointments.every(
+            (appointment) =>
+                appointment.assignmentSource.toLowerCase() ==
+                'gender_preference',
+          )) {
+        return 'Auto assign at start · ${genders.first}';
+      }
+      return 'Auto assign at start';
+    }
+    if (appointments.every((appointment) => appointment.actualStartedAt == null)) {
+      final fixedCount = appointments
+          .where(
+            (appointment) => !appointment.isFlexibleTherapistAssignment,
+          )
+          .length;
+      final flexibleCount = appointments.length - fixedCount;
+      if (flexibleCount > 0) {
+        return '$fixedCount fixed · $flexibleCount auto assign at start';
+      }
+    }
+    final confirmed = appointments
+        .where((appointment) => appointment.isTherapistConfirmed)
+        .length;
+    final autoAssigned = appointments
+        .where(
+          (appointment) =>
+              appointment.therapistAssignmentState == 'auto_assigned',
+        )
+        .length;
+    if (confirmed == appointments.length) return '$therapistName · Confirmed';
+    if (autoAssigned == appointments.length) {
+      return '$autoAssigned staff · Auto assigned';
+    }
+    if (confirmed == 0 && autoAssigned == 0) return 'Auto assign at start';
+    return '$confirmed confirmed · ${appointments.length - confirmed} pending';
+  }
+
   String get roomName {
     if (!isGroup) return primary.roomName;
     final count = appointments
@@ -917,6 +1223,12 @@ class _AppointmentGroup {
         .length;
     return '$count resources';
   }
+
+  bool get showRoomAssignment =>
+      appointments.every((appointment) => appointment.isRoomConfirmed);
+  String get roomDisplayName => showRoomAssignment
+      ? '$roomName · Confirmed'
+      : 'Unassigned';
 
   List<Map<String, dynamic>> get serviceItems {
     final items = <Map<String, dynamic>>[];
@@ -959,81 +1271,7 @@ class _AppointmentGroup {
   }
 }
 
-class _LateStartDecision {
-  const _LateStartDecision({
-    this.adjustedEndAt,
-    this.allowLateExtensionOverlap = false,
-  });
-
-  final DateTime? adjustedEndAt;
-  final bool allowLateExtensionOverlap;
-}
-
 enum _CheckInSheetResult { completed, editServices }
-
-Future<_LateStartDecision> _lateStartDecision({
-  required BuildContext context,
-  required _ScheduleAppointment appointment,
-  required BusinessRuleSettings settings,
-  required DateTime startedAt,
-}) async {
-  if (!settings.autoExtendLateArrivals) {
-    return const _LateStartDecision();
-  }
-
-  final lateMinutes = appointment.lateMinutesAt(startedAt);
-  if (lateMinutes <= 0 || lateMinutes > settings.lateGraceMinutes) {
-    return const _LateStartDecision();
-  }
-
-  final adjustedEnd = appointment.extendedEndForStart(startedAt);
-  if (!adjustedEnd.isAfter(appointment._serviceEndDateTime)) {
-    return const _LateStartDecision();
-  }
-
-  final availability = await CspService.validateSlot(
-    date: appointment.dateKey,
-    startTime: appointment.startTime,
-    endTime: DateFormat('HH:mm:ss').format(adjustedEnd.toLocal()),
-    therapistId: appointment.therapistId,
-    roomId: appointment.roomId,
-    excludeId: appointment.id,
-  );
-
-  if (availability.therapistAvailable && !availability.roomFull) {
-    return _LateStartDecision(adjustedEndAt: adjustedEnd);
-  }
-
-  if (!context.mounted) return const _LateStartDecision();
-  final extendAnyway = await showDialog<bool>(
-    context: context,
-    builder: (dialogContext) => AlertDialog(
-      title: const Text('Extend service time?'),
-      content: Text(
-        '${appointment.customerName} arrived $lateMinutes minutes late. '
-        'Keeping the full ${appointment.durationMinutes}-minute service will overlap another booking or room capacity.',
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(dialogContext, false),
-          child: const Text('Start without extending'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(dialogContext, true),
-          child: const Text('Extend anyway'),
-        ),
-      ],
-    ),
-  );
-
-  if (extendAnyway == true) {
-    return _LateStartDecision(
-      adjustedEndAt: adjustedEnd,
-      allowLateExtensionOverlap: true,
-    );
-  }
-  return const _LateStartDecision();
-}
 
 class _AppointmentTherapist {
   final String id;
@@ -1057,16 +1295,7 @@ class _AppointmentTherapist {
     );
   }
 
-  String get initials {
-    final parts = name
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((part) => part.isNotEmpty)
-        .toList();
-    if (parts.isEmpty) return '?';
-    if (parts.length == 1) return parts.first[0].toUpperCase();
-    return '${parts.first[0]}${parts.last[0]}'.toUpperCase();
-  }
+  String get initials => staffInitials(name);
 }
 
 class _BookingHoldReservation {
@@ -1181,6 +1410,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   final _appointmentRepository = AppointmentRepository();
   final _dashboardRepository = DashboardRepository();
   final _businessSettingsTable = SupabaseTableService('business_settings');
+  final _businessHoursTable = SupabaseTableService('business_hours');
   final _transactionTable = SupabaseTableService('transactions');
   final _bookingHoldsTable = SupabaseTableService('booking_holds');
 
@@ -1233,13 +1463,27 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
 
   Future<void> _loadBusinessHours() async {
     try {
-      final rows = await _businessSettingsTable.list(limit: 1);
-      final row = rows.isEmpty ? null : rows.first;
-      final rules = row == null
+      final results = await Future.wait([
+        _businessSettingsTable.list(limit: 1),
+        _businessHoursTable.findBy(
+          'day_of_week',
+          _selectedDate.weekday % 7,
+          limit: 1,
+        ),
+      ]);
+      final settingsRow = results[0].isEmpty ? null : results[0].first;
+      final dayRow = results[1].isEmpty ? null : results[1].first;
+      final rules = settingsRow == null
           ? BusinessRuleSettings.defaults()
-          : BusinessRuleSettings.fromMap(row);
-      final openMinutes = _parseBusinessMinutes(row?['openTime'], 9 * 60);
-      var closeMinutes = _parseBusinessMinutes(row?['closeTime'], 21 * 60);
+          : BusinessRuleSettings.fromMap(settingsRow);
+      final openMinutes = _parseBusinessMinutes(
+        dayRow?['openTime'] ?? settingsRow?['openTime'],
+        9 * 60,
+      );
+      var closeMinutes = _parseBusinessMinutes(
+        dayRow?['closeTime'] ?? settingsRow?['closeTime'],
+        21 * 60,
+      );
       if (closeMinutes <= openMinutes) closeMinutes += 24 * 60;
       final open = openMinutes ~/ 60;
       final close = (closeMinutes / 60).ceil();
@@ -1436,7 +1680,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         ...transactionResults[1],
       ]) {
         final transactionId = transaction['id']?.toString() ?? '';
-        if (transactionId.isNotEmpty && !seenTransactionIds.add(transactionId)) {
+        if (transactionId.isNotEmpty &&
+            !seenTransactionIds.add(transactionId)) {
           continue;
         }
         final appointmentId = transaction['appointmentId']?.toString() ?? '';
@@ -1453,9 +1698,18 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       final customerIds = appointmentRows
           .map((data) => data['customerId']?.toString() ?? '')
           .where((id) => id.isNotEmpty);
-      final serviceIds = appointmentRows
-          .map((data) => data['serviceId']?.toString() ?? '')
-          .where((id) => id.isNotEmpty);
+      final serviceIds = <String>{};
+      for (final data in appointmentRows) {
+        final primaryId = data['serviceId']?.toString() ?? '';
+        if (primaryId.isNotEmpty) serviceIds.add(primaryId);
+        final rawItems = data['serviceItems'];
+        if (rawItems is! List) continue;
+        for (final rawItem in rawItems.whereType<Map>()) {
+          final item = Map<String, dynamic>.from(rawItem);
+          final id = serviceItemId(item);
+          if (id.isNotEmpty) serviceIds.add(id);
+        }
+      }
       final therapistIds = [
         ...appointmentRows.map((data) => data['therapistId']?.toString() ?? ''),
         ...therapistAllocationRows.map(
@@ -1493,6 +1747,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           appointmentRows
               .where((data) {
                 final type = data['type']?.toString().trim().toLowerCase();
+                final customerId =
+                    data['customerId']?.toString().trim().toLowerCase() ?? '';
+                final isWalkIn =
+                    type == 'walkin' ||
+                    type == 'walk_in' ||
+                    type == 'walk-in' ||
+                    customerId == 'walk_in_guest';
+                if (isWalkIn) return false;
                 return type == null ||
                     type.isEmpty ||
                     type == 'appointment' ||
@@ -1505,11 +1767,13 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   services: services,
                   therapists: therapists,
                   rooms: rooms,
-                  transactions:
-                      transactionsByAppointment[data['id']?.toString()] ??
-                      transactionsByGroup[data['appointmentGroupId']
-                          ?.toString()] ??
-                      const [],
+                  transactions: _mergeLinkedTransactions(
+                    transactionsByGroup[data['appointmentGroupId']
+                            ?.toString()] ??
+                        const [],
+                    transactionsByAppointment[data['id']?.toString()] ??
+                        const [],
+                  ),
                   therapistAllocations:
                       therapistAllocationsByAppointment[data['id']
                           ?.toString()] ??
@@ -1620,16 +1884,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     if (mounted) _loadAppointments();
   }
 
-  Future<void> _updateStatus(
-    _ScheduleAppointment appointment,
-    String status,
-  ) async {
-    await _appointmentRepository.updateAppointment(appointment.id, {
-      'status': status,
-    });
-    await _loadAppointments();
-  }
-
   Future<void> _cancelAppointment(_ScheduleAppointment appointment) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1654,8 +1908,24 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       ),
     );
     if (confirmed != true) return;
-    await _updateStatus(appointment, 'cancelled');
-    if (mounted) setState(() => _selectedGroup = null);
+    try {
+      await _appointmentRepository.cancelAppointment(appointment.id);
+      await _loadAppointments();
+      if (!mounted) return;
+      setState(() => _selectedGroup = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Appointment cancelled')),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('cancel_appointment failed: $error\n$stackTrace');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to cancel: ${friendlyErrorMessage(error)}'),
+          backgroundColor: const Color(0xFFB42318),
+        ),
+      );
+    }
   }
 
   Future<void> _cancelAppointmentGroup(_AppointmentGroup group) async {
@@ -1682,13 +1952,24 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       ),
     );
     if (confirmed != true) return;
-    for (final appointment in group.appointments) {
-      await _appointmentRepository.updateAppointment(appointment.id, {
-        'status': 'cancelled',
-      });
+    try {
+      await _appointmentRepository.cancelAppointmentGroup(group.appointmentGroupId);
+      await _loadAppointments();
+      if (!mounted) return;
+      setState(() => _selectedGroup = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Group appointment cancelled')),
+      );
+    } catch (error, stackTrace) {
+      debugPrint('cancel_appointment_group failed: $error\n$stackTrace');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Unable to cancel group: ${friendlyErrorMessage(error)}'),
+          backgroundColor: const Color(0xFFB42318),
+        ),
+      );
     }
-    await _loadAppointments();
-    if (mounted) setState(() => _selectedGroup = null);
   }
 
   Future<void> _openEdit(_ScheduleAppointment appointment) async {
@@ -1705,7 +1986,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       await _loadAppointments();
       if (saved == 'collectAddOnPayment' && mounted) {
         final updated = _appointmentGroups.where(
-          (group) => group.appointments.any((item) => item.id == appointment.id),
+          (group) =>
+              group.appointments.any((item) => item.id == appointment.id),
         );
         if (updated.isNotEmpty) await _openAddOnPayment(updated.first);
       }
@@ -1817,6 +2099,9 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           bookedServiceIds: bookedServiceIds,
           lockedServiceIds: lockedServiceIds,
           therapistId: appointment.therapistId,
+          assignmentSource: appointment.assignmentSource,
+          requestedGender: appointment.requestedGender,
+          therapistAssignmentState: appointment.therapistAssignmentState,
           roomId: appointment.roomId,
           startTime: appointment.startTime,
           endTime: appointment.endTime,
@@ -1830,7 +2115,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => _AppointmentCheckoutSheet(appointment: appointment),
+      builder: (context) => _AppointmentCheckoutSheet(
+        appointment: appointment,
+        canOverrideConflict: widget.userRole.toLowerCase() == 'admin',
+      ),
     );
     if (result == _CheckInSheetResult.completed && mounted) {
       await _loadAppointments();
@@ -1852,7 +2140,10 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) => _AppointmentGroupCheckoutSheet(group: group),
+      builder: (context) => _AppointmentGroupCheckoutSheet(
+        group: group,
+        canOverrideConflict: widget.userRole.toLowerCase() == 'admin',
+      ),
     );
     if (result == _CheckInSheetResult.completed && mounted) {
       await _loadAppointments();
@@ -2193,6 +2484,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         newTherapistId: selectedId!,
         splitMethod: splitMethod,
         reason: reasonController.text.trim(),
+        assignmentSource: 'manual_override',
       );
       if (!mounted) return;
       await _loadAppointments();
@@ -2209,11 +2501,15 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           ),
         ),
       );
-    } catch (error) {
+    } catch (error, stackTrace) {
+      debugPrint('switch_appointment_therapist failed: $error\n$stackTrace');
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text(friendlyErrorMessage(error))));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(friendlyErrorMessage(error)),
+            backgroundColor: const Color(0xFFB42318),
+          ),
+        );
       }
     } finally {
       reasonController.dispose();
@@ -2248,7 +2544,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       Navigator.pop(routeContext);
                       await _openTherapistSwitch(appointment);
                     },
-                    onComplete: group.canAdvance
+                    onComplete: group.canFinalizeAndStart
                         ? () async {
                             Navigator.pop(routeContext);
                             await _openGroupCheckout(group);
@@ -2278,7 +2574,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                             Navigator.pop(routeContext);
                             await _openTherapistSwitch(group.primary);
                           },
-                    onComplete: group.primary.canAdvance
+                    onComplete: group.primary.canFinalizeAndStart
                         ? () async {
                             Navigator.pop(routeContext);
                             await _openCheckout(group.primary);
@@ -2467,9 +2763,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   child: Align(
                     alignment: Alignment.centerRight,
                     child: ConstrainedBox(
-                      constraints: BoxConstraints(
-                        maxHeight: panelMaxHeight,
-                      ),
+                      constraints: BoxConstraints(maxHeight: panelMaxHeight),
                       child: Material(
                         color: context.appSurface,
                         elevation: 14,
@@ -2480,37 +2774,50 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                             ? const SizedBox.shrink()
                             : _selectedGroup!.isGroup
                             ? _AppointmentGroupSummaryPanel(
-                      group: _selectedGroup!,
-                      onClose: () => setState(() => _selectedGroup = null),
-                      onEditGroup: () => _openEditGroup(_selectedGroup!),
-                      onEditPax: (appointment) => _openEditGroup(
-                        _selectedGroup!,
-                        activeAppointmentId: appointment.id,
-                      ),
-                      onSwitchPax: _openTherapistSwitch,
-                      onComplete: _selectedGroup!.canAdvance
-                          ? () => _openGroupCheckout(_selectedGroup!)
-                          : null,
-                      onCancel: _selectedGroup!.isCompleted
-                          ? null
-                          : () => _cancelAppointmentGroup(_selectedGroup!),
+                                group: _selectedGroup!,
+                                onClose: () =>
+                                    setState(() => _selectedGroup = null),
+                                onEditGroup: () =>
+                                    _openEditGroup(_selectedGroup!),
+                                onEditPax: (appointment) => _openEditGroup(
+                                  _selectedGroup!,
+                                  activeAppointmentId: appointment.id,
+                                ),
+                                onSwitchPax: _openTherapistSwitch,
+                                onComplete:
+                                    _selectedGroup!.canFinalizeAndStart
+                                    ? () => _openGroupCheckout(_selectedGroup!)
+                                    : null,
+                                onCancel: _selectedGroup!.isCompleted
+                                    ? null
+                                    : () => _cancelAppointmentGroup(
+                                        _selectedGroup!,
+                                      ),
                               )
                             : _AppointmentSummaryPanel(
-                      appointment: _selectedGroup!.primary,
-                      onClose: () => setState(() => _selectedGroup = null),
-                      onEdit: () => _openEdit(_selectedGroup!.primary),
-                      onSwitchTherapist:
-                          _selectedGroup!.primary.isCancelled ||
-                              _selectedGroup!.primary.isNoShow ||
-                              _selectedGroup!.primary.isCompleted
-                          ? null
-                          : () => _openTherapistSwitch(_selectedGroup!.primary),
-                      onComplete: _selectedGroup!.primary.canAdvance
-                          ? () => _openCheckout(_selectedGroup!.primary)
-                          : null,
-                      onCancel: _selectedGroup!.isCompleted
-                          ? null
-                          : () => _cancelAppointment(_selectedGroup!.primary),
+                                appointment: _selectedGroup!.primary,
+                                onClose: () =>
+                                    setState(() => _selectedGroup = null),
+                                onEdit: () =>
+                                    _openEdit(_selectedGroup!.primary),
+                                onSwitchTherapist:
+                                    _selectedGroup!.primary.isCancelled ||
+                                        _selectedGroup!.primary.isNoShow ||
+                                        _selectedGroup!.primary.isCompleted
+                                    ? null
+                                    : () => _openTherapistSwitch(
+                                        _selectedGroup!.primary,
+                                      ),
+                                onComplete:
+                                    _selectedGroup!.primary.canFinalizeAndStart
+                                    ? () =>
+                                          _openCheckout(_selectedGroup!.primary)
+                                    : null,
+                                onCancel: _selectedGroup!.isCompleted
+                                    ? null
+                                    : () => _cancelAppointment(
+                                        _selectedGroup!.primary,
+                                      ),
                               ),
                       ),
                     ),
@@ -4514,12 +4821,13 @@ class _TabletAppointmentListRow extends StatelessWidget {
                         children: [
                           _BookingMeta(
                             icon: Icons.person_outline,
-                            text: appointment.therapistName,
+                            text: appointment.therapistDisplayName,
                           ),
-                          _BookingMeta(
-                            icon: Icons.meeting_room_outlined,
-                            text: appointment.roomName,
-                          ),
+                          if (appointment.showRoomAssignment)
+                            _BookingMeta(
+                              icon: Icons.meeting_room_outlined,
+                              text: appointment.roomDisplayName,
+                            ),
                         ],
                       ),
                     ],
@@ -5046,6 +5354,15 @@ _TherapistDayStatus _therapistDayStatus({
             ),
       )
       .toList();
+  final assignedServices = appointments
+      .expand((group) => group.appointments)
+      .where(
+        (appointment) =>
+            appointment.therapistId == therapist.id &&
+            !appointment.isCancelled &&
+            !appointment.isNoShow,
+      )
+      .toList();
   final now = DateTime.now();
   final holds = bookingHolds.where((hold) {
     return hold.therapistId == therapist.id &&
@@ -5058,7 +5375,8 @@ _TherapistDayStatus _therapistDayStatus({
     if (holds.isNotEmpty) {
       return _TherapistDayStatus(
         label: 'Reserved',
-        detail: 'Payment hold at ${DateFormat('h:mm a').format(holds.first.startsAt)}',
+        detail:
+            'Payment hold at ${DateFormat('h:mm a').format(holds.first.startsAt)}',
         color: const Color(0xFF2563EB),
       );
     }
@@ -5071,6 +5389,41 @@ _TherapistDayStatus _therapistDayStatus({
     );
   }
 
+  final actuallyStarted = assignedServices.where((appointment) {
+    final startedAt = appointment.actualStartedAt?.toLocal();
+    final serviceEnd = appointment.actualServiceEndAt;
+    if (startedAt == null || serviceEnd == null || now.isBefore(startedAt)) {
+      return false;
+    }
+    final cleanupEnd = serviceEnd.add(
+      Duration(minutes: appointment.bufferAfterMinutes.clamp(0, 240)),
+    );
+    return now.isBefore(cleanupEnd);
+  }).toList()..sort((left, right) {
+    final leftEnd = left.actualServiceEndAt ?? now;
+    final rightEnd = right.actualServiceEndAt ?? now;
+    return leftEnd.compareTo(rightEnd);
+  });
+  if (actuallyStarted.isNotEmpty) {
+    final current = actuallyStarted.first;
+    final serviceEnd = current.actualServiceEndAt!;
+    if (now.isBefore(serviceEnd)) {
+      return _TherapistDayStatus(
+        label: 'In session',
+        detail: 'Until ${DateFormat('h:mm a').format(serviceEnd)}',
+        color: const Color(0xFFF97316),
+      );
+    }
+    final cleanupEnd = serviceEnd.add(
+      Duration(minutes: current.bufferAfterMinutes.clamp(0, 240)),
+    );
+    return _TherapistDayStatus(
+      label: 'Cleaning',
+      detail: 'Until ${DateFormat('h:mm a').format(cleanupEnd)}',
+      color: const Color(0xFFF59E0B),
+    );
+  }
+
   final nowMinutes = now.hour * 60 + now.minute;
   final currentHolds = holds.where(
     (hold) => !now.isBefore(hold.startsAt) && now.isBefore(hold.endsAt),
@@ -5079,16 +5432,21 @@ _TherapistDayStatus _therapistDayStatus({
     final current = currentHolds.first;
     return _TherapistDayStatus(
       label: 'Reserved',
-      detail: 'Payment hold until ${DateFormat('h:mm a').format(current.endsAt)}',
+      detail:
+          'Payment hold until ${DateFormat('h:mm a').format(current.endsAt)}',
       color: const Color(0xFF2563EB),
     );
   }
-  final active = assigned.where((group) {
-    return nowMinutes >= group.startMinutes &&
-        nowMinutes < group.cleanupEndMinutes;
+  final active = assignedServices.where((appointment) {
+    return appointment.actualStartedAt == null &&
+        !appointment.isCompleted &&
+        nowMinutes >= appointment.startMinutes &&
+        nowMinutes < appointment.cleanupEndMinutes;
   }).toList();
   if (active.isNotEmpty) {
-    active.sort((a, b) => a.cleanupEndMinutes.compareTo(b.cleanupEndMinutes));
+    active.sort(
+      (a, b) => a.cleanupEndMinutes.compareTo(b.cleanupEndMinutes),
+    );
     final current = active.first;
     if (!current.isInProgress) {
       return _TherapistDayStatus(
@@ -5113,9 +5471,15 @@ _TherapistDayStatus _therapistDayStatus({
     );
   }
 
-  final upcoming =
-      assigned.where((group) => group.startMinutes > nowMinutes).toList()
-        ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
+  final upcoming = assignedServices
+      .where(
+        (appointment) =>
+            appointment.actualStartedAt == null &&
+            !appointment.isCompleted &&
+            appointment.startMinutes > nowMinutes,
+      )
+      .toList()
+    ..sort((a, b) => a.startMinutes.compareTo(b.startMinutes));
   final upcomingHolds = holds.where((hold) => hold.startsAt.isAfter(now));
   if (upcomingHolds.isNotEmpty &&
       (upcoming.isEmpty ||
@@ -5963,13 +6327,15 @@ class _MobileAppointmentCard extends StatelessWidget {
                   children: [
                     _MobileCardInfoRow(
                       icon: Icons.badge_outlined,
-                      label: appointment.therapistName,
+                      label: appointment.therapistDisplayName,
                     ),
-                    const SizedBox(height: 7),
-                    _MobileCardInfoRow(
-                      icon: Icons.meeting_room_outlined,
-                      label: appointment.roomName,
-                    ),
+                    if (appointment.showRoomAssignment) ...[
+                      const SizedBox(height: 7),
+                      _MobileCardInfoRow(
+                        icon: Icons.meeting_room_outlined,
+                        label: appointment.roomDisplayName,
+                      ),
+                    ],
                   ],
                 )
               else
@@ -5978,16 +6344,18 @@ class _MobileAppointmentCard extends StatelessWidget {
                     Expanded(
                       child: _MobileCardInfoRow(
                         icon: Icons.badge_outlined,
-                        label: appointment.therapistName,
+                        label: appointment.therapistDisplayName,
                       ),
                     ),
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: _MobileCardInfoRow(
-                        icon: Icons.meeting_room_outlined,
-                        label: appointment.roomName,
+                    if (appointment.showRoomAssignment) ...[
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: _MobileCardInfoRow(
+                          icon: Icons.meeting_room_outlined,
+                          label: appointment.roomDisplayName,
+                        ),
                       ),
-                    ),
+                    ],
                     const SizedBox(width: 4),
                     Icon(
                       Icons.chevron_right_rounded,
@@ -6185,13 +6553,14 @@ class _TabletAppointmentCardTile extends StatelessWidget {
                           const SizedBox(height: 4),
                           _CardDetailLine(
                             icon: Icons.person_outline,
-                            text: appointment.therapistName,
+                            text: appointment.therapistDisplayName,
                           ),
-                          if (height >= 156) ...[
+                          if (height >= 156 &&
+                              appointment.showRoomAssignment) ...[
                             const SizedBox(height: 4),
                             _CardDetailLine(
                               icon: Icons.meeting_room_outlined,
-                              text: appointment.roomName,
+                              text: appointment.roomDisplayName,
                             ),
                           ],
                         ],
@@ -6259,7 +6628,7 @@ class _TabletAppointmentCardTile extends StatelessWidget {
                             flex: 18,
                             child: _ThinCardIconCell(
                               icon: Icons.person_outline,
-                              text: appointment.therapistName,
+                              text: appointment.therapistDisplayName,
                             ),
                           ),
                           const SizedBox(width: 12),
@@ -6555,9 +6924,8 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
       paymentStatus: group.paymentStatus,
       date: group.date,
       bookedTimeRange: group.primary.bookedTimeRange,
-      actualTimeRange: group.primary.hasActualTiming
-          ? group.primary.actualServiceTimeRange
-          : null,
+      actualStartedAt: group.primary.actualStartedAt,
+      expectedEndAt: group.primary.endAt,
       durationLabel: group.durationLabel,
       total: group.chargedTotal,
       paidAmount: group.paidAmount,
@@ -6585,7 +6953,8 @@ class _AppointmentDetailContent extends StatelessWidget {
   final String paymentStatus;
   final DateTime date;
   final String bookedTimeRange;
-  final String? actualTimeRange;
+  final DateTime? actualStartedAt;
+  final DateTime? expectedEndAt;
   final String durationLabel;
   final double total;
   final double paidAmount;
@@ -6610,7 +6979,8 @@ class _AppointmentDetailContent extends StatelessWidget {
     required this.paymentStatus,
     required this.date,
     required this.bookedTimeRange,
-    required this.actualTimeRange,
+    required this.actualStartedAt,
+    required this.expectedEndAt,
     required this.durationLabel,
     required this.total,
     required this.paidAmount,
@@ -6635,6 +7005,12 @@ class _AppointmentDetailContent extends StatelessWidget {
         ? const Color(0xFF2563EB)
         : const Color(0xFF7C3AED);
     final showOperationalStatus = _showsOperationalStatus(statusLabel);
+    final linkedTransactions = _linkedTransactions(appointments);
+    final counterSst = linkedTransactions
+        .where(
+          (row) => row['paymentMethod']?.toString().toLowerCase() != 'billplz',
+        )
+        .fold<double>(0, (sum, row) => sum + _readDouble(row['sstAmount']));
     final VoidCallback? switchAction =
         appointments.length == 1 && onSwitchPax != null
         ? () => onSwitchPax!(appointments.first)
@@ -6747,7 +7123,8 @@ class _AppointmentDetailContent extends StatelessWidget {
             date: date,
             bookedTimeRange: bookedTimeRange,
             durationLabel: durationLabel,
-            actualTimeRange: actualTimeRange,
+            actualStartedAt: actualStartedAt,
+            expectedEndAt: expectedEndAt,
           ),
           if (notes.trim().isNotEmpty) ...[
             const SizedBox(height: 14),
@@ -6777,28 +7154,16 @@ class _AppointmentDetailContent extends StatelessWidget {
                   ? null
                   : () => onSwitchPax!(appointments[index]),
             ),
-          _BookingTotalCard(total: total),
-          if (receiptNumber.isNotEmpty || paidAmount > 0) ...[
+          _BookingTotalCard(total: total, sstAmount: counterSst),
+          if (linkedTransactions.isNotEmpty) ...[
             const SizedBox(height: 10),
-            _PaymentReceiptCard(
-              receiptNumber: receiptNumber,
-              paymentMethod: paymentMethod,
-              paidAmount: paidAmount,
-              onTap: receiptNumber.isEmpty
-                  ? null
-                  : () => showTransactionOrderDetailSheet(
-                      context,
-                      receiptNumber: receiptNumber,
-                    ),
-            ),
+            _LinkedReceiptsCard(transactions: linkedTransactions),
           ],
           const SizedBox(height: 18),
           if (onComplete != null) ...[
             _VisibleDetailAction(
-              icon: isWalkIn
-                  ? Icons.play_arrow_rounded
-                  : Icons.login_rounded,
-              label: isWalkIn ? 'Start Service' : 'Check In',
+              icon: Icons.login_rounded,
+              label: 'Check In & Start Service',
               color: const Color(0xFF15803D),
               filled: true,
               onPressed: onComplete!,
@@ -6881,11 +7246,7 @@ class _VisibleDetailAction extends StatelessWidget {
           ? FilledButton.icon(
               onPressed: onPressed,
               icon: Icon(icon, size: 19),
-              label: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+              label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
               style: FilledButton.styleFrom(
                 backgroundColor: color,
                 shape: shape,
@@ -6895,11 +7256,7 @@ class _VisibleDetailAction extends StatelessWidget {
           : OutlinedButton.icon(
               onPressed: onPressed,
               icon: Icon(icon, size: 19),
-              label: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
+              label: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
               style: OutlinedButton.styleFrom(
                 foregroundColor: color,
                 side: BorderSide(color: color),
@@ -6941,13 +7298,15 @@ class _BookingTimingCard extends StatelessWidget {
   final DateTime date;
   final String bookedTimeRange;
   final String durationLabel;
-  final String? actualTimeRange;
+  final DateTime? actualStartedAt;
+  final DateTime? expectedEndAt;
 
   const _BookingTimingCard({
     required this.date,
     required this.bookedTimeRange,
     required this.durationLabel,
-    required this.actualTimeRange,
+    required this.actualStartedAt,
+    required this.expectedEndAt,
   });
 
   @override
@@ -6971,29 +7330,44 @@ class _BookingTimingCard extends StatelessWidget {
                 const SizedBox(height: 10),
                 _TimingLine(
                   icon: Icons.schedule_outlined,
-                  text: '$bookedTimeRange  •  $durationLabel',
+                  text: 'Scheduled: $bookedTimeRange · $durationLabel',
+                ),
+                const SizedBox(height: 10),
+                _TimingLine(
+                  icon: Icons.play_circle_outline_rounded,
+                  text:
+                      'Service start: ${_appointmentTimingLabel(actualStartedAt, date: date, empty: 'Not started')}',
+                  color: actualStartedAt == null
+                      ? const Color(0xFF475569)
+                      : const Color(0xFF0F8A5F),
+                ),
+                const SizedBox(height: 10),
+                _TimingLine(
+                  icon: Icons.flag_outlined,
+                  text:
+                      'Expected end: ${_appointmentTimingLabel(expectedEndAt, date: date, empty: 'Not set')}',
                 ),
               ],
             ),
           ),
-          if (actualTimeRange != null && actualTimeRange!.isNotEmpty)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
-              decoration: const BoxDecoration(
-                color: Color(0xFFF0FDF7),
-                borderRadius: BorderRadius.vertical(bottom: Radius.circular(7)),
-              ),
-              child: _TimingLine(
-                icon: Icons.play_circle_outline_rounded,
-                text: 'Actual service time: $actualTimeRange',
-                color: const Color(0xFF0F8A5F),
-              ),
-            ),
         ],
       ),
     );
   }
+}
+
+String _appointmentTimingLabel(
+  DateTime? value, {
+  required DateTime date,
+  required String empty,
+}) {
+  if (value == null) return empty;
+  final local = value.toLocal();
+  final sameDate =
+      local.year == date.year &&
+      local.month == date.month &&
+      local.day == date.day;
+  return DateFormat(sameDate ? 'h:mm a' : 'EEE, h:mm a').format(local);
 }
 
 class _TimingLine extends StatelessWidget {
@@ -7030,8 +7404,9 @@ class _TimingLine extends StatelessWidget {
 
 class _BookingTotalCard extends StatelessWidget {
   final double total;
+  final double sstAmount;
 
-  const _BookingTotalCard({required this.total});
+  const _BookingTotalCard({required this.total, this.sstAmount = 0});
 
   @override
   Widget build(BuildContext context) {
@@ -7042,40 +7417,159 @@ class _BookingTotalCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(8),
         border: Border.all(color: context.appBorder),
       ),
-      child: Row(
+      child: Column(
         children: [
-          const Text(
-            'Grand Total',
-            style: TextStyle(
-              fontSize: 13,
-              color: Color(0xFF475569),
-              fontWeight: FontWeight.w900,
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Align(
-              alignment: Alignment.centerRight,
-              child: FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  _moneyAmount(total),
-                  maxLines: 1,
-                  style: const TextStyle(
-                    fontSize: 17,
-                    color: Color(0xFF0F8A5F),
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-              ),
-            ),
-          ),
+          if (sstAmount > 0.005) ...[
+            _PaxPriceRow(label: 'Subtotal', amount: total - sstAmount),
+            _PaxPriceRow(label: 'SST (6%)', amount: sstAmount),
+            const Divider(height: 18, color: Color(0xFFE5E7EB)),
+          ],
+          _PaxPriceRow(label: 'Total', amount: total, emphasized: true),
         ],
       ),
     );
   }
 }
 
+class _LinkedReceiptsCard extends StatefulWidget {
+  final List<Map<String, dynamic>> transactions;
+
+  const _LinkedReceiptsCard({required this.transactions});
+
+  @override
+  State<_LinkedReceiptsCard> createState() => _LinkedReceiptsCardState();
+}
+
+class _LinkedReceiptsCardState extends State<_LinkedReceiptsCard> {
+  bool _expanded = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        children: [
+          InkWell(
+            onTap: () => setState(() => _expanded = !_expanded),
+            borderRadius: BorderRadius.circular(8),
+            child: Padding(
+              padding: const EdgeInsets.all(14),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.receipt_long_outlined,
+                    color: Color(0xFF475569),
+                  ),
+                  const SizedBox(width: 11),
+                  Expanded(
+                    child: Text(
+                      'Receipts (${widget.transactions.length})',
+                      style: TextStyle(
+                        color: context.appText,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    _expanded
+                        ? Icons.expand_less_rounded
+                        : Icons.expand_more_rounded,
+                    color: const Color(0xFF64748B),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_expanded) ...[
+            const Divider(height: 1, color: Color(0xFFE5E7EB)),
+            for (var index = 0; index < widget.transactions.length; index++) ...[
+              _LinkedReceiptRow(transaction: widget.transactions[index]),
+              if (index != widget.transactions.length - 1)
+                const Divider(height: 1, indent: 14, endIndent: 14),
+            ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _LinkedReceiptRow extends StatelessWidget {
+  final Map<String, dynamic> transaction;
+
+  const _LinkedReceiptRow({required this.transaction});
+
+  @override
+  Widget build(BuildContext context) {
+    final receipt = transaction['receiptNumber']?.toString() ?? '';
+    final isAddon =
+        transaction['source']?.toString().toLowerCase() == 'appointment_addon';
+    final state = transaction['paymentStatus']?.toString() ?? 'unpaid';
+    return InkWell(
+      onTap: receipt.isEmpty
+          ? null
+          : () => showTransactionOrderDetailSheet(
+              context,
+              receiptNumber: receipt,
+            ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '${isAddon ? 'Add-on' : 'Main'} receipt · ${_paymentMethodLabel(transaction['paymentMethod']?.toString() ?? '')}',
+                    style: TextStyle(
+                      color: context.appText,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${receipt.isEmpty ? 'No receipt number' : receipt} · ${_titleCaseReceiptState(state)}',
+                    style: TextStyle(
+                      color: context.appMuted,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Text(
+              _moneyAmount(_readDouble(transaction['totalAmount'])),
+              style: const TextStyle(
+                color: Color(0xFF0F8A5F),
+                fontSize: 12,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+            if (receipt.isNotEmpty)
+              const Icon(Icons.chevron_right_rounded, color: Color(0xFF94A3B8)),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _titleCaseReceiptState(String value) {
+  final normalized = value.trim().toLowerCase();
+  if (normalized.isEmpty) return 'Unpaid';
+  return '${normalized[0].toUpperCase()}${normalized.substring(1)}';
+}
+
+// Kept temporarily for compatibility with older detail variants.
+// ignore: unused_element
 class _PaymentReceiptCard extends StatelessWidget {
   final String receiptNumber;
   final String paymentMethod;
@@ -7183,17 +7677,7 @@ class _GroupPaxDetailCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final appointment = this.appointment;
-    final addOnTotal = appointment.addOnServiceItems.fold<double>(
-      0,
-      (sum, item) => sum + _readDouble(item['price']),
-    );
-    final serviceTotal = (appointment.price - addOnTotal)
-        .clamp(0, double.infinity)
-        .toDouble();
-    final serviceNames = appointment.serviceItems
-        .map((item) => item['name']?.toString() ?? '')
-        .where((name) => name.isNotEmpty)
-        .join(', ');
+    final items = appointment.displayServiceItems;
     return Container(
       width: double.infinity,
       margin: const EdgeInsets.only(bottom: 12),
@@ -7208,105 +7692,82 @@ class _GroupPaxDetailCard extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.all(12),
             child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFEAF7F6),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      '${index + 1}',
-                      style: const TextStyle(
-                        color: Color(0xFF0F766E),
-                        fontSize: 17,
-                        fontWeight: FontWeight.w900,
-                      ),
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFEAF7F6),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '${index + 1}',
+                    style: const TextStyle(
+                      color: Color(0xFF0F766E),
+                      fontSize: 17,
+                      fontWeight: FontWeight.w900,
                     ),
                   ),
-                  const SizedBox(width: 11),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Guest ${index + 1} - ${appointment.customerName}',
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w900,
-                            color: context.appText,
-                          ),
+                ),
+                const SizedBox(width: 11),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Guest ${index + 1} - ${appointment.customerName}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w900,
+                          color: context.appText,
                         ),
-                        const SizedBox(height: 3),
-                        Text(
-                          serviceNames.isEmpty
-                              ? appointment.serviceName
-                              : serviceNames,
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: context.appMuted,
-                            fontWeight: FontWeight.w700,
+                      ),
+                      const SizedBox(height: 7),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 5,
+                        children: [
+                          _PaxMeta(
+                            icon: Icons.person_outline,
+                            text: appointment.therapistDisplayName,
                           ),
-                        ),
-                        const SizedBox(height: 7),
-                        Wrap(
-                          spacing: 10,
-                          runSpacing: 5,
-                          children: [
-                            _PaxMeta(
-                              icon: Icons.person_outline,
-                              text: appointment.therapistName,
-                            ),
+                          if (appointment.showRoomAssignment)
                             _PaxMeta(
                               icon: Icons.meeting_room_outlined,
-                              text: appointment.roomName,
+                              text: appointment.roomDisplayName,
                             ),
-                          ],
-                        ),
-                        if (appointment.addOnServiceItems.isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Text(
-                            '${appointment.addOnServiceItems.length} add-on${appointment.addOnServiceItems.length == 1 ? '' : 's'}',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: accent,
-                              fontWeight: FontWeight.w800,
-                            ),
-                          ),
                         ],
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      if (onSwitch != null) ...[
-                        _PaxHeaderAction(
-                          tooltip: 'Switch therapist',
-                          icon: Icons.swap_horiz_rounded,
-                          color: const Color(0xFF0F766E),
-                          onPressed: onSwitch!,
-                        ),
-                        const SizedBox(width: 4),
-                      ],
-                      _PaxHeaderAction(
-                        tooltip: 'Edit guest services',
-                        icon: Icons.edit_outlined,
-                        color: const Color(0xFF6B7280),
-                        onPressed: onEdit,
                       ),
                     ],
                   ),
-                ],
-              ),
+                ),
+                const SizedBox(width: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (onSwitch != null) ...[
+                      _PaxHeaderAction(
+                        tooltip: 'Switch therapist',
+                        icon: Icons.swap_horiz_rounded,
+                        color: const Color(0xFF0F766E),
+                        onPressed: onSwitch!,
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    _PaxHeaderAction(
+                      tooltip: 'Edit guest services',
+                      icon: Icons.edit_outlined,
+                      color: const Color(0xFF6B7280),
+                      onPressed: onEdit,
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
           const Divider(height: 1, color: Color(0xFFE5E7EB)),
           Padding(
@@ -7314,37 +7775,10 @@ class _GroupPaxDetailCard extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                if (appointment.addOnServiceItems.isNotEmpty)
-                  _AppointmentAddOnCard(
-                    items: appointment.addOnServiceItems,
-                  ),
-                if (appointment.addOnServiceItems.isNotEmpty)
-                  const SizedBox(height: 12),
-                const Text(
-                  'Pricing',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF0F8A5F),
-                    fontWeight: FontWeight.w900,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                _PaxPriceRow(
-                  label: 'Service total',
-                  amount: serviceTotal,
-                ),
-                if (addOnTotal > 0)
-                  _PaxPriceRow(
-                    label:
-                        'Add-ons (${appointment.addOnServiceItems.length})',
-                    amount: addOnTotal,
-                  ),
-                const Divider(height: 18, color: Color(0xFFE5E7EB)),
-                _PaxPriceRow(
-                  label: 'Total',
-                  amount: appointment.chargedTotal,
-                  emphasized: true,
-                ),
+                for (var itemIndex = 0; itemIndex < items.length; itemIndex++) ...[
+                  _AppointmentServiceCard(item: items[itemIndex]),
+                  if (itemIndex != items.length - 1) const SizedBox(height: 10),
+                ],
               ],
             ),
           ),
@@ -7352,6 +7786,136 @@ class _GroupPaxDetailCard extends StatelessWidget {
       ),
     );
   }
+}
+
+class _AppointmentServiceCard extends StatelessWidget {
+  final Map<String, dynamic> item;
+
+  const _AppointmentServiceCard({required this.item});
+
+  @override
+  Widget build(BuildContext context) {
+    final isAddon = item['lineType']?.toString() == 'addon';
+    final isPackage = item['lineType']?.toString() == 'package';
+    final isPaid = item['paymentStatus']?.toString() == 'paid';
+    final imageUrl =
+        item['imageUrl']?.toString().trim() ??
+        item['publicImageUrl']?.toString().trim() ??
+        '';
+    final typeColor = isAddon
+        ? const Color(0xFFC2410C)
+        : isPackage
+        ? const Color(0xFF7C3AED)
+        : const Color(0xFF0369A1);
+    final paymentColor = isPaid
+        ? const Color(0xFF047857)
+        : const Color(0xFFB45309);
+    return Container(
+      padding: const EdgeInsets.all(11),
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: Container(
+              width: 54,
+              height: 54,
+              color: const Color(0xFFF1F5F9),
+              child: imageUrl.isEmpty
+                  ? const Icon(Icons.spa_outlined, color: Color(0xFF64748B))
+                  : Image.network(
+                      imageUrl,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => const Icon(
+                        Icons.spa_outlined,
+                        color: Color(0xFF64748B),
+                      ),
+                    ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  item['name']?.toString() ?? 'Service',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: context.appText,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 7,
+                  runSpacing: 6,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    Text(
+                      '${_readInt(item['duration'], 0)} min',
+                      style: TextStyle(
+                        color: context.appMuted,
+                        fontSize: 11.5,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    _TextServicePill(
+                      label: isAddon
+                          ? 'Add-on'
+                          : isPackage
+                          ? 'Package'
+                          : 'Main Service',
+                      color: typeColor,
+                    ),
+                    _TextServicePill(
+                      label: isPaid ? 'Paid' : 'Unpaid',
+                      color: paymentColor,
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(
+            _moneyAmount(_readDouble(item['price'])),
+            style: const TextStyle(
+              color: Color(0xFF0F8A5F),
+              fontSize: 13,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TextServicePill extends StatelessWidget {
+  final String label;
+  final Color color;
+
+  const _TextServicePill({required this.label, required this.color});
+
+  @override
+  Widget build(BuildContext context) => Container(
+    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+    decoration: BoxDecoration(
+      color: color.withValues(alpha: 0.09),
+      borderRadius: BorderRadius.circular(6),
+    ),
+    child: Text(
+      label,
+      style: TextStyle(color: color, fontSize: 10.5, fontWeight: FontWeight.w800),
+    ),
+  );
 }
 
 class _PaxMeta extends StatelessWidget {
@@ -7687,9 +8251,8 @@ class _AppointmentSummaryPanel extends StatelessWidget {
       paymentStatus: appointment.paymentStatus,
       date: appointment.date,
       bookedTimeRange: appointment.bookedTimeRange,
-      actualTimeRange: appointment.hasActualTiming
-          ? appointment.actualServiceTimeRange
-          : null,
+      actualStartedAt: appointment.actualStartedAt,
+      expectedEndAt: appointment.endAt,
       durationLabel: appointment.durationLabel,
       total: appointment.price,
       paidAmount: appointment.paidAmount,
@@ -7848,6 +8411,8 @@ class _TimelineStatusBadge extends StatelessWidget {
   }
 }
 
+// Kept temporarily for compatibility with older detail variants.
+// ignore: unused_element
 class _AppointmentAddOnCard extends StatelessWidget {
   final List<Map<String, dynamic>> items;
 
@@ -7892,11 +8457,7 @@ class _AddOnServiceRow extends StatelessWidget {
       children: [
         const Padding(
           padding: EdgeInsets.only(top: 5),
-          child: Icon(
-            Icons.circle,
-            size: 4,
-            color: Color(0xFF64748B),
-          ),
+          child: Icon(Icons.circle, size: 4, color: Color(0xFF64748B)),
         ),
         const SizedBox(width: 7),
         Expanded(
@@ -7927,8 +8488,12 @@ class _AddOnServiceRow extends StatelessWidget {
 
 class _AppointmentCheckoutSheet extends StatefulWidget {
   final _ScheduleAppointment appointment;
+  final bool canOverrideConflict;
 
-  const _AppointmentCheckoutSheet({required this.appointment});
+  const _AppointmentCheckoutSheet({
+    required this.appointment,
+    required this.canOverrideConflict,
+  });
 
   @override
   State<_AppointmentCheckoutSheet> createState() =>
@@ -7939,11 +8504,17 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   final _appointmentRepository = AppointmentRepository();
   final _businessSettingsRepository = BusinessSettingsRepository();
   final _commissionRepository = CommissionRepository();
-  late final TextEditingController _name;
-  late final TextEditingController _phone;
+  late final TextEditingController _nameController;
+  late final TextEditingController _phoneController;
   late final String _receiptNumber;
   String? _paymentMethod;
-  bool _saveCustomerProfile = false;
+  String? _therapistId;
+  String? _therapistName;
+  String _assignmentSource = 'queue';
+  String? _requestedGender;
+  String? _roomUnitId;
+  List<RoomUnitAvailability> _roomUnits = const [];
+  bool _loadingRoomUnits = false;
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
@@ -7959,56 +8530,133 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     _hasPriorPayment ? _addOnSubtotal : widget.appointment.price,
   );
   double get _amountDue => _chargePriceBreakdown.totalAmount;
+  bool get _hasFixedTherapist =>
+      isFixedTherapistAssignmentSource(_assignmentSource);
 
   bool get _canConfirm {
     if (_saving) return false;
+    if (_nameController.text.trim().isEmpty) return false;
+    if (widget.appointment.roomId.isEmpty) return false;
+    if (_hasFixedTherapist && _therapistId == null) return false;
     return _amountDue <= 0.005 || _paymentMethod != null;
   }
 
-  bool get _hasMemberDetails {
-    final name = _name.text.trim();
-    final phone = _phone.text.trim();
-    return !_isGuestPlaceholder(name) && phone.isNotEmpty;
-  }
+  DateTime get _expectedEndAt =>
+      DateTime.now().add(Duration(minutes: widget.appointment.displayDurationMinutes));
 
   @override
   void initState() {
     super.initState();
     _receiptNumber = _generateReceiptNumber();
-    _saveCustomerProfile = widget.appointment.isGuestAccount;
-    _name = TextEditingController(
-      text: _isGuestPlaceholder(widget.appointment.customerName)
-          ? 'Guest'
-          : widget.appointment.customerName,
+    _nameController = TextEditingController(
+      text: widget.appointment.customerName,
     )..addListener(_refresh);
-    _phone = TextEditingController(
-      text: widget.appointment.customerPhone.trim() == '-'
+    _phoneController = TextEditingController(
+      text: widget.appointment.customerPhone == '-'
           ? ''
           : widget.appointment.customerPhone,
     )..addListener(_refresh);
+    final hasFixedTherapist = isFixedTherapistAssignmentSource(
+      widget.appointment.assignmentSource,
+    );
+    _therapistId =
+        hasFixedTherapist && widget.appointment.therapistId.trim().isNotEmpty
+        ? widget.appointment.therapistId
+        : null;
+    _therapistName = _therapistId == null
+        ? null
+        : widget.appointment.therapistName;
+    _assignmentSource = widget.appointment.assignmentSource;
+    _requestedGender = widget.appointment.requestedGender;
+    _roomUnitId = widget.appointment.roomUnitId.trim().isEmpty
+        ? null
+        : widget.appointment.roomUnitId;
     _loadBusinessSettings();
+    _loadRoomUnits();
   }
 
   @override
   void dispose() {
-    _name.removeListener(_refresh);
-    _phone.removeListener(_refresh);
-    _name.dispose();
-    _phone.dispose();
+    _nameController.removeListener(_refresh);
+    _phoneController.removeListener(_refresh);
+    _nameController.dispose();
+    _phoneController.dispose();
     super.dispose();
-  }
-
-  bool _isGuestPlaceholder(String value) {
-    final normalized = value.trim().toLowerCase();
-    return widget.appointment.isGuestAccount &&
-        (normalized.isEmpty ||
-            normalized == 'guest' ||
-            normalized == 'guest account' ||
-            normalized == 'walk-in guest');
   }
 
   void _refresh() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _loadRoomUnits() async {
+    if (!widget.appointment.usesSpecificRoom ||
+        widget.appointment.roomId.isEmpty) {
+      return;
+    }
+    setState(() => _loadingRoomUnits = true);
+    try {
+      final now = DateTime.now();
+      final units = await CspService.getRoomUnitAvailability(
+        zoneId: widget.appointment.roomId,
+        date: DateFormat('yyyy-MM-dd').format(now),
+        startTime: DateFormat('HH:mm:ss').format(now),
+        duration: widget.appointment.displayDurationMinutes,
+      );
+      if (!mounted) return;
+      setState(() => _roomUnits = units);
+    } catch (error, stackTrace) {
+      debugPrint('finalisation room availability failed: $error\n$stackTrace');
+      if (mounted) {
+        setState(() => _roomUnits = const []);
+      }
+    } finally {
+      if (mounted) setState(() => _loadingRoomUnits = false);
+    }
+  }
+
+  void _selectTherapist(TherapistAssignmentPick pick) {
+    final fixed = isFixedTherapistAssignmentSource(pick.assignmentSource);
+    setState(() {
+      _therapistId = fixed ? pick.therapistId : null;
+      _therapistName = fixed ? pick.therapistName : null;
+      _assignmentSource = pick.assignmentSource;
+      _requestedGender = pick.requestedGender;
+    });
+  }
+
+  void _selectTherapistPreference(String source, String? requestedGender) {
+    setState(() {
+      _therapistId = null;
+      _therapistName = null;
+      _assignmentSource = source;
+      _requestedGender = requestedGender;
+    });
+  }
+
+  String get _therapistRecapLabel {
+    if (_hasFixedTherapist &&
+        _therapistId != null &&
+        (_therapistName?.trim().isNotEmpty ?? false)) {
+      return _therapistName!;
+    }
+    if (_assignmentSource == 'gender_preference' &&
+        _requestedGender != null) {
+      return 'Auto assign at start · $_requestedGender';
+    }
+    return 'Auto assign at start';
+  }
+
+  String get _roomRecapLabel {
+    if (!widget.appointment.usesSpecificRoom) {
+      return widget.appointment.roomName;
+    }
+    final selected = _roomUnits.where((unit) => unit.id == _roomUnitId);
+    if (selected.isNotEmpty) return selected.first.name;
+    if (_roomUnitId != null &&
+        widget.appointment.roomUnitName.trim().isNotEmpty) {
+      return widget.appointment.roomUnitName;
+    }
+    return 'Auto assigned at service start';
   }
 
   Future<void> _loadBusinessSettings() async {
@@ -8022,116 +8670,58 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     }
   }
 
-  String _resolvedCustomerName() {
-    final value = _name.text.trim();
-    if (value.isNotEmpty) return value;
-    return widget.appointment.isGuestAccount
-        ? 'Guest'
-        : widget.appointment.customerName;
-  }
-
   Future<void> _confirmCheckout() async {
     if (!_canConfirm) return;
     setState(() => _saving = true);
 
     try {
-      var customerId = widget.appointment.customerId;
-      final customerName = _resolvedCustomerName();
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
-      final shouldSaveCustomerProfile =
-          widget.appointment.isGuestAccount &&
-          _saveCustomerProfile &&
-          _hasMemberDetails;
-      final serviceStartedAt = DateTime.now();
-      if (!mounted) return;
-      final lateStart = await _lateStartDecision(
-        context: context,
-        appointment: widget.appointment,
-        settings: _businessSettings,
-        startedAt: serviceStartedAt,
+      final startedAt = DateTime.now();
+      await _appointmentRepository.finalizeAndStartAppointment(
+        appointmentId: widget.appointment.id,
+        customerName: _nameController.text.trim(),
+        customerPhone: _phoneController.text.trim(),
+        guestName: _nameController.text.trim(),
+        guestPhone: _phoneController.text.trim(),
+        serviceItems: widget.appointment.serviceItems,
+        paymentItems: widget.appointment.unpaidServiceItems,
+        therapistId: therapistIdForFinalStart(
+          assignmentSource: _assignmentSource,
+          selectedTherapistId: _therapistId,
+        ),
+        assignmentSource: _assignmentSource,
+        requestedGender: _requestedGender,
+        roomId: widget.appointment.roomId,
+        roomUnitId: _roomUnitId,
+        startedAt: startedAt,
+        expectedEndAt: startedAt.add(
+          Duration(minutes: widget.appointment.displayDurationMinutes),
+        ),
+        transactionValues: {
+          if (counterStaff != null) ...{
+            'counterStaffId': counterStaff['id'],
+            'counterStaffName': counterStaff['name'],
+          },
+          'servicePrice': _chargePriceBreakdown.servicePrice,
+          'sstAmount': _chargePriceBreakdown.sstAmount,
+          'totalAmount': _amountDue,
+          'paymentMethod': _paymentMethod ?? 'cash',
+          'receiptNumber': _receiptNumber,
+        },
       );
-
-      if (_amountDue <= 0.005) {
-        await _appointmentRepository.startAppointment(
-          widget.appointment.id,
-          startedAt: serviceStartedAt,
-          expectedEndAt:
-              lateStart.adjustedEndAt ?? widget.appointment._serviceEndDateTime,
-          allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
-        );
-      } else if (_hasPriorPayment) {
-        await _appointmentRepository.checkInPaidAppointmentWithAddOn(
-          appointmentId: widget.appointment.id,
-          addOnServiceItems: widget.appointment.unpaidAddOnServiceItems,
-          appointmentUpdates: widget.appointment.serviceStartUpdates(
-            serviceStartedAt,
-            adjustedEndAt: lateStart.adjustedEndAt,
-            allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
-          ),
-          transactionValues: {
-            if (counterStaff != null) ...{
-              'counterStaffId': counterStaff['id'],
-              'counterStaffName': counterStaff['name'],
-            },
-            'servicePrice': _chargePriceBreakdown.servicePrice,
-            'sstAmount': _chargePriceBreakdown.sstAmount,
-            'totalAmount': _amountDue,
-            'paymentMethod': _paymentMethod,
-            'receiptNumber': _receiptNumber,
-          },
-        );
-      } else {
-        await _appointmentRepository.checkoutAppointment(
-          appointmentId: widget.appointment.id,
-          newCustomerValues: shouldSaveCustomerProfile
-              ? {
-                  'name': customerName,
-                  'phone': _phone.text.trim(),
-                  'gender': '',
-                  'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                  'notes': 'Created from appointment checkout',
-                }
-              : null,
-          appointmentUpdates: {
-            'customerId': customerId,
-            ...widget.appointment.serviceStartUpdates(
-              serviceStartedAt,
-              adjustedEndAt: lateStart.adjustedEndAt,
-              allowLateExtensionOverlap: lateStart.allowLateExtensionOverlap,
-            ),
-          },
-          transactionValues: {
-            'customerId': customerId,
-            'customerName': customerName,
-            'customerPhone': _phone.text.trim().isNotEmpty
-                ? _phone.text.trim()
-                : widget.appointment.customerPhone,
-            if (counterStaff != null) ...{
-              'counterStaffId': counterStaff['id'],
-              'counterStaffName': counterStaff['name'],
-            },
-            'servicePrice': _chargePriceBreakdown.servicePrice,
-            'sstAmount': _chargePriceBreakdown.sstAmount,
-            'totalAmount': _amountDue,
-            'source': 'appointment',
-            'paymentMethod': _paymentMethod,
-            'paymentStatus': 'paid',
-            'receiptNumber': _receiptNumber,
-          },
-        );
-      }
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Customer checked in - service is now in progress'),
+          content: Text('Payment confirmed and service started'),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
       Navigator.pop(context, _CheckInSheetResult.completed);
-    } catch (e) {
+    } catch (e, stackTrace) {
+      debugPrint('finalize_and_start_appointment failed: $e\n$stackTrace');
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -8177,7 +8767,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'Check In Appointment',
+                              'Check In & Start Service',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w900,
@@ -8207,53 +8797,117 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                     ],
                   ),
                   const SizedBox(height: 18),
-                  const Text(
-                    'Customer Details',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1A1A2E),
-                    ),
+                  const _FinalisationSectionTitle(
+                    icon: Icons.person_outline_rounded,
+                    label: 'Customer details',
                   ),
                   const SizedBox(height: 10),
-                  _EditField(label: 'Name', controller: _name),
+                  _EditField(
+                    label: 'Name',
+                    controller: _nameController,
+                  ),
                   const SizedBox(height: 12),
                   _EditField(
                     label: 'Phone',
-                    controller: _phone,
+                    controller: _phoneController,
                     keyboardType: TextInputType.phone,
                   ),
-                  if (widget.appointment.isGuestAccount) ...[
-                    const SizedBox(height: 8),
-                    CheckboxListTile(
-                      value: _saveCustomerProfile,
-                      onChanged: _saving
-                          ? null
-                          : (value) => setState(
-                              () => _saveCustomerProfile = value ?? false,
-                            ),
-                      contentPadding: EdgeInsets.zero,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      activeColor: const Color(0xFF1B6B72),
-                      title: const Text(
-                        'Save as customer profile',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF1A1A2E),
-                        ),
-                      ),
-                      subtitle: const Text(
-                        'A member is created only when name and phone are filled.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                        ),
-                      ),
-                    ),
-                  ],
                   const SizedBox(height: 16),
-                  _CheckoutRecapCard(appointment: widget.appointment),
+                  _FinalisationGuestCard(
+                    index: 0,
+                    appointment: widget.appointment,
+                    guestName: _nameController.text,
+                    therapistLabel: _therapistRecapLabel,
+                    roomLabel: _roomRecapLabel,
+                    controls: [
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: _FinalisationSectionTitle(
+                          icon: Icons.person_pin_circle_outlined,
+                          label: 'Therapist',
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TherapistQueuePicker(
+                        outletId: OutletContext.activeOutletId.value,
+                        date: widget.appointment.dateKey,
+                        startTime: DateFormat(
+                          'HH:mm:ss',
+                        ).format(DateTime.now()),
+                        durationMinutes:
+                            widget.appointment.displayDurationMinutes,
+                        selectedTherapistId:
+                            _hasFixedTherapist ? _therapistId : null,
+                        initialRequestedGender: _requestedGender,
+                        initialAssignmentSource: _assignmentSource,
+                        followLiveClock: true,
+                        compactAssignment: true,
+                        onPreferenceChanged: _selectTherapistPreference,
+                        onSelected: _selectTherapist,
+                      ),
+                      if (widget.appointment.usesSpecificRoom) ...[
+                        const SizedBox(height: 18),
+                        const _FinalisationSectionTitle(
+                          icon: Icons.meeting_room_outlined,
+                          label: 'Exact room',
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          widget.appointment.roomName,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w700,
+                            color: Color(0xFF64748B),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        if (_loadingRoomUnits)
+                          const Center(
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        else
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              ChoiceChip(
+                                label: const Text('Auto assign'),
+                                selected: _roomUnitId == null,
+                                selectedColor: const Color(0xFFDDF7EE),
+                                backgroundColor: const Color(0xFFEAF8F5),
+                                side: const BorderSide(
+                                  color: Color(0xFF99D5C9),
+                                ),
+                                labelStyle: const TextStyle(
+                                  color: Color(0xFF0F766E),
+                                  fontWeight: FontWeight.w800,
+                                ),
+                                onSelected: _saving
+                                    ? null
+                                    : (_) =>
+                                          setState(() => _roomUnitId = null),
+                              ),
+                              for (final unit in _roomUnits)
+                                _FinalisationRoomUnitChip(
+                                  unit: unit,
+                                  selected: _roomUnitId == unit.id,
+                                  ownedByAppointment:
+                                      widget.appointment.roomUnitId == unit.id,
+                                  enabled: !_saving,
+                                  onSelected: () =>
+                                      setState(() => _roomUnitId = unit.id),
+                                ),
+                            ],
+                          ),
+                      ],
+                      const SizedBox(height: 16),
+                      _FinalisationTimingCard(
+                        durationMinutes:
+                            widget.appointment.displayDurationMinutes,
+                        expectedEndAt: _expectedEndAt,
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
@@ -8369,9 +9023,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                             )
                           : const Icon(Icons.check, size: 18),
                       label: Text(
-                        _amountDue > 0.005
-                            ? 'Collect ${_moneyAmount(_amountDue)} & Check In'
-                            : 'Confirm Check In',
+                        'Confirm Payment & Start Service',
                       ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
@@ -8417,8 +9069,7 @@ class _AppointmentAddOnPaymentSheetState
     0,
     (total, item) => total + _readDouble(item['price']),
   );
-  PriceBreakdown get _breakdown =>
-      _businessSettings.priceBreakdown(_subtotal);
+  PriceBreakdown get _breakdown => _businessSettings.priceBreakdown(_subtotal);
 
   @override
   void initState() {
@@ -8536,7 +9187,9 @@ class _AppointmentAddOnPaymentSheetState
                         ),
                       ),
                       IconButton(
-                        onPressed: _saving ? null : () => Navigator.pop(context),
+                        onPressed: _saving
+                            ? null
+                            : () => Navigator.pop(context),
                         icon: const Icon(Icons.close),
                       ),
                     ],
@@ -8611,8 +9264,12 @@ class _AppointmentAddOnPaymentSheetState
 
 class _AppointmentGroupCheckoutSheet extends StatefulWidget {
   final _AppointmentGroup group;
+  final bool canOverrideConflict;
 
-  const _AppointmentGroupCheckoutSheet({required this.group});
+  const _AppointmentGroupCheckoutSheet({
+    required this.group,
+    required this.canOverrideConflict,
+  });
 
   @override
   State<_AppointmentGroupCheckoutSheet> createState() =>
@@ -8624,11 +9281,17 @@ class _AppointmentGroupCheckoutSheetState
   final _appointmentRepository = AppointmentRepository();
   final _businessSettingsRepository = BusinessSettingsRepository();
   final _commissionRepository = CommissionRepository();
-  late final TextEditingController _name;
-  late final TextEditingController _phone;
+  late final TextEditingController _nameController;
+  late final TextEditingController _phoneController;
+  final Map<String, String?> _therapistIds = {};
+  final Map<String, String?> _therapistNames = {};
+  final Map<String, String> _assignmentSources = {};
+  final Map<String, String?> _requestedGenders = {};
+  final Map<String, String?> _roomUnitIds = {};
+  final Map<String, List<RoomUnitAvailability>> _roomUnits = {};
+  final Set<String> _loadingRoomUnitIds = {};
   late final String _receiptNumber;
   String? _paymentMethod;
-  bool _saveCustomerProfile = false;
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
@@ -8645,53 +9308,148 @@ class _AppointmentGroupCheckoutSheetState
   );
   double get _amountDue => _chargePriceBreakdown.totalAmount;
 
-  bool get _canConfirm =>
-      !_saving && (_amountDue <= 0.005 || _paymentMethod != null);
-
-  bool get _hasMemberDetails {
-    final name = _name.text.trim();
-    final phone = _phone.text.trim();
-    return !_isGuestPlaceholder(name) && phone.isNotEmpty;
+  bool get _canConfirm {
+    if (_saving || _nameController.text.trim().isEmpty) return false;
+    if (_amountDue > 0.005 && _paymentMethod == null) return false;
+    return widget.group.appointments.every((appointment) {
+      if (appointment.roomId.isEmpty) return false;
+      final source = _assignmentSources[appointment.id] ?? 'queue';
+      return !isFixedTherapistAssignmentSource(source) ||
+          _therapistIds[appointment.id] != null;
+    });
   }
 
   @override
   void initState() {
     super.initState();
     _receiptNumber = _generateReceiptNumber();
-    _saveCustomerProfile = widget.group.isGuestAccount;
-    _name = TextEditingController(
-      text: _isGuestPlaceholder(widget.group.customerName)
-          ? 'Guest'
-          : widget.group.customerName,
-    )..addListener(_refresh);
-    _phone = TextEditingController(
-      text: widget.group.customerPhone.trim() == '-'
-          ? ''
-          : widget.group.customerPhone,
-    )..addListener(_refresh);
+    _nameController = TextEditingController(text: widget.group.customerName)
+      ..addListener(_refresh);
+    _phoneController =
+        TextEditingController(
+          text: widget.group.customerPhone == '-'
+              ? ''
+              : widget.group.customerPhone,
+        )..addListener(_refresh);
+    for (final appointment in widget.group.appointments) {
+      final hasFixedTherapist = isFixedTherapistAssignmentSource(
+        appointment.assignmentSource,
+      );
+      _therapistIds[appointment.id] =
+          hasFixedTherapist && appointment.therapistId.trim().isNotEmpty
+          ? appointment.therapistId
+          : null;
+      _therapistNames[appointment.id] =
+          _therapistIds[appointment.id] == null
+          ? null
+          : appointment.therapistName;
+      _assignmentSources[appointment.id] = appointment.assignmentSource;
+      _requestedGenders[appointment.id] = appointment.requestedGender;
+      _roomUnitIds[appointment.id] = appointment.roomUnitId.trim().isEmpty
+          ? null
+          : appointment.roomUnitId;
+    }
     _loadBusinessSettings();
+    _loadAllRoomUnits();
   }
 
   @override
   void dispose() {
-    _name.removeListener(_refresh);
-    _phone.removeListener(_refresh);
-    _name.dispose();
-    _phone.dispose();
+    _nameController.removeListener(_refresh);
+    _phoneController.removeListener(_refresh);
+    _nameController.dispose();
+    _phoneController.dispose();
     super.dispose();
-  }
-
-  bool _isGuestPlaceholder(String value) {
-    final normalized = value.trim().toLowerCase();
-    return widget.group.isGuestAccount &&
-        (normalized.isEmpty ||
-            normalized == 'guest' ||
-            normalized == 'guest account' ||
-            normalized == 'walk-in guest');
   }
 
   void _refresh() {
     if (mounted) setState(() {});
+  }
+
+  Future<void> _loadAllRoomUnits() async {
+    await Future.wait(
+      widget.group.appointments
+          .where((appointment) => appointment.usesSpecificRoom)
+          .map(_loadRoomUnits),
+    );
+  }
+
+  Future<void> _loadRoomUnits(_ScheduleAppointment appointment) async {
+    setState(() => _loadingRoomUnitIds.add(appointment.id));
+    try {
+      final now = DateTime.now();
+      final units = await CspService.getRoomUnitAvailability(
+        zoneId: appointment.roomId,
+        date: DateFormat('yyyy-MM-dd').format(now),
+        startTime: DateFormat('HH:mm:ss').format(now),
+        duration: appointment.displayDurationMinutes,
+      );
+      if (mounted) setState(() => _roomUnits[appointment.id] = units);
+    } catch (error, stackTrace) {
+      debugPrint(
+        'group finalisation room availability failed: $error\n$stackTrace',
+      );
+      if (mounted) setState(() => _roomUnits[appointment.id] = const []);
+    } finally {
+      if (mounted) setState(() => _loadingRoomUnitIds.remove(appointment.id));
+    }
+  }
+
+  void _selectTherapist(
+    String appointmentId,
+    TherapistAssignmentPick pick,
+  ) {
+    final fixed = isFixedTherapistAssignmentSource(pick.assignmentSource);
+    setState(() {
+      _therapistIds[appointmentId] =
+          fixed ? pick.therapistId : null;
+      _therapistNames[appointmentId] =
+          fixed ? pick.therapistName : null;
+      _assignmentSources[appointmentId] = pick.assignmentSource;
+      _requestedGenders[appointmentId] = pick.requestedGender;
+    });
+  }
+
+  void _selectTherapistPreference(
+    String appointmentId,
+    String source,
+    String? requestedGender,
+  ) {
+    setState(() {
+      _therapistIds[appointmentId] = null;
+      _therapistNames[appointmentId] = null;
+      _assignmentSources[appointmentId] = source;
+      _requestedGenders[appointmentId] = requestedGender;
+    });
+  }
+
+  String _therapistLabelFor(_ScheduleAppointment appointment) {
+    final name = _therapistNames[appointment.id];
+    final fixed = isFixedTherapistAssignmentSource(
+      _assignmentSources[appointment.id] ?? 'queue',
+    );
+    if (fixed &&
+        _therapistIds[appointment.id] != null &&
+        (name?.trim().isNotEmpty ?? false)) {
+      return name!;
+    }
+    final gender = _requestedGenders[appointment.id];
+    if (_assignmentSources[appointment.id] == 'gender_preference' &&
+        gender != null) {
+      return 'Auto assign at start · $gender';
+    }
+    return 'Auto assign at start';
+  }
+
+  String _roomLabelFor(_ScheduleAppointment target) {
+    if (!target.usesSpecificRoom) return target.roomName;
+    final selectedId = _roomUnitIds[target.id];
+    if (selectedId != null) {
+      final units = _roomUnits[target.id] ?? const [];
+      final match = units.where((unit) => unit.id == selectedId);
+      return match.isEmpty ? target.roomUnitName : match.first.name;
+    }
+    return 'Auto assigned at service start';
   }
 
   Future<void> _loadBusinessSettings() async {
@@ -8705,150 +9463,73 @@ class _AppointmentGroupCheckoutSheetState
     }
   }
 
-  String _resolvedCustomerName() {
-    final value = _name.text.trim();
-    if (value.isNotEmpty) return value;
-    return widget.group.isGuestAccount ? 'Guest' : widget.group.customerName;
-  }
-
   Future<void> _confirmCheckout() async {
     if (!_canConfirm) return;
     setState(() => _saving = true);
 
     try {
-      var customerId = widget.group.primary.customerId;
-      final customerName = _resolvedCustomerName();
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
-      final shouldSaveCustomerProfile =
-          widget.group.isGuestAccount &&
-          _saveCustomerProfile &&
-          _hasMemberDetails;
-      final serviceStartedAt = DateTime.now();
-      if (!mounted) return;
-      final lateStartByAppointmentId = <String, _LateStartDecision>{};
-      for (final appointment in widget.group.appointments) {
-        if (!mounted) return;
-        lateStartByAppointmentId[appointment.id] = await _lateStartDecision(
-          context: context,
-          appointment: appointment,
-          settings: _businessSettings,
-          startedAt: serviceStartedAt,
-        );
-        if (!mounted) return;
-      }
-
-      if (_amountDue <= 0.005) {
-        await _appointmentRepository.startAppointmentGroup(
-          widget.group.appointmentGroupId,
-          widget.group.appointments.map((appointment) => appointment.id),
-          startedAt: serviceStartedAt,
-          expectedEndAtByAppointment: {
-            for (final appointment in widget.group.appointments)
-              appointment.id:
-                  lateStartByAppointmentId[appointment.id]?.adjustedEndAt ??
-                  appointment._serviceEndDateTime,
-          },
-          allowLateExtensionOverlapByAppointment: {
-            for (final appointment in widget.group.appointments)
-              appointment.id:
-                  lateStartByAppointmentId[appointment.id]
-                      ?.allowLateExtensionOverlap ??
-                  false,
-          },
-        );
-      } else if (_hasPriorPayment) {
-        await _appointmentRepository.checkInPaidAppointmentGroupWithAddOn(
-          appointmentGroupId: widget.group.appointmentGroupId,
-          appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
-          addOnItemsByAppointment: {
-            for (final appointment in widget.group.appointments)
-              appointment.id: [
-                for (final item in appointment.unpaidAddOnServiceItems)
-                  {...item, 'appointmentId': appointment.id},
-              ],
-          },
-          appointmentUpdatesById: {
-            for (final appointment in widget.group.appointments)
-              appointment.id: appointment.serviceStartUpdates(
-                serviceStartedAt,
-                adjustedEndAt:
-                    lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
-                allowLateExtensionOverlap:
-                    lateStartByAppointmentId[appointment.id]
-                        ?.allowLateExtensionOverlap ??
-                    false,
+      final startedAt = DateTime.now();
+      await _appointmentRepository.finalizeAndStartAppointmentGroup(
+        appointmentGroupId: widget.group.appointmentGroupId,
+        appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
+        customerName: _nameController.text.trim(),
+        customerPhone: _phoneController.text.trim(),
+        paxUpdates: {
+          for (final appointment in widget.group.appointments)
+            appointment.id: {
+              'guest_name': _nameController.text.trim(),
+              'guest_phone': _phoneController.text.trim(),
+              'service_items': appointment.serviceItems,
+              'therapist_id': therapistIdForFinalStart(
+                assignmentSource:
+                    _assignmentSources[appointment.id] ?? 'queue',
+                selectedTherapistId: _therapistIds[appointment.id],
               ),
-          },
-          transactionValues: {
-            if (counterStaff != null) ...{
-              'counterStaffId': counterStaff['id'],
-              'counterStaffName': counterStaff['name'],
+              'assignment_source':
+                  _assignmentSources[appointment.id] ?? 'queue',
+              'requested_gender': _requestedGenders[appointment.id],
+              'room_id': appointment.roomId,
+              'room_unit_id': _roomUnitIds[appointment.id],
+              'expected_end_at': startedAt
+                  .add(Duration(minutes: appointment.displayDurationMinutes))
+                  .toUtc()
+                  .toIso8601String(),
             },
-            'servicePrice': _chargePriceBreakdown.servicePrice,
-            'sstAmount': _chargePriceBreakdown.sstAmount,
-            'totalAmount': _amountDue,
-            'paymentMethod': _paymentMethod,
-            'receiptNumber': _receiptNumber,
+        },
+        paymentItems: [
+          for (final appointment in widget.group.appointments)
+            for (final item in appointment.unpaidServiceItems)
+              {...item, 'appointmentId': appointment.id},
+        ],
+        startedAt: startedAt,
+        transactionValues: {
+          if (counterStaff != null) ...{
+            'counterStaffId': counterStaff['id'],
+            'counterStaffName': counterStaff['name'],
           },
-        );
-      } else {
-        await _appointmentRepository.checkoutAppointmentGroup(
-          appointmentGroupId: widget.group.appointmentGroupId,
-          appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
-          newCustomerValues: shouldSaveCustomerProfile
-              ? {
-                  'name': customerName,
-                  'phone': _phone.text.trim(),
-                  'gender': '',
-                  'joinDate': DateFormat('yyyy-MM-dd').format(DateTime.now()),
-                  'notes': 'Created from group appointment checkout',
-                }
-              : null,
-          appointmentUpdates: {'customerId': customerId},
-          appointmentUpdatesById: {
-            for (final appointment in widget.group.appointments)
-              appointment.id: appointment.serviceStartUpdates(
-                serviceStartedAt,
-                adjustedEndAt:
-                    lateStartByAppointmentId[appointment.id]?.adjustedEndAt,
-                allowLateExtensionOverlap:
-                    lateStartByAppointmentId[appointment.id]
-                        ?.allowLateExtensionOverlap ??
-                    false,
-              ),
-          },
-          transactionValues: {
-            'customerId': customerId,
-            'customerName': customerName,
-            'customerPhone': _phone.text.trim().isNotEmpty
-                ? _phone.text.trim()
-                : widget.group.customerPhone,
-            if (counterStaff != null) ...{
-              'counterStaffId': counterStaff['id'],
-              'counterStaffName': counterStaff['name'],
-            },
-            'servicePrice': _chargePriceBreakdown.servicePrice,
-            'sstAmount': _chargePriceBreakdown.sstAmount,
-            'totalAmount': _amountDue,
-            'source': 'appointment',
-            'paymentMethod': _paymentMethod,
-            'paymentStatus': 'paid',
-            'receiptNumber': _receiptNumber,
-          },
-        );
-      }
+          'servicePrice': _chargePriceBreakdown.servicePrice,
+          'sstAmount': _chargePriceBreakdown.sstAmount,
+          'totalAmount': _amountDue,
+          'paymentMethod': _paymentMethod ?? 'cash',
+          'receiptNumber': _receiptNumber,
+        },
+      );
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Customers checked in - services are now in progress'),
+          content: Text('Group payment confirmed and service started'),
           backgroundColor: Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
       Navigator.pop(context, _CheckInSheetResult.completed);
-    } catch (e) {
+    } catch (e, stackTrace) {
+      debugPrint(
+        'finalize_and_start_appointment_group failed: $e\n$stackTrace',
+      );
       if (!mounted) return;
       setState(() => _saving = false);
       ScaffoldMessenger.of(context).showSnackBar(
@@ -8861,6 +9542,127 @@ class _AppointmentGroupCheckoutSheetState
         ),
       );
     }
+  }
+
+  Widget _buildPaxFinalisationCard(
+    _ScheduleAppointment appointment,
+    int index,
+  ) {
+    final units = _roomUnits[appointment.id] ?? const [];
+    final therapistLabel = _therapistLabelFor(appointment);
+    final roomLabel = _roomLabelFor(appointment);
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: _FinalisationGuestCard(
+        index: index,
+        appointment: appointment,
+        guestName: _nameController.text,
+        therapistLabel: therapistLabel,
+        roomLabel: roomLabel,
+        controls: [
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: _FinalisationSectionTitle(
+                icon: Icons.person_pin_circle_outlined,
+                label: 'Therapist',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TherapistQueuePicker(
+              outletId: OutletContext.activeOutletId.value,
+              date: appointment.dateKey,
+              startTime: DateFormat('HH:mm:ss').format(DateTime.now()),
+              durationMinutes: appointment.displayDurationMinutes,
+              selectedTherapistId: isFixedTherapistAssignmentSource(
+                _assignmentSources[appointment.id] ?? 'queue',
+              )
+                  ? _therapistIds[appointment.id]
+                  : null,
+              initialRequestedGender: _requestedGenders[appointment.id],
+              initialAssignmentSource:
+                  _assignmentSources[appointment.id] ?? 'queue',
+              followLiveClock: true,
+              compactAssignment: true,
+              excludedTherapistIds: {
+                for (final entry in _therapistIds.entries)
+                  if (entry.key != appointment.id &&
+                      entry.value != null &&
+                      isFixedTherapistAssignmentSource(
+                        _assignmentSources[entry.key] ?? 'queue',
+                      ))
+                    entry.value!,
+              },
+              onPreferenceChanged: (source, gender) =>
+                  _selectTherapistPreference(
+                    appointment.id,
+                    source,
+                    gender,
+                  ),
+              onSelected: (pick) =>
+                  _selectTherapist(appointment.id, pick),
+            ),
+            if (appointment.usesSpecificRoom) ...[
+              const SizedBox(height: 16),
+              Text(
+                '${appointment.roomName} - exact room',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w800,
+                  color: Color(0xFF475569),
+                ),
+              ),
+              const SizedBox(height: 8),
+              if (_loadingRoomUnitIds.contains(appointment.id))
+                const Center(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              else
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    ChoiceChip(
+                      label: const Text('Auto assign'),
+                      selected: _roomUnitIds[appointment.id] == null,
+                      selectedColor: const Color(0xFFDDF7EE),
+                      backgroundColor: const Color(0xFFEAF8F5),
+                      side: const BorderSide(color: Color(0xFF99D5C9)),
+                      labelStyle: const TextStyle(
+                        color: Color(0xFF0F766E),
+                        fontWeight: FontWeight.w800,
+                      ),
+                      onSelected: _saving
+                          ? null
+                          : (_) => setState(
+                              () => _roomUnitIds[appointment.id] = null,
+                            ),
+                    ),
+                    for (final unit in units)
+                      _FinalisationRoomUnitChip(
+                        unit: unit,
+                        selected:
+                            _roomUnitIds[appointment.id] == unit.id,
+                        ownedByAppointment:
+                            appointment.roomUnitId == unit.id,
+                        enabled: !_saving,
+                        onSelected: () => setState(
+                          () => _roomUnitIds[appointment.id] = unit.id,
+                        ),
+                      ),
+                  ],
+                ),
+            ],
+            const SizedBox(height: 14),
+            _FinalisationTimingCard(
+              durationMinutes: appointment.displayDurationMinutes,
+              expectedEndAt: DateTime.now().add(
+                Duration(minutes: appointment.displayDurationMinutes),
+              ),
+            ),
+          ],
+      ),
+    );
   }
 
   @override
@@ -8894,7 +9696,7 @@ class _AppointmentGroupCheckoutSheetState
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'Check In Group',
+                              'Check In & Start Group',
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w900,
@@ -8924,53 +9726,29 @@ class _AppointmentGroupCheckoutSheetState
                     ],
                   ),
                   const SizedBox(height: 18),
+                  const _FinalisationSectionTitle(
+                    icon: Icons.person_outline_rounded,
+                    label: 'Primary customer',
+                  ),
+                  const SizedBox(height: 6),
                   const Text(
-                    'Customer Details',
+                    'Guest details will be applied to every pax in this group.',
                     style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w900,
-                      color: Color(0xFF1A1A2E),
+                      fontSize: 11.5,
+                      color: Color(0xFF64748B),
                     ),
                   ),
                   const SizedBox(height: 10),
-                  _EditField(label: 'Name', controller: _name),
+                  _EditField(
+                    label: 'Name',
+                    controller: _nameController,
+                  ),
                   const SizedBox(height: 12),
                   _EditField(
                     label: 'Phone',
-                    controller: _phone,
+                    controller: _phoneController,
                     keyboardType: TextInputType.phone,
                   ),
-                  if (widget.group.isGuestAccount) ...[
-                    const SizedBox(height: 8),
-                    CheckboxListTile(
-                      value: _saveCustomerProfile,
-                      onChanged: _saving
-                          ? null
-                          : (value) => setState(
-                              () => _saveCustomerProfile = value ?? false,
-                            ),
-                      contentPadding: EdgeInsets.zero,
-                      controlAffinity: ListTileControlAffinity.leading,
-                      activeColor: const Color(0xFF1B6B72),
-                      title: const Text(
-                        'Save as customer profile',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w800,
-                          color: Color(0xFF1A1A2E),
-                        ),
-                      ),
-                      subtitle: const Text(
-                        'A member is created only when name and phone are filled.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF6B7280),
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  _GroupCheckoutRecapCard(group: widget.group),
                   const SizedBox(height: 10),
                   SizedBox(
                     width: double.infinity,
@@ -8985,6 +9763,16 @@ class _AppointmentGroupCheckoutSheetState
                       label: const Text('Add Services'),
                     ),
                   ),
+                  const SizedBox(height: 18),
+                  for (
+                    var index = 0;
+                    index < widget.group.appointments.length;
+                    index++
+                  )
+                    _buildPaxFinalisationCard(
+                      widget.group.appointments[index],
+                      index,
+                    ),
                   const SizedBox(height: 16),
                   _CheckoutPriceCard(
                     servicePrice: _hasPriorPayment
@@ -9086,9 +9874,7 @@ class _AppointmentGroupCheckoutSheetState
                             )
                           : const Icon(Icons.check, size: 18),
                       label: Text(
-                        _amountDue > 0.005
-                            ? 'Collect ${_moneyAmount(_amountDue)} & Check In'
-                            : 'Confirm Check In',
+                        'Confirm Payment & Start Service',
                       ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
@@ -9110,73 +9896,192 @@ class _AppointmentGroupCheckoutSheetState
   }
 }
 
-class _CheckoutRecapCard extends StatelessWidget {
-  final _ScheduleAppointment appointment;
+class _FinalisationSectionTitle extends StatelessWidget {
+  const _FinalisationSectionTitle({
+    required this.icon,
+    required this.label,
+  });
 
-  const _CheckoutRecapCard({required this.appointment});
+  final IconData icon;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 18, color: const Color(0xFF1B6B72)),
+        const SizedBox(width: 8),
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF1A1A2E),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FinalisationTimingCard extends StatelessWidget {
+  const _FinalisationTimingCard({
+    required this.durationMinutes,
+    required this.expectedEndAt,
+  });
+
+  final int durationMinutes;
+  final DateTime expectedEndAt;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFF8FAFC),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: const Color(0xFFE5E7EB)),
+        color: const Color(0xFFEFF8F7),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: const Color(0xFFB8DDD8)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      child: Row(
         children: [
-          Row(
-            children: [
-              Expanded(
-                child: Text(
-                  appointment.serviceName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+          const Icon(
+            Icons.schedule_outlined,
+            color: Color(0xFF1B6B72),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$durationMinutes minutes',
                   style: const TextStyle(
-                    fontSize: 14,
+                    fontSize: 13,
                     fontWeight: FontWeight.w900,
                     color: Color(0xFF1A1A2E),
                   ),
                 ),
-              ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFE8F5F5),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  appointment.bufferAfterMinutes > 0
-                      ? '${appointment.durationMinutes} + ${appointment.bufferAfterMinutes} min'
-                      : '${appointment.durationMinutes} min',
+                const SizedBox(height: 3),
+                Text(
+                  'Expected end ${DateFormat('h:mm a').format(expectedEndAt)}',
                   style: const TextStyle(
                     fontSize: 12,
-                    fontWeight: FontWeight.w800,
-                    color: Color(0xFF1B6B72),
+                    color: Color(0xFF64748B),
                   ),
                 ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '${appointment.therapistName} - ${appointment.roomName}',
-            style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            '${DateFormat('EEE, d MMM yyyy').format(appointment.date)} - ${appointment.timeRange}',
-            style: const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
-          ),
-          const SizedBox(height: 3),
-          Text(
-            appointment.cleanupUntilLabel,
-            style: const TextStyle(fontSize: 12, color: Color(0xFF6B7280)),
+              ],
+            ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _FinalisationGuestCard extends StatelessWidget {
+  const _FinalisationGuestCard({
+    required this.index,
+    required this.appointment,
+    required this.guestName,
+    required this.therapistLabel,
+    required this.roomLabel,
+    required this.controls,
+  });
+
+  final int index;
+  final _ScheduleAppointment appointment;
+  final String guestName;
+  final String therapistLabel;
+  final String roomLabel;
+  final List<Widget> controls;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = appointment.displayServiceItems;
+    final displayName = guestName.trim().isEmpty ? 'Guest' : guestName.trim();
+
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: context.appSurface,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Theme(
+        data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+        child: ExpansionTile(
+          key: PageStorageKey('finalisation-guest-${appointment.id}'),
+          maintainState: true,
+          tilePadding: const EdgeInsets.all(12),
+          childrenPadding: EdgeInsets.zero,
+          leading: Container(
+            width: 40,
+            height: 40,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: const Color(0xFFEAF7F6),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Text(
+              '${index + 1}',
+              style: const TextStyle(
+                color: Color(0xFF0F766E),
+                fontSize: 17,
+                fontWeight: FontWeight.w900,
+              ),
+            ),
+          ),
+          title: Text(
+            'Guest ${index + 1} - $displayName',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 14,
+              fontWeight: FontWeight.w900,
+              color: context.appText,
+            ),
+          ),
+          subtitle: Padding(
+            padding: const EdgeInsets.only(top: 7),
+            child: Wrap(
+              spacing: 10,
+              runSpacing: 5,
+              children: [
+                _PaxMeta(
+                  icon: Icons.person_outline,
+                  text: therapistLabel,
+                ),
+                if (roomLabel.trim().isNotEmpty)
+                  _PaxMeta(
+                    icon: Icons.meeting_room_outlined,
+                    text: roomLabel,
+                  ),
+              ],
+            ),
+          ),
+          children: [
+            const Divider(height: 1, color: Color(0xFFE5E7EB)),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (var itemIndex = 0;
+                      itemIndex < items.length;
+                      itemIndex++) ...[
+                    _AppointmentServiceCard(item: items[itemIndex]),
+                    if (itemIndex != items.length - 1)
+                      const SizedBox(height: 10),
+                  ],
+                  if (items.isNotEmpty && controls.isNotEmpty)
+                    const SizedBox(height: 16),
+                  ...controls,
+                ],
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -9240,6 +10145,8 @@ class _GroupCheckoutRecapCard extends StatelessWidget {
               child: _GroupCheckoutPaxRow(
                 index: index,
                 appointment: group.appointments[index],
+                therapistLabel: 'Auto assigned',
+                roomLabel: group.appointments[index].roomName,
               ),
             ),
         ],
@@ -9251,8 +10158,15 @@ class _GroupCheckoutRecapCard extends StatelessWidget {
 class _GroupCheckoutPaxRow extends StatelessWidget {
   final int index;
   final _ScheduleAppointment appointment;
+  final String therapistLabel;
+  final String roomLabel;
 
-  const _GroupCheckoutPaxRow({required this.index, required this.appointment});
+  const _GroupCheckoutPaxRow({
+    required this.index,
+    required this.appointment,
+    required this.therapistLabel,
+    required this.roomLabel,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -9321,9 +10235,18 @@ class _GroupCheckoutPaxRow extends StatelessWidget {
               ],
             ),
           ),
-        Text(
-          '${appointment.therapistName} - ${appointment.roomName}',
-          style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
+        _FinalAssignmentRow(
+          icon: Icons.person_pin_circle_outlined,
+          label: 'Therapist',
+          value: therapistLabel,
+          compact: true,
+        ),
+        const SizedBox(height: 3),
+        _FinalAssignmentRow(
+          icon: Icons.meeting_room_outlined,
+          label: 'Room',
+          value: roomLabel,
+          compact: true,
         ),
         const SizedBox(height: 2),
         Text(
@@ -9331,6 +10254,118 @@ class _GroupCheckoutPaxRow extends StatelessWidget {
           style: const TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
         ),
       ],
+    );
+  }
+}
+
+class _FinalAssignmentRow extends StatelessWidget {
+  const _FinalAssignmentRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+    this.compact = false,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool compact;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(
+          icon,
+          size: compact ? 14 : 16,
+          color: const Color(0xFF0F766E),
+        ),
+        SizedBox(width: compact ? 5 : 7),
+        Text(
+          '$label: ',
+          style: TextStyle(
+            fontSize: compact ? 11 : 12,
+            color: const Color(0xFF64748B),
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            overflow: TextOverflow.ellipsis,
+            maxLines: 2,
+            style: TextStyle(
+              fontSize: compact ? 11 : 12,
+              color: const Color(0xFF115E59),
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _FinalisationRoomUnitChip extends StatelessWidget {
+  const _FinalisationRoomUnitChip({
+    required this.unit,
+    required this.selected,
+    required this.ownedByAppointment,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  final RoomUnitAvailability unit;
+  final bool selected;
+  final bool ownedByAppointment;
+  final bool enabled;
+  final VoidCallback onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final available = unit.availableForRequestedTime || ownedByAppointment;
+    final canSelect = enabled && available;
+    final busyUntil = unit.availableAt?.trim();
+    final label = available
+        ? unit.name
+        : busyUntil == null || busyUntil.isEmpty
+        ? '${unit.name} · Busy'
+        : '${unit.name} · Until ${_clockLabel(busyUntil)}';
+    final foreground = available
+        ? const Color(0xFF0F766E)
+        : const Color(0xFF94A3B8);
+    return ChoiceChip(
+      label: Text(label),
+      avatar: selected
+          ? const Icon(
+              Icons.check_circle_rounded,
+              size: 17,
+              color: Color(0xFF0F766E),
+            )
+          : null,
+      selected: selected,
+      showCheckmark: false,
+      selectedColor: const Color(0xFFDDF7EE),
+      backgroundColor: available
+          ? const Color(0xFFEAF8F5)
+          : const Color(0xFFF1F5F9),
+      side: BorderSide(
+        color: selected
+            ? const Color(0xFF0F766E)
+            : available
+            ? const Color(0xFF99D5C9)
+            : const Color(0xFFCBD5E1),
+        width: selected ? 1.6 : 1,
+      ),
+      labelStyle: TextStyle(
+        color: foreground,
+        fontSize: 12,
+        fontWeight: selected
+            ? FontWeight.w900
+            : FontWeight.w700,
+      ),
+      onSelected: canSelect ? (_) => onSelected() : null,
     );
   }
 }

@@ -541,9 +541,12 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
           : LayoutBuilder(
               builder: (context, constraints) {
                 final padding = constraints.maxWidth >= 900 ? 24.0 : 16.0;
+                // Tablet columns are narrower than the phone's, so long service
+                // names wrap to two lines there too — give every grid width the
+                // extra vertical room so the card content never overflows.
                 final cardHeight =
                     context.managementCatalogueCardHeight +
-                    (constraints.maxWidth < 600 ? 16 : 0);
+                    (constraints.maxWidth < 600 ? 16 : 20);
                 if (!_gridView) {
                   return ListView.separated(
                     padding: EdgeInsets.fromLTRB(padding, 16, padding, 28),

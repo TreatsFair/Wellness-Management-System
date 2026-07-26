@@ -1,0 +1,2 @@
+-- Local ledger placeholder for migration 20260722120541, already applied remotely.
+-- The matching canonical change is retained under its original local filename.

@@ -46,7 +46,7 @@ const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
 const summaryOverlay = document.querySelector("#summary-overlay");
-const stepNames = ["Outlet", "Guests & Masseurs", "Treatments", "Date & time", "Billing"];
+const stepNames = ["Outlet", "Guests", "Treatments", "Date & time", "Billing"];
 let dateRequestSerial = 0;
 
 function escapeHtml(value) {
@@ -254,49 +254,27 @@ function setGuestCount(count) {
 function renderGuestUi() {
   renderPaxPicker();
   document.querySelector("#pax-hint").textContent = state.guests.length === 1
-    ? "Booking just for you — your details come at billing."
+    ? ""
     : "Groups share one visit time — every guest starts together.";
   const allowPref = therapistSelectionAllowed();
   const prefOptions = ["No preference", "Female masseur", "Male masseur"];
   const prefShort = { "No preference": "No preference", "Female masseur": "Female", "Male masseur": "Male" };
   const preview = document.querySelector("#guest-preview");
   preview.innerHTML = state.guests.map((guest, index) => {
-    const custom = guest.label === `Guest ${index + 1}` ? "" : guest.label;
     const prefField = allowPref
-      ? `<div class="guest-field" role="group" aria-label="Preferred masseur gender for guest ${index + 1}">
-          <span>Preferred masseur gender</span>
-          <div class="guest-pref">${prefOptions.map((pref) =>
-            `<button type="button" class="pref-chip ${guest.therapist === pref ? "is-selected" : ""}" data-guest-pref="${index}" data-pref-value="${escapeHtml(pref)}" aria-pressed="${guest.therapist === pref}">${prefShort[pref]}</button>`).join("")}</div>
+      ? `<div class="guest-card-fields">
+          <div class="guest-field" role="group" aria-label="Preferred masseur gender for guest ${index + 1}">
+            <span>Preferred masseur gender</span>
+            <div class="guest-pref">${prefOptions.map((pref) =>
+              `<button type="button" class="pref-chip ${guest.therapist === pref ? "is-selected" : ""}" data-guest-pref="${index}" data-pref-value="${escapeHtml(pref)}" aria-pressed="${guest.therapist === pref}">${prefShort[pref]}</button>`).join("")}</div>
+          </div>
         </div>`
       : "";
     return `<div class="guest-card">
       <header class="guest-card-head"><b>${index + 1}</b><h4>Guest ${index + 1}</h4></header>
-      <div class="guest-card-fields">
-        <label class="guest-field">
-          <span>Guest name <small>Optional</small></span>
-          <input type="text" maxlength="80" value="${escapeHtml(custom)}" placeholder="e.g. Sarah" data-guest-name="${index}" aria-label="Name for guest ${index + 1}" />
-        </label>
-        ${prefField}
-      </div>
+      ${prefField}
     </div>`;
   }).join("");
-  preview.querySelectorAll("[data-guest-name]").forEach((input) => {
-    input.addEventListener("input", () => {
-      const index = Number(input.dataset.guestName);
-      state.guests[index].label = input.value;
-      renderGuestTabs("#treatment-guest-tabs", state.treatmentGuest);
-      if (index === state.treatmentGuest) {
-        document.querySelector("#treatment-guest-heading").textContent = `Selecting for ${guestLabel(state.guests[index], index)}`;
-      }
-      updateReview();
-    });
-    input.addEventListener("blur", () => {
-      const index = Number(input.dataset.guestName);
-      state.guests[index].label = input.value.trim() || `Guest ${index + 1}`;
-      renderGuestUi();
-      updateUi();
-    });
-  });
   preview.querySelectorAll("[data-guest-pref]").forEach((button) => {
     button.addEventListener("click", () => {
       const guest = state.guests[Number(button.dataset.guestPref)];
@@ -336,7 +314,7 @@ function renderServices() {
     return `<article class="service-card ${selected ? "is-selected" : ""}">
       <img src="${escapeHtml(service.image)}" alt="${escapeHtml(service.name)}" />
       <div class="service-copy"><h3>${escapeHtml(service.name)}</h3><p>${escapeHtml(service.description)}</p><span>${service.duration} minutes</span></div>
-      <div class="service-action"><strong>${service.showPrice ? money(service.price) : "Price on request"}</strong><button class="add-service" type="button" data-service="${escapeHtml(service.id)}" aria-pressed="${selected}">${selected ? "Selected" : "Select"}</button></div>
+      <div class="service-action"><strong>${service.showPrice ? `${money(service.price)}<small class="nett">NETT</small>` : "Price on request"}</strong><button class="add-service" type="button" data-service="${escapeHtml(service.id)}" aria-pressed="${selected}">${selected ? "Selected" : "Select"}</button></div>
     </article>`;
   }).join("");
   container.querySelectorAll("[data-service]").forEach((button) => {
@@ -449,7 +427,7 @@ async function loadAvailability() {
   renderTimes();
   try {
     const payload = await api.getGroupTimes({ date: state.date, allocations: allocationsPayload() });
-    state.slots = (payload.slots || []).map((slot) => ({ startAt: slot.start_at, endAt: slot.end_at }));
+    state.slots = (payload.slots || []).map((slot) => ({ startAt: slot.start_at, endAt: slot.end_at, status: slot.status || "available" }));
     clearNotice();
   } catch (error) {
     availabilityLoadError = error.message || "Unable to check live availability.";
@@ -473,8 +451,14 @@ function renderTimes() {
     if (!groups.has(period)) groups.set(period, []);
     groups.get(period).push({ ...slot, index });
   });
-  container.innerHTML = [...groups.entries()].map(([label, slots]) => `<div class="time-group"><span>${label}</span><div class="time-button-grid">${slots.map((slot) => `<button class="time-button ${state.time?.startAt === slot.startAt ? "is-selected" : ""}" type="button" data-slot-index="${slot.index}">${escapeHtml(timeLabel(slot.startAt))}</button>`).join("")}</div></div>`).join("");
-  container.querySelectorAll("[data-slot-index]").forEach((button) => button.addEventListener("click", () => {
+  const statusClass = (status) => status === "full" ? "is-full" : status === "selling_fast" ? "is-selling" : "is-available";
+  container.innerHTML = [...groups.entries()].map(([label, slots]) => `<div class="time-group"><span>${label}</span><div class="time-button-grid">${slots.map((slot) => {
+    const full = slot.status === "full";
+    const classes = ["time-button", statusClass(slot.status)];
+    if (state.time?.startAt === slot.startAt && !full) classes.push("is-selected");
+    return `<button class="${classes.join(" ")}" type="button" data-slot-index="${slot.index}"${full ? " disabled aria-disabled=\"true\"" : ""}>${escapeHtml(timeLabel(slot.startAt))}</button>`;
+  }).join("")}</div></div>`).join("");
+  container.querySelectorAll("[data-slot-index]:not([disabled])").forEach((button) => button.addEventListener("click", () => {
     state.time = state.slots[Number(button.dataset.slotIndex)];
     renderTimes();
     updateUi();
@@ -492,7 +476,7 @@ function canContinue() {
 
 function setContinueLabel() {
   const missingTreatments = state.guests.filter((guest) => !guest.serviceId).length;
-  const labels = ["Continue to guests", "Continue to treatments", "See group times", "Continue to billing"];
+  const labels = ["Continue to guests", "Continue to treatments", "See available times", "Continue to billing"];
   let label = state.step === 5 ? "Reserve and pay" : labels[state.step - 1];
   if (state.step === 3 && missingTreatments) {
     label = `Choose ${missingTreatments} more treatment${missingTreatments === 1 ? "" : "s"}`;
@@ -563,7 +547,7 @@ function showConfirmation({ preview = false, hold = null } = {}) {
   if (preview) {
     eyebrow.textContent = "Preview mode"; title.textContent = "The group booking form is ready."; message.textContent = "Configure Supabase to create a real hold. No appointment or payment was created.";
   } else if (state.appointment) {
-    eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
+    eyebrow.textContent = "Booking confirmed"; title.textContent = "Your appointment is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
   } else {
     const expires = new Date(hold.expires_at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
     eyebrow.textContent = "Time temporarily reserved"; title.textContent = "Your group hold was created."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. This hold expires at ${expires}.`;
@@ -591,7 +575,7 @@ function showPaymentStatus(kind, { reference = "" } = {}) {
   dialog.dataset.paymentState = kind;
   close.style.display = kind === "checking" ? "none" : "";
   if (kind === "checking") { setDialogIcon("pending"); eyebrow.textContent = "Confirming your payment"; title.textContent = "Just a moment..."; message.textContent = "We're confirming your group booking with Billplz."; }
-  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Payment received${reference ? ` - reference ${reference.slice(0, 8).toUpperCase()}` : ""}.`; close.textContent = "Done"; close.dataset.action = "home"; }
+  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}.`; close.textContent = "Done"; close.dataset.action = "home"; }
   else if (kind === "failed") { setDialogIcon("failed"); eyebrow.textContent = "Payment not completed"; title.textContent = "We couldn't confirm your booking."; message.textContent = "Your group time was not reserved. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
   else { setDialogIcon("pending"); eyebrow.textContent = "Still confirming"; title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
@@ -601,7 +585,13 @@ async function pollPaymentStatus(token) {
   stopPaymentPoll(); paymentPollAttempts += 1;
   try {
     const payload = await api.getHoldStatus(token);
-    if (payload.hold?.status === "confirmed") { showPaymentStatus("confirmed", { reference: token }); return; }
+    if (payload.hold?.status === "confirmed") {
+      // Same receipt number the app shows for this booking's transaction; falls
+      // back to the hold's own reference only if the webhook hasn't landed yet.
+      const reference = payload.hold.receipt_number || String(token).slice(0, 8).toUpperCase();
+      showPaymentStatus("confirmed", { reference });
+      return;
+    }
     if (["payment_failed", "cancelled", "expired"].includes(payload.hold?.status)) { showPaymentStatus("failed"); return; }
   } catch (_) { /* Retry transient failures. */ }
   if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS) { showPaymentStatus("timeout"); return; }
@@ -688,6 +678,13 @@ document.querySelector("#close-dialog").addEventListener("click", () => {
   document.querySelector("#confirmation-dialog").close();
 });
 document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => { if (event.currentTarget.dataset.paymentState === "checking") event.preventDefault(); });
+document.querySelector("#terms-link").addEventListener("click", (event) => {
+  event.preventDefault();
+  document.querySelector("#terms-dialog").showModal();
+});
+document.querySelector("#terms-dialog-close").addEventListener("click", () => {
+  document.querySelector("#terms-dialog").close();
+});
 
 async function initializeBooking() {
   if (initializePaymentReturn()) return;

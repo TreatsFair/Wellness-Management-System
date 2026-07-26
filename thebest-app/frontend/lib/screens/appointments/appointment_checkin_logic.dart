@@ -1,3 +1,18 @@
+bool isFixedTherapistAssignmentSource(String source) {
+  final normalized = source.trim().toLowerCase();
+  return normalized == 'specific_customer_request' ||
+      normalized == 'manual_override';
+}
+
+String? therapistIdForFinalStart({
+  required String assignmentSource,
+  required String? selectedTherapistId,
+}) {
+  if (!isFixedTherapistAssignmentSource(assignmentSource)) return null;
+  final therapistId = selectedTherapistId?.trim() ?? '';
+  return therapistId.isEmpty ? null : therapistId;
+}
+
 /// Appointment details should show the amount actually collected whenever a
 /// paid transaction exists. [scheduledAmount] can be the pre-SST service net
 /// in exclusive-tax mode, so it is only the fallback for unpaid appointments.
@@ -33,6 +48,7 @@ List<Map<String, dynamic>> appointmentUnpaidItems({
 List<Map<String, dynamic>> transactionItemsForAppointment({
   required Map<String, dynamic> transaction,
   required String appointmentId,
+  List<Map<String, dynamic>>? fallbackAppointmentItems,
 }) {
   final rawItems = _rawServiceItems(transaction['serviceItems']);
   final transactionAppointmentId =
@@ -41,18 +57,60 @@ List<Map<String, dynamic>> transactionItemsForAppointment({
       '';
   if (transactionAppointmentId == appointmentId) return rawItems;
 
-  return rawItems.where((item) {
+  final matchedItems = rawItems.where((item) {
     final itemAppointmentId =
         item['appointmentId']?.toString() ??
         item['appointment_id']?.toString() ??
         '';
     return itemAppointmentId == appointmentId;
   }).toList();
+  if (matchedItems.isNotEmpty) return matchedItems;
+
+  final groupId =
+      transaction['appointmentGroupId']?.toString() ??
+      transaction['appointment_group_id']?.toString() ??
+      '';
+  final hasAnyAppointmentTags = rawItems.any((item) {
+    final taggedId =
+        item['appointmentId']?.toString() ??
+        item['appointment_id']?.toString() ??
+        '';
+    return taggedId.isNotEmpty;
+  });
+  if (groupId.isNotEmpty &&
+      !hasAnyAppointmentTags &&
+      fallbackAppointmentItems != null &&
+      fallbackAppointmentItems.isNotEmpty) {
+    // Legacy group receipts stored every pax line on one transaction but did
+    // not persist the appointment ID per line. The appointment's own service
+    // snapshot identifies the matching subset of that original paid group.
+    // Explicit later add-ons are excluded because they have their own receipt.
+    final remaining = [...rawItems];
+    final fallbackMatches = <Map<String, dynamic>>[];
+    for (final appointmentItem in fallbackAppointmentItems) {
+      final lineType =
+          appointmentItem['lineType']?.toString().toLowerCase() ??
+          appointmentItem['line_type']?.toString().toLowerCase() ??
+          '';
+      if (lineType == 'addon' || lineType == 'add_on') continue;
+      final itemId = serviceItemId(appointmentItem);
+      final matchIndex = remaining.indexWhere(
+        (candidate) => serviceItemId(candidate) == itemId,
+      );
+      if (matchIndex >= 0) {
+        fallbackMatches.add(remaining.removeAt(matchIndex));
+      }
+    }
+    return fallbackMatches;
+  }
+
+  return matchedItems;
 }
 
 double transactionAmountForAppointment({
   required Map<String, dynamic> transaction,
   required String appointmentId,
+  List<Map<String, dynamic>>? fallbackAppointmentItems,
 }) {
   final totalAmount = _asDouble(
     transaction['totalAmount'] ?? transaction['total_amount'],
@@ -67,8 +125,10 @@ double transactionAmountForAppointment({
   final appointmentItems = transactionItemsForAppointment(
     transaction: transaction,
     appointmentId: appointmentId,
+    fallbackAppointmentItems: fallbackAppointmentItems,
   );
   if (appointmentItems.isEmpty) return 0;
+  if (allItems.isEmpty) return 0;
   final allItemsTotal = allItems.fold<double>(
     0,
     (total, item) => total + _serviceItemPrice(item),

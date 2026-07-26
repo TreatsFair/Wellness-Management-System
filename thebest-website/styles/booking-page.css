@@ -109,14 +109,15 @@ button { color: inherit; }
 .is-selected .selection-dot, .is-selected .radio-mark { border: 5px solid var(--green); }
 
 .service-list { display: grid; gap: 0.8rem; }
-.service-card { display: grid; grid-template-columns: 112px 1fr auto; align-items: center; gap: 1.1rem; min-height: 112px; padding: 0.7rem; border: 1px solid rgba(143, 95, 0, 0.25); border-radius: 15px; background: var(--paper); transition: 160ms ease; }
+.service-card { display: grid; grid-template-columns: 156px 1fr auto; align-items: center; gap: 1.1rem; min-height: 150px; padding: 0.7rem; border: 1px solid rgba(143, 95, 0, 0.25); border-radius: 15px; background: var(--paper); transition: 160ms ease; }
 .service-card.is-selected { border-color: #c7a868; background: #fffaf0; }
-.service-card img { width: 112px; height: 90px; object-fit: cover; border-radius: 11px; }
+.service-card img { width: 156px; height: 130px; object-fit: cover; border-radius: 11px; }
 .service-copy h3 { margin: 0 0 0.3rem; font: 600 1.1rem var(--font-display); }
 .service-copy p { margin: 0 0 0.5rem; color: var(--muted); font-size: 0.74rem; line-height: 1.45; }
 .service-copy span { color: var(--green); font-size: 0.72rem; font-weight: 600; }
 .service-action { display: grid; justify-items: end; gap: 0.65rem; padding-right: 0.6rem; }
 .service-action strong { color: var(--ink); font-size: 0.93rem; }
+.nett { margin-left: 0.2rem; color: inherit; font-size: 0.6rem; font-weight: 700; letter-spacing: 0.03em; vertical-align: middle; }
 .add-service { min-width: 72px; padding: 0.48rem 0.72rem; border: 1px solid #b89758; border-radius: 99px; color: var(--gold-dark); background: transparent; font-size: 0.7rem; font-weight: 700; cursor: pointer; }
 .service-card.is-selected .add-service { color: white; border-color: var(--green); background: var(--green); }
 .service-more { grid-column: 2 / -1; margin: -0.3rem 0.5rem 0.35rem 0; padding-top: 0.65rem; border-top: 1px solid rgba(143, 95, 0, 0.14); }
@@ -135,14 +136,25 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .date-button strong { font-size: 0.84rem; }
 .date-button.is-selected { color: white; border-color: var(--green); background: var(--green); }
 .date-button.is-selected small { color: #fff1cf; }
-.time-heading { display: flex; align-items: center; justify-content: space-between; }
-.time-heading span { display: flex; align-items: center; gap: 0.35rem; color: var(--muted); font-size: 0.63rem; }
+.time-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1rem; flex-wrap: wrap; }
+.time-legend { display: flex; flex-wrap: wrap; gap: 0.3rem 0.7rem; }
+.time-legend span { display: flex; align-items: center; gap: 0.32rem; color: var(--muted); font-size: 0.63rem; }
+.time-legend i { width: 8px; height: 8px; border-radius: 50%; background: #c3bcae; }
+.time-legend .is-available i { background: #5cb87f; }
+.time-legend .is-selling i { background: var(--gold); }
+.time-legend .is-full i { background: #c3bcae; }
 .time-groups { display: grid; gap: 0.75rem; }
 .time-group { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 0.75rem; align-items: start; }
 .time-group > span { padding-top: 0.72rem; color: var(--ink); font-size: 0.8rem; font-weight: 700; line-height: 1.2; }
 .time-button-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.45rem; min-width: 0; }
 .time-button { padding: 0.58rem 0.3rem; border: 1px solid var(--line); border-radius: 9px; background: var(--paper); font-size: 0.7rem; cursor: pointer; }
 .time-button:hover { border-color: var(--gold); }
+.time-button.is-available:not(.is-selected) { border-color: #bfe3cc; background: #eaf6ee; }
+.time-button.is-available:not(.is-selected):hover { border-color: #5cb87f; }
+.time-button.is-selling:not(.is-selected) { border-color: var(--gold); background: #fbe6bf; }
+.time-button.is-selling:not(.is-selected):hover { border-color: var(--gold-dark); }
+.time-button.is-full { border-color: #ded8ca; background: #ece9e2; color: var(--muted); cursor: not-allowed; opacity: 0.75; }
+.time-button.is-full:hover { border-color: #ded8ca; }
 .time-button.is-selected { color: white; border-color: var(--green); background: var(--green); }
 
 .details-form { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
@@ -155,6 +167,8 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field textarea { resize: vertical; }
 .consent { display: flex; align-items: start; gap: 0.7rem; color: var(--muted); font-size: 0.7rem; line-height: 1.5; }
 .consent input { margin-top: 0.15rem; accent-color: var(--green); }
+.terms-link { display: inline; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
+.terms-link:hover { color: var(--gold-dark); }
 .booking-honeypot { position: absolute !important; left: -10000px !important; width: 1px !important; height: 1px !important; overflow: hidden !important; }
 .booking-feedback { margin: 0; padding: 0.9rem 1rem; border: 1px solid rgba(143, 95, 0, 0.18); border-radius: 12px; color: var(--muted); background: rgba(255, 244, 221, 0.7); font-size: 0.75rem; line-height: 1.5; }
 .booking-feedback.is-error { color: #8b2e24; border-color: rgba(174, 59, 45, 0.28); background: #fff2ef; }
@@ -205,7 +219,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .guest-card-head { display: flex; align-items: center; gap: 0.55rem; }
 .guest-card-head b { width: 26px; height: 26px; flex: 0 0 26px; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--green); font-size: 0.68rem; }
 .guest-card-head h4 { margin: 0; font: 600 1.02rem var(--font-display); }
-.guest-card-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.5fr); gap: 1rem 1.25rem; align-items: start; }
+.guest-card-fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 1rem 1.25rem; align-items: start; }
 .guest-field { min-width: 0; display: grid; gap: 0.45rem; }
 .guest-field > span { font-size: 0.72rem; font-weight: 700; }
 .guest-field small { color: var(--muted); font-weight: 400; }
@@ -267,6 +281,19 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .success-mark svg { width: 30px; fill: none; stroke: currentColor; stroke-width: 2; }
 .success-mark.is-pending { background: var(--muted); }
 .success-mark.is-failed { background: #8b2e24; }
+
+.terms-dialog { width: min(620px, calc(100% - 2rem)); max-height: min(82vh, 720px); padding: 0; border: 0; border-radius: 22px; color: var(--ink); background: var(--paper); box-shadow: 0 30px 100px rgba(0,0,0,0.24); text-align: left; overflow: hidden; }
+.terms-dialog[open] { display: flex; flex-direction: column; }
+.terms-dialog::backdrop { background: rgba(24, 27, 23, 0.62); backdrop-filter: blur(4px); }
+.terms-dialog-head { flex: 0 0 auto; display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; padding: 1.6rem 1.8rem 1rem; border-bottom: 1px solid var(--line); }
+.terms-dialog-head h2 { margin: 0; font: 600 1.4rem var(--font-display); }
+.terms-dialog-close { flex: 0 0 auto; width: 32px; height: 32px; display: grid; place-items: center; border: 0; border-radius: 50%; background: rgba(0, 0, 0, 0.05); color: var(--ink); cursor: pointer; }
+.terms-dialog-close svg { width: 16px; fill: none; stroke: currentColor; stroke-width: 2; }
+.terms-dialog-close:hover { background: rgba(0, 0, 0, 0.1); }
+.terms-body { flex: 1 1 auto; padding: 1rem 1.8rem 1.8rem; overflow-y: auto; }
+.terms-body h3 { margin: 1.2rem 0 0.4rem; font: 600 0.95rem var(--font-display); color: var(--ink); }
+.terms-body h3:first-child { margin-top: 0; }
+.terms-body p { margin: 0; color: var(--muted); font-size: 0.8rem; line-height: 1.6; }
 
 @media (max-width: 960px) {
   .booking-nav { gap: 1rem; }

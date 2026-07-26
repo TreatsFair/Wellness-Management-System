@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
@@ -91,13 +92,7 @@ class TherapistModel {
     );
   }
 
-  String get initials {
-    final parts = name.trim().split(' ');
-    if (parts.length >= 2) {
-      return '${parts[0][0]}${parts[1][0]}'.toUpperCase();
-    }
-    return name.isNotEmpty ? name[0].toUpperCase() : '?';
-  }
+  String get initials => staffInitials(name);
 
   Color get avatarColor {
     final colors = [
@@ -257,6 +252,14 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
   Future<TherapistModel?> _openTherapistForm({
     TherapistModel? therapist,
   }) async {
+    var suggestedRotationNumber = 0;
+    for (final staff in _therapists.where(
+      (item) => item.role == 'Therapist' && item.id != therapist?.id,
+    )) {
+      if (staff.displayOrder >= suggestedRotationNumber) {
+        suggestedRotationNumber = staff.displayOrder + 1;
+      }
+    }
     final savedTherapist = await showAdaptiveDetailSurface<TherapistModel>(
       context: context,
       barrierLabel: therapist == null
@@ -264,6 +267,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
           : 'Close staff editor',
       builder: (editorContext, isFullScreen) => _TherapistEditorSurface(
         therapist: therapist,
+        suggestedRotationNumber: suggestedRotationNumber,
         defaultJoinDate: _todayString(),
         isFullScreen: isFullScreen,
         onDelete: therapist == null || !_isAdmin
@@ -320,9 +324,13 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     if (fromIndex < 0 || targetIndex < 0) return;
     final moved = ordered.removeAt(fromIndex);
     ordered.insert(targetIndex, moved);
+    final rotationNumbers = ordered
+        .map((staff) => staff.displayOrder)
+        .toList()
+      ..sort();
     final orderById = <String, int>{
       for (var index = 0; index < ordered.length; index++)
-        ordered[index].id: index,
+        ordered[index].id: rotationNumbers[index],
     };
 
     List<TherapistModel> applyOrder(List<TherapistModel> source) {
@@ -344,6 +352,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
     try {
       await _therapistRepository.updateTherapistOrder(
         ordered.map((staff) => staff.id).toList(),
+        rotationNumbers,
       );
       if (!mounted) return;
       setState(() => _savingOrder = false);
@@ -2457,12 +2466,14 @@ class _CommissionEditorDialogState extends State<_CommissionEditorDialog> {
 
 class _TherapistEditorSurface extends StatefulWidget {
   final TherapistModel? therapist;
+  final int suggestedRotationNumber;
   final String defaultJoinDate;
   final bool isFullScreen;
   final VoidCallback? onDelete;
 
   const _TherapistEditorSurface({
     this.therapist,
+    required this.suggestedRotationNumber,
     required this.defaultJoinDate,
     required this.isFullScreen,
     this.onDelete,
@@ -2563,6 +2574,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
   late final TextEditingController _phoneController;
   late final TextEditingController _genderController;
   late final TextEditingController _roleController;
+  late final TextEditingController _rotationController;
   late final TextEditingController _joinDateController;
   late final TextEditingController _notesController;
   late bool _availabilityStatus;
@@ -2571,6 +2583,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
   bool _saving = false;
   bool _closing = false;
   int _tab = 0;
+  String? _rotationValidationMessage;
 
   bool get _isEditing => widget.therapist != null;
 
@@ -2583,6 +2596,9 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
     _genderController = TextEditingController(text: therapist?.gender ?? '');
     _roleController = TextEditingController(
       text: therapist?.role ?? 'Therapist',
+    );
+    _rotationController = TextEditingController(
+      text: '${therapist?.displayOrder ?? widget.suggestedRotationNumber}',
     );
     _joinDateController = TextEditingController(
       text: therapist?.joinDate ?? widget.defaultJoinDate,
@@ -2597,6 +2613,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
     _phoneController.dispose();
     _genderController.dispose();
     _roleController.dispose();
+    _rotationController.dispose();
     _joinDateController.dispose();
     _notesController.dispose();
     super.dispose();
@@ -2605,19 +2622,55 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
   Future<void> _save() async {
     if (_saving || _closing) return;
     if (_tab != 0) setState(() => _tab = 0);
+    setState(() => _rotationValidationMessage = null);
     if (!_formKey.currentState!.validate()) return;
 
+    final normalizedRole = _normalizeStaffRole(_roleController.text);
+    final rotationNumber = normalizedRole == 'Therapist'
+        ? int.parse(_rotationController.text.trim())
+        : null;
     setState(() => _saving = true);
+
+    if (rotationNumber != null) {
+      try {
+        final available = await _therapistRepository
+            .isTherapistRotationNumberAvailable(
+              rotationNumber,
+              excludingTherapistId: widget.therapist?.id,
+            );
+        if (!available) {
+          if (!mounted) return;
+          setState(() {
+            _saving = false;
+            _rotationValidationMessage =
+                'This rotation number is already used by another therapist.';
+          });
+          _formKey.currentState!.validate();
+          return;
+        }
+      } catch (error) {
+        if (!mounted) return;
+        setState(() => _saving = false);
+        AppToast.error(
+          context,
+          error.toString(),
+          title: 'Unable to validate rotation number',
+        );
+        return;
+      }
+    }
+
     final data = {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
       'gender': _genderController.text.trim(),
-      'role': _normalizeStaffRole(_roleController.text),
+      'role': normalizedRole,
       'joinDate': _joinDateController.text.trim(),
       'availabilityStatus': _availabilityStatus,
       'notes': _notesController.text.trim(),
       if (_imageRemoved) 'profileImageUrl': '',
     };
+    if (rotationNumber != null) data['displayOrder'] = rotationNumber;
 
     try {
       late final String therapistId;
@@ -2669,6 +2722,11 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
         notes: (savedRow['notes'] ?? data['notes'])!.toString(),
         profileImageUrl: profileImageUrl,
         serviceCommissions: savedCommissions,
+        displayOrder: TherapistModel._intValue(
+          savedRow['displayOrder'] ??
+              data['displayOrder'] ??
+              widget.therapist?.displayOrder,
+        ),
         totalAppointments: widget.therapist?.totalAppointments ?? 0,
       );
 
@@ -2786,6 +2844,9 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
           ? ''
           : widget.therapist?.profileImageUrl ?? '',
       serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+      displayOrder:
+          int.tryParse(_rotationController.text.trim()) ??
+          widget.suggestedRotationNumber,
     );
   }
 
@@ -2817,7 +2878,34 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
           const SizedBox(height: 22),
           const _StaffEditorSectionTitle('Employment'),
           const SizedBox(height: 12),
-          _StaffRoleDropdown(label: 'Role', controller: _roleController),
+          _StaffRoleDropdown(
+            label: 'Role',
+            controller: _roleController,
+            onChanged: (_) => setState(() {
+              _rotationValidationMessage = null;
+            }),
+          ),
+          if (_normalizeStaffRole(_roleController.text) == 'Therapist') ...[
+            const SizedBox(height: 12),
+            _TherapistFormField(
+              label: 'Rotation number',
+              controller: _rotationController,
+              keyboardType: TextInputType.number,
+              helperText: 'Fixed queue order for therapists in this outlet.',
+              onChanged: (_) {
+                if (_rotationValidationMessage != null) {
+                  setState(() => _rotationValidationMessage = null);
+                }
+              },
+              validator: (value) {
+                final parsed = int.tryParse(value?.trim() ?? '');
+                if (parsed == null || parsed < 0) {
+                  return 'Enter a whole number of 0 or greater.';
+                }
+                return _rotationValidationMessage;
+              },
+            ),
+          ],
           const SizedBox(height: 12),
           _TherapistFormField(
             label: 'Join Date',
@@ -2936,6 +3024,9 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
           ? ''
           : widget.therapist?.profileImageUrl ?? '',
       serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+      displayOrder:
+          int.tryParse(_rotationController.text.trim()) ??
+          widget.suggestedRotationNumber,
     );
     return Dialog(
       insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
@@ -3373,6 +3464,9 @@ class _TherapistFormField extends StatelessWidget {
   final TextInputType? keyboardType;
   final bool requiredField;
   final int maxLines;
+  final String? helperText;
+  final FormFieldValidator<String>? validator;
+  final ValueChanged<String>? onChanged;
 
   const _TherapistFormField({
     required this.label,
@@ -3381,6 +3475,9 @@ class _TherapistFormField extends StatelessWidget {
     this.keyboardType,
     this.requiredField = false,
     this.maxLines = 1,
+    this.helperText,
+    this.validator,
+    this.onChanged,
   });
 
   @override
@@ -3389,14 +3486,18 @@ class _TherapistFormField extends StatelessWidget {
       controller: controller,
       keyboardType: keyboardType,
       maxLines: maxLines,
-      validator: requiredField
-          ? (value) => value == null || value.trim().isEmpty
-                ? '$label is required'
-                : null
-          : null,
+      onChanged: onChanged,
+      validator:
+          validator ??
+          (requiredField
+              ? (value) => value == null || value.trim().isEmpty
+                    ? '$label is required'
+                    : null
+              : null),
       decoration: InputDecoration(
         labelText: label,
         hintText: hint,
+        helperText: helperText,
         filled: true,
         fillColor: const Color(0xFFF7F8FA),
         border: OutlineInputBorder(
@@ -3457,8 +3558,13 @@ class _TherapistGenderDropdown extends StatelessWidget {
 class _StaffRoleDropdown extends StatelessWidget {
   final String label;
   final TextEditingController controller;
+  final ValueChanged<String>? onChanged;
 
-  const _StaffRoleDropdown({required this.label, required this.controller});
+  const _StaffRoleDropdown({
+    required this.label,
+    required this.controller,
+    this.onChanged,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -3468,7 +3574,11 @@ class _StaffRoleDropdown extends StatelessWidget {
         DropdownMenuItem(value: 'Therapist', child: Text('Therapist')),
         DropdownMenuItem(value: 'Counter', child: Text('Counter')),
       ],
-      onChanged: (value) => controller.text = value ?? 'Therapist',
+      onChanged: (value) {
+        final next = value ?? 'Therapist';
+        controller.text = next;
+        onChanged?.call(next);
+      },
       decoration: InputDecoration(
         labelText: label,
         filled: true,

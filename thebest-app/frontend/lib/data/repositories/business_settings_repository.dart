@@ -1,6 +1,8 @@
 import '../services/supabase_table_service.dart';
 import 'repository_utils.dart';
 
+enum PaymentOrigin { billplz, counter }
+
 class BusinessSettingsRepository {
   BusinessSettingsRepository({SupabaseTableService? table})
     : _table = table ?? SupabaseTableService('business_settings');
@@ -36,7 +38,8 @@ class BusinessSettingsRepository {
 class BusinessRuleSettings {
   const BusinessRuleSettings({
     required this.sstEnabled,
-    required this.sstPricingMode,
+    required this.billplzSstPricingMode,
+    required this.counterSstPricingMode,
     required this.sstRatePercent,
     required this.sstRoundingMode,
     required this.lateGraceMinutes,
@@ -46,7 +49,8 @@ class BusinessRuleSettings {
   });
 
   final bool sstEnabled;
-  final String sstPricingMode;
+  final String billplzSstPricingMode;
+  final String counterSstPricingMode;
   final double sstRatePercent;
   final String sstRoundingMode;
   final int lateGraceMinutes;
@@ -57,7 +61,8 @@ class BusinessRuleSettings {
   factory BusinessRuleSettings.defaults() {
     return const BusinessRuleSettings(
       sstEnabled: true,
-      sstPricingMode: 'exclusive',
+      billplzSstPricingMode: 'inclusive',
+      counterSstPricingMode: 'exclusive',
       sstRatePercent: 6,
       sstRoundingMode: 'nearest_cent',
       lateGraceMinutes: 15,
@@ -69,7 +74,18 @@ class BusinessRuleSettings {
 
   factory BusinessRuleSettings.fromMap(Map<String, dynamic> row) {
     final defaults = BusinessRuleSettings.defaults();
-    final mode = asString(row['sstPricingMode'] ?? row['sst_pricing_mode']);
+    final legacyMode = asString(
+      row['sstPricingMode'] ?? row['sst_pricing_mode'],
+      'exclusive',
+    );
+    final billplzMode = asString(
+      row['billplzSstPricingMode'] ?? row['billplz_sst_pricing_mode'],
+      legacyMode,
+    );
+    final counterMode = asString(
+      row['counterSstPricingMode'] ?? row['counter_sst_pricing_mode'],
+      legacyMode,
+    );
     final rounding = asString(
       row['sstRoundingMode'] ?? row['sst_rounding_mode'],
     );
@@ -78,7 +94,8 @@ class BusinessRuleSettings {
         row['sstEnabled'] ?? row['sst_enabled'],
         defaults.sstEnabled,
       ),
-      sstPricingMode: mode == 'inclusive' ? 'inclusive' : 'exclusive',
+      billplzSstPricingMode: _pricingMode(billplzMode),
+      counterSstPricingMode: _pricingMode(counterMode),
       sstRatePercent: asDouble(
         row['sstRatePercent'] ?? row['sst_rate_percent'],
         defaults.sstRatePercent,
@@ -113,9 +130,20 @@ class BusinessRuleSettings {
     return 'SST ($rate%)';
   }
 
-  bool get isInclusive => sstPricingMode == 'inclusive';
+  // Compatibility for screens that have not yet supplied a payment origin.
+  // Counter is the safe operational default because only Billplz is nett at
+  // Taman Wahyu.
+  bool get isInclusive => isInclusiveFor(PaymentOrigin.counter);
 
-  PriceBreakdown priceBreakdown(double displayedServicePrice) {
+  bool isInclusiveFor(PaymentOrigin origin) => switch (origin) {
+    PaymentOrigin.billplz => billplzSstPricingMode == 'inclusive',
+    PaymentOrigin.counter => counterSstPricingMode == 'inclusive',
+  };
+
+  PriceBreakdown priceBreakdown(
+    double displayedServicePrice, {
+    PaymentOrigin origin = PaymentOrigin.counter,
+  }) {
     final grossPrice = displayedServicePrice < 0 ? 0.0 : displayedServicePrice;
     if (!sstEnabled || sstRatePercent <= 0) {
       final total = _roundAmount(grossPrice);
@@ -127,7 +155,7 @@ class BusinessRuleSettings {
     }
 
     final rate = sstRatePercent / 100;
-    if (isInclusive) {
+    if (isInclusiveFor(origin)) {
       final total = _roundAmount(grossPrice);
       final service = _roundToCents(total / (1 + rate));
       return PriceBreakdown(
@@ -148,6 +176,8 @@ class BusinessRuleSettings {
 
   double _roundAmount(double value) {
     switch (sstRoundingMode) {
+      case 'nearest_10_sen':
+        return _roundToCents((value * 10).round() / 10);
       case 'nearest_5_sen':
         return _roundToCents((value * 20).round() / 20);
       case 'floor_cent':
@@ -175,10 +205,14 @@ class PriceBreakdown {
 bool _validRoundingMode(String value) {
   return const {
     'nearest_cent',
+    'nearest_10_sen',
     'nearest_5_sen',
     'floor_cent',
     'ceil_cent',
   }.contains(value);
 }
+
+String _pricingMode(String value) =>
+    value == 'inclusive' ? 'inclusive' : 'exclusive';
 
 double _roundToCents(double value) => (value * 100).round() / 100;

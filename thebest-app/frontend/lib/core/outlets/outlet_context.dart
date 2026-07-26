@@ -41,6 +41,7 @@ class OutletContext {
     'transactions',
     'booking_holds',
     'business_settings',
+    'business_hours',
     'online_booking_outlet_settings',
     'online_booking_services',
     'online_booking_service_rooms',

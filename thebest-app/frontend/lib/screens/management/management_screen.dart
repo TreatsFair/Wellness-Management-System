@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/theme/app_theme.dart';
+import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/room_repository.dart';
@@ -113,15 +114,7 @@ bool _isPendingAppointmentStatus(String status) {
       status == 'in_progress';
 }
 
-String _initials(String name) {
-  final parts = name
-      .trim()
-      .split(RegExp(r'\s+'))
-      .where((p) => p.isNotEmpty)
-      .toList();
-  if (parts.length >= 2) return '${parts.first[0]}${parts[1][0]}'.toUpperCase();
-  return name.isNotEmpty ? name[0].toUpperCase() : '?';
-}
+String _initials(String name) => staffInitials(name);
 
 Color _avatarColor(String seed) {
   final colors = [
@@ -1833,6 +1826,7 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
   late final TextEditingController _floor;
   late final TextEditingController _slots;
   late final TextEditingController _equipment;
+  late bool _usesSpecificRooms;
   SelectedImage? _imagePreview;
   bool _active = true;
   bool _imageRemoved = false;
@@ -1879,6 +1873,12 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
       text: _asInt(raw['totalSlots'], 1).toString(),
     );
     _equipment = TextEditingController(text: _asString(raw['equipment']));
+    _usesSpecificRooms =
+        _asString(
+          raw['allocationMode'] ?? raw['allocation_mode'],
+          'capacity',
+        ) ==
+        'specific_room';
     _active = _asBool(raw['active'] ?? raw['isActive'], true);
     _loadCategories();
   }
@@ -1995,6 +1995,11 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
     if (!_isService && _tab != 0) setState(() => _tab = 0);
     if (!_formKey.currentState!.validate()) return;
     setState(() => _saving = true);
+    final roomAllocationMode =
+        _normalizeRoomType(_roomType.text) == 'body_room' &&
+            _usesSpecificRooms
+        ? 'specific_room'
+        : 'capacity';
     final data = _isService
         ? {
             'name': _name.text.trim(),
@@ -2021,6 +2026,7 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
             'floor': _normalizeRoomFloor(_floor.text),
             'totalSlots': int.tryParse(_slots.text.trim()) ?? 1,
             'equipment': _equipment.text.trim(),
+            'allocationMode': roomAllocationMode,
             'isActive': _active,
           };
     try {
@@ -2224,6 +2230,13 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
             controller: _roomType,
             options: const ['body_room', 'foot_chair'],
             optionLabel: _roomTypeLabel,
+            onChanged: (value) {
+              setState(() {
+                if (_normalizeRoomType(value) != 'body_room') {
+                  _usesSpecificRooms = false;
+                }
+              });
+            },
           ),
           const SizedBox(height: 12),
           Row(
@@ -2247,6 +2260,46 @@ class _ResourceEditorSurfaceState extends State<_ResourceEditorSurface> {
               ),
             ],
           ),
+          if (_normalizeRoomType(_roomType.text) == 'body_room') ...[
+            const SizedBox(height: 12),
+            Container(
+              decoration: BoxDecoration(
+                color: _usesSpecificRooms
+                    ? const Color(0xFFEFF9F8)
+                    : const Color(0xFFF8FAFC),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(
+                  color: _usesSpecificRooms
+                      ? const Color(0xFF9FD5D1)
+                      : const Color(0xFFE2E8F0),
+                ),
+              ),
+              child: SwitchListTile.adaptive(
+                value: _usesSpecificRooms,
+                onChanged: (value) =>
+                    setState(() => _usesSpecificRooms = value),
+                activeTrackColor: const Color(0xFF1B7C80),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 4,
+                ),
+                title: const Text(
+                  'Treat slots as specific rooms',
+                  style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700),
+                ),
+                subtitle: Text(
+                  _usesSpecificRooms
+                      ? 'Each slot becomes Room 1, Room 2, and so on, and one room is assigned to every booking.'
+                      : 'Slots are shared capacity only; bookings are not assigned an individual room.',
+                  style: const TextStyle(
+                    color: Color(0xFF64748B),
+                    fontSize: 11.5,
+                    height: 1.35,
+                  ),
+                ),
+              ),
+            ),
+          ],
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
@@ -3266,11 +3319,10 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
 
   final _hoursTable = SupabaseTableService('therapist_working_hours');
   final _leaveTable = SupabaseTableService('therapist_unavailability');
-  final _settingsTable = SupabaseTableService('business_settings');
+  final _businessHoursTable = SupabaseTableService('business_hours');
   List<Map<String, dynamic>> _hours = [];
   List<Map<String, dynamic>> _leaves = [];
-  String _defaultOpen = '09:00';
-  String _defaultClose = '21:00';
+  List<Map<String, dynamic>> _businessHours = [];
   bool? _availableOverride;
   bool _savingLeave = false;
   bool _loading = true;
@@ -3295,23 +3347,14 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
           widget.therapist.id,
           orderBy: 'starts_at',
         ),
-        _settingsTable.list(limit: 1),
+        _businessHoursTable.list(orderBy: 'day_of_week'),
       ]);
       final settings = results[2];
       if (!mounted) return;
       setState(() {
         _hours = results[0];
         _leaves = results[1];
-        if (settings.isNotEmpty) {
-          _defaultOpen = _shortTime(
-            settings.first['openTime'] ?? settings.first['open_time'],
-            '09:00',
-          );
-          _defaultClose = _shortTime(
-            settings.first['closeTime'] ?? settings.first['close_time'],
-            '21:00',
-          );
-        }
+        _businessHours = settings;
         _loading = false;
       });
     } catch (error) {
@@ -3333,6 +3376,31 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
     return null;
   }
 
+  Map<String, dynamic>? _businessHoursFor(int day) {
+    for (final row in _businessHours) {
+      if (_asInt(row['dayOfWeek'] ?? row['day_of_week'], -1) == day) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  bool _businessClosed(int day) {
+    final row = _businessHoursFor(day);
+    return row?['isClosed'] == true || row?['is_closed'] == true;
+  }
+
+  String _businessOpen(int day) => _shortTime(
+    _businessHoursFor(day)?['openTime'] ?? _businessHoursFor(day)?['open_time'],
+    '09:00',
+  );
+
+  String _businessClose(int day) => _shortTime(
+    _businessHoursFor(day)?['closeTime'] ??
+        _businessHoursFor(day)?['close_time'],
+    '21:00',
+  );
+
   TimeOfDay _parseTime(String value) {
     final parts = value.split(':');
     return TimeOfDay(
@@ -3348,12 +3416,18 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
       _parseTime(value).format(context);
 
   Future<void> _editDay(int day) async {
+    if (_businessClosed(day)) {
+      _showMessage(
+        'The outlet is closed on ${_days[day]}. Reopen it in Business Settings first.',
+      );
+      return;
+    }
     final row = _hoursFor(day);
     var start = _parseTime(
-      _shortTime(row?['startTime'] ?? row?['start_time'], _defaultOpen),
+      _shortTime(row?['startTime'] ?? row?['start_time'], _businessOpen(day)),
     );
     var end = _parseTime(
-      _shortTime(row?['endTime'] ?? row?['end_time'], _defaultClose),
+      _shortTime(row?['endTime'] ?? row?['end_time'], _businessClose(day)),
     );
     final action = await showDialog<String>(
       context: context,
@@ -3410,8 +3484,8 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
     );
     if (action == null) return;
     if (action == 'inherit') {
-      start = _parseTime(_defaultOpen);
-      end = _parseTime(_defaultClose);
+      start = _parseTime(_businessOpen(day));
+      end = _parseTime(_businessClose(day));
     }
     final startMinutes = start.hour * 60 + start.minute;
     final endMinutes = end.hour * 60 + end.minute;
@@ -3551,18 +3625,20 @@ class _StaffScheduleDetailState extends State<_StaffScheduleDetail> {
                     const _ScheduleTableHeader(),
                     ...List.generate(7, (day) {
                       final row = _hoursFor(day);
+                      final closed = _businessClosed(day);
                       final start = _shortTime(
                         row?['startTime'] ?? row?['start_time'],
-                        _defaultOpen,
+                        _businessOpen(day),
                       );
                       final end = _shortTime(
                         row?['endTime'] ?? row?['end_time'],
-                        _defaultClose,
+                        _businessClose(day),
                       );
                       return _ScheduleDayCard(
                         day: _days[day],
-                        time:
-                            '${_displayTime(context, start)} – ${_displayTime(context, end)}',
+                        time: closed
+                            ? 'Outlet closed'
+                            : '${_displayTime(context, start)} – ${_displayTime(context, end)}',
                         onEdit: () => _editDay(day),
                         isLast: day == 6,
                       );
@@ -4918,12 +4994,14 @@ class _ControllerDropdown extends StatelessWidget {
   final TextEditingController controller;
   final List<String> options;
   final String Function(String)? optionLabel;
+  final ValueChanged<String>? onChanged;
 
   const _ControllerDropdown({
     required this.label,
     required this.controller,
     required this.options,
     this.optionLabel,
+    this.onChanged,
   });
 
   @override
@@ -4951,7 +5029,10 @@ class _ControllerDropdown extends StatelessWidget {
           )
           .toList(),
       onChanged: (value) {
-        if (value != null) controller.text = value;
+        if (value != null) {
+          controller.text = value;
+          onChanged?.call(value);
+        }
       },
       decoration: InputDecoration(
         labelText: label,
