@@ -674,9 +674,6 @@ function showConfirmation({ preview = false, hold = null } = {}) {
     eyebrow.textContent = "Preview mode"; title.textContent = "The group booking form is ready."; message.textContent = "Configure Supabase to create a real hold. No appointment or payment was created.";
   } else if (state.appointment) {
     eyebrow.textContent = "Booking confirmed"; title.textContent = "Your appointment is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
-  } else {
-    const expires = new Date(hold.expires_at).toLocaleTimeString("en-MY", { hour: "numeric", minute: "2-digit" });
-    eyebrow.textContent = "Time temporarily reserved"; title.textContent = "Your group hold was created."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. This hold expires at ${expires}.`;
   }
   document.querySelector("#confirmation-dialog").showModal();
 }
@@ -894,13 +891,16 @@ async function submitHold() {
       if (window.BOOKING_CONFIG?.testAutoConfirm) {
         try { state.appointment = (await api.confirmHold(payload.hold.token)).appointment; }
         catch (error) { holdNoticeMessage = error.message || "The time was reserved, but automatic confirmation failed."; }
-      } else holdNoticeMessage = payError.message || "Unable to start payment. Please try again.";
+      } else {
+        const reason = payError.message || "Unable to start payment.";
+        holdNoticeMessage = `${reason} Your time remains reserved until ${deadlineTimeLabel()}. Select Continue to secure payment to try again.`;
+      }
     }
     persistBookingSession();
     startHoldCountdown();
     if (holdNoticeMessage) showNotice(holdNoticeMessage, true); else clearNotice();
     if (state.paymentUrl) showPaymentHandoff();
-    else showConfirmation({ hold: payload.hold });
+    else if (state.appointment) showConfirmation({ hold: payload.hold });
   } catch (error) {
     showNotice(error.message || "Unable to reserve this group time.", true);
     if (error.status === 409) { state.time = null; await loadAvailability(); showStep(4); }

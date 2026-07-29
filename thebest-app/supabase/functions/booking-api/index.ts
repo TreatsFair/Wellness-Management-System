@@ -266,17 +266,6 @@ function billDescription(hold: Record<string, unknown>): string {
     outlet ? `The Best Wellness ${outlet}` : "The Best Wellness",
     serviceLine,
     whenLine ? `Date: ${whenLine}` : "",
-    (() => {
-      const expiry = new Date(text(hold.expires_at));
-      if (Number.isNaN(expiry.getTime())) return "";
-      const deadline = new Intl.DateTimeFormat("en-MY", {
-        timeZone: "Asia/Kuala_Lumpur",
-        hour: "numeric",
-        minute: "2-digit",
-        hour12: true,
-      }).format(expiry);
-      return `Pay by: ${deadline}`;
-    })(),
   ].filter(Boolean);
 
   const notes = sanitize(text(hold.notes));
@@ -435,25 +424,28 @@ async function claimBillplzBill(
   binding: BookingBillBinding,
   billId: string,
 ): Promise<string> {
-  let query = supabase
-    .from("booking_holds")
-    .update({ billplz_bill_id: billId, updated_at: new Date().toISOString() })
-    .is("billplz_bill_id", null)
-    .eq("status", "pending_payment")
-    .gt("expires_at", new Date().toISOString());
-  query = binding.booking_group_token
-    ? query.eq("booking_group_token", binding.booking_group_token).eq("guest_index", 1)
-    : query.eq("public_token", binding.public_token);
-  const claimed = await query.select("billplz_bill_id");
-  if (claimed.error) throw claimed.error;
-  if (claimed.data?.[0]?.billplz_bill_id === billId) return billId;
-
-  const winner = await bookingBillBinding(
-    binding.booking_group_token ?? binding.public_token,
-  );
-  await deleteBillplzBill(billId);
-  if (winner?.billplz_bill_id) return winner.billplz_bill_id;
-  throw new Error("This booking hold can no longer accept payment");
+  let winner: string | null;
+  try {
+    winner = await rpcScalar<string>("claim_billplz_bill_v2", {
+      p_token: binding.booking_group_token ?? binding.public_token,
+      p_bill_id: billId,
+    });
+  } catch (error) {
+    await deleteBillplzBill(billId).catch((deleteError) => {
+      console.error(
+        "Unable to delete unclaimed Billplz bill",
+        billId,
+        errorMessage(deleteError),
+      );
+    });
+    throw error;
+  }
+  if (!winner) {
+    await deleteBillplzBill(billId);
+    throw new Error("This booking hold can no longer accept payment");
+  }
+  if (winner !== billId) await deleteBillplzBill(billId);
+  return winner;
 }
 
 async function cleanupExpiredPaymentHolds(): Promise<{
