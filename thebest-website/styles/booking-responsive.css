@@ -108,6 +108,15 @@ body {
 }
 .booking-panel { overflow: visible; }
 
+.payment-deadline {
+  margin-inline: 0.9rem;
+  align-items: flex-start;
+}
+
+.payment-deadline > b {
+  min-width: 74px;
+}
+
 .panel-heading { align-items: flex-start; margin-bottom: 1.25rem; }
 .panel-heading > p,
 .section-number { display: none; }

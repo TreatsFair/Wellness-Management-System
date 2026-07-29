@@ -26,7 +26,9 @@ class TherapistModel {
   final bool availabilityStatus;
   final String notes;
   final String profileImageUrl;
-  final Map<String, double> serviceCommissions;
+  /// Per-service commission RATE overrides. Rates only — this never
+  /// restricts which services the therapist can perform.
+  final Map<String, double> commissionOverrides;
   final int displayOrder;
 
   // Calculated
@@ -42,7 +44,7 @@ class TherapistModel {
     required this.availabilityStatus,
     required this.notes,
     required this.profileImageUrl,
-    required this.serviceCommissions,
+    required this.commissionOverrides,
     this.displayOrder = 0,
     this.totalAppointments = 0,
   });
@@ -87,7 +89,7 @@ class TherapistModel {
       availabilityStatus: _boolValue(d['availabilityStatus']),
       notes: _stringValue(d['notes']),
       profileImageUrl: _stringValue(d['profileImageUrl']),
-      serviceCommissions: _commissionMap(d['serviceCommissions']),
+      commissionOverrides: _commissionMap(d['commissionOverrides']),
       displayOrder: _intValue(d['displayOrder']),
     );
   }
@@ -109,7 +111,7 @@ class TherapistModel {
   TherapistModel copyWith({
     int? totalAppointments,
     String? profileImageUrl,
-    Map<String, double>? serviceCommissions,
+    Map<String, double>? commissionOverrides,
     int? displayOrder,
   }) {
     return TherapistModel(
@@ -122,7 +124,7 @@ class TherapistModel {
       availabilityStatus: availabilityStatus,
       notes: notes,
       profileImageUrl: profileImageUrl ?? this.profileImageUrl,
-      serviceCommissions: serviceCommissions ?? this.serviceCommissions,
+      commissionOverrides: commissionOverrides ?? this.commissionOverrides,
       displayOrder: displayOrder ?? this.displayOrder,
       totalAppointments: totalAppointments ?? this.totalAppointments,
     );
@@ -476,6 +478,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
               onEdit: () => Navigator.of(detailContext).pop(true),
               showTabletHeader: false,
               showInlineEdit: false,
+              showCommission: _isAdmin,
             ),
           ),
     );
@@ -767,7 +770,9 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
       return _staffEmptyState(
         icon: Icons.touch_app_outlined,
         title: 'Select a staff member',
-        message: 'Their information and commissions will appear here.',
+        message: _isAdmin
+            ? 'Their information and commissions will appear here.'
+            : 'Their staff information will appear here.',
       );
     }
     return RefreshIndicator(
@@ -780,6 +785,7 @@ class _TherapistsScreenState extends State<TherapistsScreen> {
           therapist: selected,
           onEdit: () => _openTherapistForm(therapist: selected),
           showTabletHeader: false,
+          showCommission: _isAdmin,
         ),
       ),
     );
@@ -1592,12 +1598,14 @@ class _DetailPanel extends StatelessWidget {
   final VoidCallback onEdit;
   final bool showTabletHeader;
   final bool showInlineEdit;
+  final bool showCommission;
 
   const _DetailPanel({
     required this.therapist,
     required this.onEdit,
     this.showTabletHeader = true,
     this.showInlineEdit = true,
+    this.showCommission = false,
   });
 
   @override
@@ -1822,10 +1830,13 @@ class _DetailPanel extends StatelessWidget {
             ),
           ),
 
-          const SizedBox(height: 12),
-
-          // -- Notes ------------------------------------------
-          _StaffCommissionSection(staff: therapist, editable: showInlineEdit),
+          if (showCommission) ...[
+            const SizedBox(height: 12),
+            _StaffCommissionSection(
+              staff: therapist,
+              editable: showInlineEdit,
+            ),
+          ],
 
           const SizedBox(height: 12),
 
@@ -1956,7 +1967,7 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
   @override
   void initState() {
     super.initState();
-    _overrides = {...widget.staff.serviceCommissions};
+    _overrides = {...widget.staff.commissionOverrides};
     _loadServices();
   }
 
@@ -1964,7 +1975,7 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
   void didUpdateWidget(covariant _StaffCommissionSection oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.staff.id != widget.staff.id) {
-      _overrides = {...widget.staff.serviceCommissions};
+      _overrides = {...widget.staff.commissionOverrides};
       _selectedTab = 'Services';
       _loadServices();
     }
@@ -1988,8 +1999,8 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
       setState(() {
         _services = services;
         _overrides = staffRow == null
-            ? {...widget.staff.serviceCommissions}
-            : TherapistModel._commissionMap(staffRow['serviceCommissions']);
+            ? {...widget.staff.commissionOverrides}
+            : TherapistModel._commissionMap(staffRow['commissionOverrides']);
         _loading = false;
       });
     } catch (e) {
@@ -2026,7 +2037,7 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
     }
 
     await _therapistRepository.updateTherapist(widget.staff.id, {
-      'serviceCommissions': updated,
+      'commissionOverrides': updated,
     });
     if (!mounted) return;
     setState(() => _overrides = updated);
@@ -2706,9 +2717,9 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
         await _imageUploadRepository.removePublicUrl(previousUrl);
       }
 
-      final savedCommissions = savedRow.containsKey('serviceCommissions')
-          ? TherapistModel._commissionMap(savedRow['serviceCommissions'])
-          : widget.therapist?.serviceCommissions ?? {};
+      final savedCommissions = savedRow.containsKey('commissionOverrides')
+          ? TherapistModel._commissionMap(savedRow['commissionOverrides'])
+          : widget.therapist?.commissionOverrides ?? {};
       final savedTherapist = TherapistModel(
         id: therapistId,
         name: (savedRow['name'] ?? data['name'])!.toString(),
@@ -2721,7 +2732,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
         ),
         notes: (savedRow['notes'] ?? data['notes'])!.toString(),
         profileImageUrl: profileImageUrl,
-        serviceCommissions: savedCommissions,
+        commissionOverrides: savedCommissions,
         displayOrder: TherapistModel._intValue(
           savedRow['displayOrder'] ??
               data['displayOrder'] ??
@@ -2843,7 +2854,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
       profileImageUrl: _imageRemoved
           ? ''
           : widget.therapist?.profileImageUrl ?? '',
-      serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+      commissionOverrides: widget.therapist?.commissionOverrides ?? {},
       displayOrder:
           int.tryParse(_rotationController.text.trim()) ??
           widget.suggestedRotationNumber,
@@ -3023,7 +3034,7 @@ class _TherapistEditorSurfaceState extends State<_TherapistEditorSurface> {
       profileImageUrl: _imageRemoved
           ? ''
           : widget.therapist?.profileImageUrl ?? '',
-      serviceCommissions: widget.therapist?.serviceCommissions ?? {},
+      commissionOverrides: widget.therapist?.commissionOverrides ?? {},
       displayOrder:
           int.tryParse(_rotationController.text.trim()) ??
           widget.suggestedRotationNumber,

@@ -53,6 +53,63 @@ void main() {
       expect(result.success, isTrue);
       expect(result.actualStartedAt, isNull);
     });
+
+    test('structured busy response preserves recovery context', () {
+      final result = PaymentResult.fromMap({
+        'success': false,
+        'error_code': 'P0001',
+        'error_message':
+            '{"code":"THERAPIST_BUSY",'
+            '"message":"Therapist is busy.",'
+            '"appointment_id":"pax-2",'
+            '"therapist_id":"therapist-4",'
+            '"therapist_name":"Mei",'
+            '"busy_until":"2026-07-28T11:20:00+08:00",'
+            '"suggested_therapist_id":"therapist-6",'
+            '"suggested_therapist_name":"Aina",'
+            '"next_available_start_at":"2026-07-28T11:40:00+08:00",'
+            '"next_available_end_at":"2026-07-28T12:40:00+08:00",'
+            '"next_available_therapist_id":"therapist-4",'
+            '"next_available_therapist_name":"Mei",'
+            '"availability_searched_through":"2026-08-10"}',
+      });
+
+      expect(result.success, isFalse);
+      expect(result.needsTherapistConfirmation, isTrue);
+      expect(result.errorCode, 'THERAPIST_BUSY');
+      expect(result.busyAppointmentId, 'pax-2');
+      expect(result.busyTherapistId, 'therapist-4');
+      expect(result.busyTherapistName, 'Mei');
+      expect(result.busyUntil, DateTime.parse('2026-07-28T11:20:00+08:00'));
+      expect(result.suggestedTherapistId, 'therapist-6');
+      expect(result.suggestedTherapistName, 'Aina');
+      expect(
+        result.nextAvailableStartAt,
+        DateTime.parse('2026-07-28T11:40:00+08:00'),
+      );
+      expect(
+        result.nextAvailableEndAt,
+        DateTime.parse('2026-07-28T12:40:00+08:00'),
+      );
+      expect(result.nextAvailableTherapistId, 'therapist-4');
+      expect(result.nextAvailableTherapistName, 'Mei');
+      expect(
+        result.availabilitySearchedThrough,
+        DateTime.parse('2026-08-10'),
+      );
+    });
+
+    test('malformed server detail remains a normal operation error', () {
+      final result = PaymentResult.fromMap({
+        'success': false,
+        'error_code': 'P0001',
+        'error_message': 'The selected room is unavailable.',
+      });
+
+      expect(result.needsTherapistConfirmation, isFalse);
+      expect(result.errorCode, 'P0001');
+      expect(result.errorMessage, 'The selected room is unavailable.');
+    });
   });
 
   group('Phase 6B staff-facing errors', () {
@@ -157,21 +214,21 @@ void main() {
     });
   });
 
-  group('Flexible therapist final-start payload', () {
-    test('queue and gender preferences discard stale provisional IDs', () {
+  group('Concrete therapist final-start payload', () {
+    test('queue and gender preferences retain their locked IDs', () {
       expect(
         therapistIdForFinalStart(
           assignmentSource: 'queue',
           selectedTherapistId: 'stale-therapist-4',
         ),
-        isNull,
+        'stale-therapist-4',
       );
       expect(
         therapistIdForFinalStart(
           assignmentSource: 'gender_preference',
           selectedTherapistId: 'stale-female-therapist',
         ),
-        isNull,
+        'stale-female-therapist',
       );
     });
 
@@ -192,7 +249,7 @@ void main() {
       );
     });
 
-    test('multi-pax payload keeps flexible IDs null independently', () {
+    test('multi-pax payload keeps every locked ID independently', () {
       const sources = ['queue', 'gender_preference'];
       const provisionalIds = ['therapist-4', 'therapist-5'];
 
@@ -212,12 +269,12 @@ void main() {
         {
           'pax_index': 1,
           'assignment_source': 'queue',
-          'therapist_id': null,
+          'therapist_id': 'therapist-4',
         },
         {
           'pax_index': 2,
           'assignment_source': 'gender_preference',
-          'therapist_id': null,
+          'therapist_id': 'therapist-5',
         },
       ]);
     });

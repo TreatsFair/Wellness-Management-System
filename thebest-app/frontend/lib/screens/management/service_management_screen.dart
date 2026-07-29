@@ -198,6 +198,7 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
   }
 
   Future<void> _openEditor([ServiceCatalogueItem? service]) async {
+    if (!_isAdmin) return;
     setState(() => _selectedServiceId = service?.id);
     final result = await showAdaptiveDetailSurface<ServiceEditorResult>(
       context: context,
@@ -235,11 +236,16 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
             title: 'Service Details',
             subtitle: service.name,
             isFullScreen: isFullScreen,
-            footer: CatalogueDetailEditButton(
-              label: 'Edit Service',
-              onPressed: () => Navigator.of(detailContext).pop(true),
+            footer: _isAdmin
+                ? CatalogueDetailEditButton(
+                    label: 'Edit Service',
+                    onPressed: () => Navigator.of(detailContext).pop(true),
+                  )
+                : null,
+            child: _ServiceReadOnlyDetails(
+              service: service,
+              showAdminDetails: _isAdmin,
             ),
-            child: _ServiceReadOnlyDetails(service: service),
           ),
     );
     if (!mounted) return;
@@ -380,12 +386,14 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
     final categoryTitle = _selectedCategory ?? 'All Services';
     return ManagementCatalogueShell(
       moduleTitle: 'Services',
-      moduleSubtitle: 'Manage services and pricing',
+      moduleSubtitle: _isAdmin
+          ? 'Manage services and pricing'
+          : 'Browse services and pricing',
       contentTitle: categoryTitle,
       itemCountLabel:
           '${visible.length} service${visible.length == 1 ? '' : 's'}${_isAdmin && _selectedCategory != null ? ' · Hold a card to reorder' : ''}',
-      addLabel: 'Add Service',
-      onAdd: () => _openEditor(),
+      addLabel: _isAdmin ? 'Add Service' : null,
+      onAdd: _isAdmin ? () => _openEditor() : null,
       navigation: _buildCategorySidebar(),
       mobileNavigation: _buildHub(),
       headerActions: Row(
@@ -537,6 +545,7 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
               hasFilters:
                   _searchController.text.trim().isNotEmpty ||
                   _statusFilter != ServiceStatusFilter.all,
+              canAdd: _isAdmin,
             )
           : LayoutBuilder(
               builder: (context, constraints) {
@@ -557,6 +566,7 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
                       return _ServiceListTile(
                         service: service,
                         selected: service.id == _selectedServiceId,
+                        showCommission: _isAdmin,
                         onTap: () => _openServiceDetails(service),
                       );
                     },
@@ -576,6 +586,7 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
                     final card = _ServiceCard(
                       service: service,
                       selected: service.id == _selectedServiceId,
+                      showCommission: _isAdmin,
                       onTap: () => _openServiceDetails(service),
                     );
                     if (!_canReorderVisibleServices) return card;
@@ -857,18 +868,16 @@ class _StatusMenu extends StatelessWidget {
 }
 
 class _ServiceReadOnlyDetails extends StatelessWidget {
-  const _ServiceReadOnlyDetails({required this.service});
+  const _ServiceReadOnlyDetails({
+    required this.service,
+    required this.showAdminDetails,
+  });
 
   final ServiceCatalogueItem service;
+  final bool showAdminDetails;
 
   @override
   Widget build(BuildContext context) {
-    final roomLabel = service.roomType
-        .replaceAll('_', ' ')
-        .split(' ')
-        .where((part) => part.isNotEmpty)
-        .map((part) => '${part[0].toUpperCase()}${part.substring(1)}')
-        .join(' ');
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -937,21 +946,35 @@ class _ServiceReadOnlyDetails extends StatelessWidget {
             ),
           ],
         ),
-        const SizedBox(height: 12),
-        _ServiceReadOnlySection(
-          title: 'Commission and room',
-          children: [
-            _ServiceDetailRow(
-              label: 'Therapist commission',
-              value: 'RM ${service.therapistCommission.toStringAsFixed(2)}',
-            ),
-            _ServiceDetailRow(
-              label: 'Counter commission',
-              value: 'RM ${service.counterCommission.toStringAsFixed(2)}',
-            ),
-            _ServiceDetailRow(label: 'Room type', value: roomLabel, last: true),
-          ],
-        ),
+        if (showAdminDetails) ...[
+          const SizedBox(height: 12),
+          _ServiceReadOnlySection(
+            title: 'Commission and room',
+            children: [
+              _ServiceDetailRow(
+                label: 'Therapist commission',
+                value: 'RM ${service.therapistCommission.toStringAsFixed(2)}',
+              ),
+              _ServiceDetailRow(
+                label: 'Counter commission',
+                value: 'RM ${service.counterCommission.toStringAsFixed(2)}',
+              ),
+              _ServiceDetailRow(
+                label: 'Room type',
+                value: service.roomType
+                    .replaceAll('_', ' ')
+                    .split(' ')
+                    .where((part) => part.isNotEmpty)
+                    .map(
+                      (part) =>
+                          '${part[0].toUpperCase()}${part.substring(1)}',
+                    )
+                    .join(' '),
+                last: true,
+              ),
+            ],
+          ),
+        ],
       ],
     );
   }
@@ -1085,11 +1108,13 @@ class _ServiceCard extends StatelessWidget {
   const _ServiceCard({
     required this.service,
     required this.selected,
+    required this.showCommission,
     required this.onTap,
   });
 
   final ServiceCatalogueItem service;
   final bool selected;
+  final bool showCommission;
   final VoidCallback onTap;
 
   @override
@@ -1159,13 +1184,15 @@ class _ServiceCard extends StatelessWidget {
                   fontWeight: FontWeight.w800,
                 ),
               ),
-              const SizedBox(height: 5),
-              Text(
-                'Commission RM ${service.therapistCommission.toStringAsFixed(0)} / ${service.counterCommission.toStringAsFixed(0)}',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(color: context.appMuted, fontSize: 11.5),
-              ),
+              if (showCommission) ...[
+                const SizedBox(height: 5),
+                Text(
+                  'Commission RM ${service.therapistCommission.toStringAsFixed(0)} / ${service.counterCommission.toStringAsFixed(0)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: context.appMuted, fontSize: 11.5),
+                ),
+              ],
               SizedBox(height: narrowGrid ? 8 : 12),
               Align(
                 alignment: Alignment.centerRight,
@@ -1183,11 +1210,13 @@ class _ServiceListTile extends StatelessWidget {
   const _ServiceListTile({
     required this.service,
     required this.selected,
+    required this.showCommission,
     required this.onTap,
   });
 
   final ServiceCatalogueItem service;
   final bool selected;
+  final bool showCommission;
   final VoidCallback onTap;
 
   @override
@@ -1232,12 +1261,23 @@ class _ServiceListTile extends StatelessWidget {
                       ],
                     ),
                     const SizedBox(height: 6),
-                    Text(
-                      '${service.duration} min · RM ${service.price.toStringAsFixed(2)} · Commission RM ${service.therapistCommission.toStringAsFixed(0)}/${service.counterCommission.toStringAsFixed(0)}',
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(color: context.appMuted, fontSize: 12),
-                    ),
+                    if (showCommission)
+                      Text(
+                        '${service.duration} min · RM ${service.price.toStringAsFixed(2)} · Commission RM ${service.therapistCommission.toStringAsFixed(0)}/${service.counterCommission.toStringAsFixed(0)}',
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: context.appMuted, fontSize: 12),
+                      ),
+                    if (!showCommission)
+                      Text(
+                        '${service.duration} min · RM ${service.price.toStringAsFixed(2)}',
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: context.appMuted,
+                          fontSize: 12,
+                        ),
+                      ),
                   ],
                 ),
               ),
@@ -1361,9 +1401,13 @@ class _StatusBadge extends StatelessWidget {
 }
 
 class _EmptyCatalogue extends StatelessWidget {
-  const _EmptyCatalogue({required this.hasFilters});
+  const _EmptyCatalogue({
+    required this.hasFilters,
+    required this.canAdd,
+  });
 
   final bool hasFilters;
+  final bool canAdd;
 
   @override
   Widget build(BuildContext context) {
@@ -1386,7 +1430,9 @@ class _EmptyCatalogue extends StatelessWidget {
         Text(
           hasFilters
               ? 'Try changing the search or status filter.'
-              : 'Use Add Service above when you are ready to create one.',
+              : canAdd
+              ? 'Use Add Service above when you are ready to create one.'
+              : 'There are no services to display.',
           textAlign: TextAlign.center,
           style: TextStyle(color: context.appMuted),
         ),

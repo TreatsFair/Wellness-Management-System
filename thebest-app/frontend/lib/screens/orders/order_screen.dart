@@ -15,6 +15,9 @@ import '../../data/repositories/room_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/checkout_guest_card.dart';
+import '../../widgets/checkout_payment_method_grid.dart';
+import '../../widgets/room_unit_grid.dart';
 import '../../widgets/therapist_queue_picker.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
@@ -39,6 +42,13 @@ String _orderMinutesToTime(int minutes) {
   final hour = (normalized ~/ 60).toString().padLeft(2, '0');
   final minute = (normalized % 60).toString().padLeft(2, '0');
   return '$hour:$minute';
+}
+
+String _orderDisplayTimeFromMinutes(int minutes) {
+  final normalized = minutes % (24 * 60);
+  return DateFormat('h:mm a').format(
+    DateTime(2000, 1, 1, normalized ~/ 60, normalized % 60),
+  );
 }
 
 String _databaseTimeFromLabel(String label) {
@@ -277,6 +287,12 @@ class _WalkInAllocation {
   String get endTimeValue =>
       _orderMinutesToTime(_orderTimeToMinutes(startTimeValue) + duration);
 
+  /// 'll:59 AM – 12:49 PM' for the checkout recap. Checkout shows the actual
+  /// window rather than the Now/Next wording used while building the order.
+  String get timeRangeLabel =>
+      '${_orderDisplayTimeFromMinutes(_orderTimeToMinutes(startTimeValue))} – '
+      '${_orderDisplayTimeFromMinutes(_orderTimeToMinutes(endTimeValue))}';
+
   List<Map<String, dynamic>> get serviceItems => services
       .map(
         (service) => {
@@ -380,6 +396,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   final _searchController = TextEditingController();
   final _transactionNotesController = TextEditingController();
+  // Notes are the exception at checkout, so the field stays collapsed to a
+  // single row until it is actually needed.
+  bool _notesExpanded = false;
 
   // Receipt number
   late final String _receiptNumber;
@@ -504,6 +523,15 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
             : buffer,
       );
 
+  Set<String> get _serviceEligibleTherapistIds => {
+    for (final therapist in _therapists)
+      if (therapist.serviceCommissions.isEmpty ||
+          _selectedServices.every(
+            (service) => therapist.serviceCommissions.containsKey(service.id),
+          ))
+        therapist.id,
+  };
+
   Future<void> _loadTherapistsLive() async {
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
@@ -625,6 +653,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   Future<void> _openAddCustomerDialog() async {
     final savedCustomer = await showDialog<_WalkInCustomer>(
       context: context,
+      barrierColor: Theme.of(context).scaffoldBackgroundColor,
       builder: (context) => _QuickCustomerDialog(
         defaultJoinDate: _todayString(),
         customerBuilder: (id, data) => _WalkInCustomer(
@@ -696,6 +725,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         ? _selectedZone!.isAvailableNow
         : selectedUnit.availableForRequestedTime;
 
+    // Postgres hands back a full `time` — e.g. "19:32:38.850272". Truncating to
+    // 19:32 proposed a start *before* the therapist is actually free, and the
+    // reserve RPC then rejected it with the raw "Staff is booked until
+    // 19:32:38.850272." So round the opening UP to the next 5-minute mark:
+    // always after the real free time, and a clean number to read.
     DateTime? parseToday(String? value) {
       if (value == null || value.isEmpty) return null;
       final parts = value.split(':');
@@ -703,7 +737,15 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       final hour = int.tryParse(parts[0]);
       final minute = int.tryParse(parts[1]);
       if (hour == null || minute == null) return null;
+      final seconds = parts.length > 2
+          ? (double.tryParse(parts[2]) ?? 0)
+          : 0;
       var result = DateTime(now.year, now.month, now.day, hour, minute);
+      if (seconds > 0) result = result.add(const Duration(minutes: 1));
+      final overshoot = result.minute % 5;
+      if (overshoot != 0) {
+        result = result.add(Duration(minutes: 5 - overshoot));
+      }
       if (result.isBefore(now)) result = result.add(const Duration(days: 1));
       return result;
     }
@@ -720,7 +762,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     }
 
     // Next available — therapist free time
-    if (!_selectedTherapist!.isFree && _selectedTherapist!.freeInMinutes > 0) {
+    // A busy therapist with no freeInMinutes still has a busy_until clock; both
+    // are honoured so picking busy staff always yields a bookable start.
+    if (!_selectedTherapist!.isFree &&
+        (_selectedTherapist!.freeInMinutes > 0 ||
+            _selectedTherapist!.busyUntil.isNotEmpty)) {
       var nextTime =
           parseToday(_selectedTherapist!.busyUntil) ??
           now.add(Duration(minutes: _selectedTherapist!.freeInMinutes));
@@ -1062,7 +1108,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         totalAmount: allocation.servicePrice,
       );
       if (!result.success) {
-        if (mounted) _showPaxConflict(result.message);
+        if (mounted) _showPaxConflict(friendlyBookingErrorMessage(result.message));
         return false;
       }
       _heldPaxIndexes.add(index);
@@ -1088,7 +1134,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     );
   }
 
-  Future<void> _selectPax(int index) async {
+  /// Switches which guest the service / therapist / room / time steps are
+  /// editing. Without this, `_activePaxIndex` never moved off 0, so adding a
+  /// second guest silently kept editing the first one.
+  ///
+  /// Walk-in holds are keyed by pax index and stay reserved across a switch —
+  /// only the on-screen selection swaps.
+  void _selectPax(int index) {
+    if (index < 0 || index >= _paxCount || index == _activePaxIndex) return;
     final current = _currentAllocation;
     if (current != null) {
       final conflict = _allocationConflictMessage(
@@ -1099,9 +1152,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         _showPaxConflict(conflict);
         return;
       }
-      if (!await _reserveAllocation(current, index: _activePaxIndex)) return;
     }
-    if (!mounted) return;
     setState(() {
       if (current != null) _paxAllocations[_activePaxIndex] = current;
       _activePaxIndex = index;
@@ -1109,18 +1160,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     });
   }
 
-  Future<void> _clearPax(int index) async {
-    await CspService.releaseStaffWalkInDraft(
-      draftSessionId: _draftSessionId,
-      paxIndex: index + 1,
-    );
-    _heldPaxIndexes.remove(index);
-    if (!mounted) return;
-    setState(() {
-      _paxAllocations[index] = null;
-      _activePaxIndex = index;
-      _loadAllocationIntoSelection(null);
-    });
+  /// Whether a guest chip shows its "done" tick.
+  bool _isPaxConfigured(int index) {
+    if (index == _activePaxIndex) return _currentAllocation != null;
+    return index < _paxAllocations.length && _paxAllocations[index] != null;
   }
 
   Future<void> _setPaxCount(int count) async {
@@ -1153,15 +1196,6 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   // ── Computed Values ────────────────────────────────────────────
-
-  int get _serviceDuration =>
-      _selectedServices.fold(0, (total, service) => total + service.duration);
-
-  String get _serviceNameSummary {
-    if (_selectedServices.isEmpty) return '';
-    if (_selectedServices.length == 1) return _selectedServices.first.name;
-    return _selectedServices.map((service) => service.name).join(', ');
-  }
 
   String get _requiredRoomType {
     final types = _selectedRoomTypes;
@@ -1625,6 +1659,42 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Guest chips. Only shown once there is more than one guest — a single
+        // walk-in has nothing to switch between.
+        if (_paxCount > 1) ...[
+          const Text(
+            'Set the treatment, therapist, room and time for each guest. Use '
+            'the chips to switch between them.',
+            style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              for (var index = 0; index < _paxCount; index++)
+                ChoiceChip(
+                  label: Text(
+                    _isPaxConfigured(index)
+                        ? 'Pax ${index + 1}  ✓'
+                        : 'Pax ${index + 1}',
+                  ),
+                  selected: index == _activePaxIndex,
+                  onSelected: (_) => _selectPax(index),
+                  selectedColor: const Color(0xFF1B6B72),
+                  labelStyle: TextStyle(
+                    color: index == _activePaxIndex
+                        ? Colors.white
+                        : const Color(0xFF1A1A2E),
+                    fontWeight: FontWeight.w700,
+                  ),
+                  side: const BorderSide(color: Color(0xFFCBD5E1)),
+                  showCheckmark: false,
+                ),
+            ],
+          ),
+          const SizedBox(height: 16),
+        ],
         // Tabs
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
@@ -1742,10 +1812,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         TherapistQueuePicker(
+          allowFutureReservation: true,
           outletId: OutletContext.activeOutletId.value,
           date: DateFormat('yyyy-MM-dd').format(DateTime.now()),
           startTime: DateFormat('HH:mm:ss').format(DateTime.now()),
-          durationMinutes: _selectedDurationMinutes,
+          durationMinutes: _selectedRoomBlockMinutes,
+          eligibleTherapistIds: _serviceEligibleTherapistIds,
           selectedTherapistId: _selectedTherapist?.id,
           excludedTherapistIds: {
             for (var i = 0; i < _paxAllocations.length; i++)
@@ -1794,15 +1866,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           const SizedBox(height: 18),
           const _WalkInSubLabel('Specific Massage Room'),
           const SizedBox(height: 10),
-          ..._roomUnits.map(
-            (unit) => Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: _WalkInRoomUnitCard(
-                unit: unit,
-                isSelected: _selectedRoomUnit?.id == unit.id,
-                onTap: () => _onRoomUnitSelected(unit),
-              ),
-            ),
+          RoomUnitGrid(
+            units: _roomUnits,
+            selectedUnitId: _selectedRoomUnit?.id,
+            onSelected: _onRoomUnitSelected,
           ),
         ],
       ],
@@ -1958,9 +2025,36 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Widget _buildSummaryPanel() {
-    final startLabel = _selectedStartTime != null
-        ? '${_selectedStartTime!.isNow ? 'Now' : 'Next'} — ${_selectedStartTime!.timeLabel}'
-        : '—';
+    final allocationSlots = _allocationSlots;
+    final allocations = allocationSlots.whereType<_WalkInAllocation>().toList();
+    final customerName = _selectedCustomer?.name.trim() ?? '';
+    final guestLabel = customerName.isEmpty || customerName == 'Guest'
+        ? '$_paxCount ${_paxCount == 1 ? 'guest' : 'guests'}'
+        : '$_paxCount ${_paxCount == 1 ? 'guest' : 'guests'} · $customerName';
+    var startLabel = '—';
+    if (allocations.isNotEmpty) {
+      final starts = allocations
+          .map((allocation) => _orderTimeToMinutes(allocation.startTimeValue))
+          .toList();
+      final earliestStart = starts.reduce((a, b) => a < b ? a : b);
+      final ends = allocations.map((allocation) {
+        var end = _orderTimeToMinutes(allocation.endTimeValue);
+        final start = _orderTimeToMinutes(allocation.startTimeValue);
+        if (end <= start) end += 24 * 60;
+        if (end < earliestStart) end += 24 * 60;
+        return end;
+      }).toList();
+      final latestEnd = ends.reduce((a, b) => a > b ? a : b);
+      final startsNow = allocations.any(
+        (allocation) =>
+            allocation.startTime.isNow &&
+            _orderTimeToMinutes(allocation.startTimeValue) == earliestStart,
+      );
+      startLabel =
+          '${startsNow ? 'Now' : 'Scheduled'} · '
+          '${_orderDisplayTimeFromMinutes(earliestStart)} – '
+          '${_orderDisplayTimeFromMinutes(latestEnd)}';
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(24),
@@ -1968,7 +2062,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'Walk-in Summary',
+            'Summary Card',
             style: TextStyle(
               fontSize: 22,
               fontWeight: FontWeight.bold,
@@ -1983,131 +2077,94 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
           const SizedBox(height: 24),
 
           _WalkInSummaryRow(
-            label: 'Customer',
-            value: _selectedCustomer?.name ?? '—',
+            label: 'Guest',
+            value: guestLabel,
           ),
-          _WalkInSummaryRow(
-            label: 'Service',
-            value: _selectedServices.isEmpty ? '-' : _serviceNameSummary,
+          const SizedBox(height: 14),
+          Text(
+            'Guest Services ($_paxCount)',
+            style: const TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w800,
+              color: Color(0xFF1A1A2E),
+            ),
           ),
-          _WalkInSummaryRow(
-            label: 'Duration',
-            value: _selectedServices.isNotEmpty ? '$_serviceDuration min' : '—',
-          ),
-          _WalkInSummaryRow(
-            label: 'Therapist',
-            value: _selectedTherapist != null
-                ? '● ${_selectedTherapist!.name}'
-                : '—',
-            valueColor: _selectedTherapist != null
-                ? const Color(0xFF4CAF50)
-                : null,
-          ),
-          _WalkInSummaryRow(label: 'Zone', value: _selectedZone?.name ?? '—'),
-          if (_selectedRoomUnit != null)
-            _WalkInSummaryRow(label: 'Room', value: _selectedRoomUnit!.name),
-          _WalkInSummaryRow(label: 'Start Time', value: startLabel),
-
-          if (_paxCount > 1 || _checkoutAllocations.isNotEmpty) ...[
-            const SizedBox(height: 18),
+          const SizedBox(height: 10),
+          for (var i = 0; i < allocationSlots.length; i++) ...[
+            CheckoutGuestCard(
+              index: i,
+              storageKey: 'walkin-summary-$i',
+              guestName: customerName,
+              showGuestNameInTitle: false,
+              therapistLabel: allocationSlots[i]?.therapist.name ?? '',
+              roomLabel: allocationSlots[i] == null
+                  ? ''
+                  : allocationSlots[i]!.roomUnit?.name ??
+                        allocationSlots[i]!.zone.name,
+              lines: [
+                for (final service
+                    in allocationSlots[i]?.services ??
+                        const <_WalkInService>[])
+                  CheckoutGuestLine(
+                    name: service.name,
+                    durationMinutes: service.duration,
+                    price: service.price,
+                    imageUrl: service.imageUrl,
+                    typeLabel: _checkoutLineTypeLabel(service.category),
+                  ),
+              ],
+            ),
+            if (i != allocationSlots.length - 1) const SizedBox(height: 10),
+          ],
+          if (_paxConflictMessage != null) ...[
+            const SizedBox(height: 10),
             Text(
-              'Pax in this order (${_checkoutAllocations.length}/$_paxCount)',
+              _paxConflictMessage!,
               style: const TextStyle(
-                fontSize: 14,
+                fontSize: 12,
                 fontWeight: FontWeight.w700,
-                color: Color(0xFF1A1A2E),
+                color: Color(0xFFE53935),
               ),
-            ),
-            const SizedBox(height: 10),
-            for (var i = 0; i < _allocationSlots.length; i++) ...[
-              _WalkInPaxSummaryCard(
-                index: i + 1,
-                allocation: _allocationSlots[i],
-                selected: i == _activePaxIndex,
-                onTap: () => _selectPax(i),
-                onClear: _allocationSlots[i] == null
-                    ? null
-                    : () => _clearPax(i),
-              ),
-              const SizedBox(height: 8),
-            ],
-            if (_paxConflictMessage != null) ...[
-              const SizedBox(height: 2),
-              Text(
-                _paxConflictMessage!,
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFFE53935),
-                ),
-              ),
-              const SizedBox(height: 8),
-            ],
-            const SizedBox(height: 8),
-            const Divider(color: Color(0xFFEEEEEE)),
-            const SizedBox(height: 12),
-
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Service',
-                  style: TextStyle(fontSize: 13, color: Color(0xFF6B6B6B)),
-                ),
-                Text(
-                  'RM ${_orderNetServicePrice.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 6),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  _businessSettings.sstLabel,
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF6B6B6B),
-                  ),
-                ),
-                Text(
-                  'RM ${_orderSstAmount.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            const Divider(color: Color(0xFFEEEEEE)),
-            const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                const Text(
-                  'Total',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-                Text(
-                  'RM ${_orderTotalAmount.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFF1B6B72),
-                  ),
-                ),
-              ],
             ),
           ],
+          const SizedBox(height: 16),
+          _WalkInSummaryRow(label: 'Start Time', value: startLabel),
+          const SizedBox(height: 8),
+          const Divider(color: Color(0xFFEEEEEE)),
+          const SizedBox(height: 12),
+          _PaymentRow(
+            'Service',
+            'RM ${_orderNetServicePrice.toStringAsFixed(2)}',
+          ),
+          const SizedBox(height: 8),
+          _PaymentRow(
+            _businessSettings.sstLabel,
+            'RM ${_orderSstAmount.toStringAsFixed(2)}',
+          ),
+          const SizedBox(height: 10),
+          const Divider(color: Color(0xFFEEEEEE)),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              const Text(
+                'Total',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: Color(0xFF1A1A2E),
+                ),
+              ),
+              Text(
+                'RM ${_orderTotalAmount.toStringAsFixed(2)}',
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFF1B6B72),
+                ),
+              ),
+            ],
+          ),
 
           const SizedBox(height: 28),
 
@@ -2235,79 +2292,37 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 ),
               const SizedBox(height: 24),
 
-              // Order recap
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFF8F8F8),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '${_selectedCustomer?.name ?? 'Guest'} - ${_orderServiceNameSummary.isEmpty ? '-' : _orderServiceNameSummary}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1A1A2E),
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 10),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFE8F5F5),
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Text(
-                            '${_checkoutAllocations.length} pax',
-                            style: const TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFF1B6B72),
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      _checkoutAllocations.length == 1
-                          ? '${_checkoutAllocations.first.therapist.name} - ${_checkoutAllocations.first.zone.name}'
-                          : '${_checkoutAllocations.length} staff - ${_checkoutAllocations.length} resources',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF6B6B6B),
+              // Per-guest recap. Same expandable card the appointment
+              // checkout uses, so both flows present a booking identically.
+              CheckoutDateHeader(
+                label: DateFormat('EEE, d MMM yyyy').format(DateTime.now()),
+              ),
+              for (var i = 0; i < _checkoutAllocations.length; i++) ...[
+                CheckoutGuestCard(
+                  index: i,
+                  storageKey: 'walkin-$i',
+                  guestName: _selectedCustomer?.name ?? 'Guest',
+                  therapistLabel: _checkoutAllocations[i].therapist.name,
+                  roomLabel:
+                      _checkoutAllocations[i].roomUnit == null
+                      ? _checkoutAllocations[i].zone.name
+                      : '${_checkoutAllocations[i].zone.name} · '
+                            '${_checkoutAllocations[i].roomUnit!.name}',
+                  trailingNote: _checkoutAllocations[i].timeRangeLabel,
+                  lines: [
+                    for (final service in _checkoutAllocations[i].services)
+                      CheckoutGuestLine(
+                        name: service.name,
+                        durationMinutes: service.duration,
+                        price: service.price,
+                        imageUrl: service.imageUrl,
+                        typeLabel: _checkoutLineTypeLabel(service.category),
                       ),
-                    ),
-                    Text(
-                      _checkoutAllocations.length == 1
-                          ? 'Start: ${_checkoutAllocations.first.startTime.isNow ? 'Now' : 'Next'} - ${_checkoutAllocations.first.startTime.timeLabel}'
-                          : 'Group walk-in with ${_checkoutAllocations.length} allocations',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: Color(0xFF6B6B6B),
-                      ),
-                    ),
                   ],
                 ),
-              ),
+                if (i != _checkoutAllocations.length - 1)
+                  const SizedBox(height: 10),
+              ],
 
               const SizedBox(height: 20),
 
@@ -2362,28 +2377,11 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
               const SizedBox(height: 20),
 
-              TextField(
+              _CheckoutNotesField(
                 controller: _transactionNotesController,
-                minLines: 2,
-                maxLines: 4,
-                decoration: InputDecoration(
-                  labelText: 'Notes',
-                  alignLabelWithHint: true,
-                  filled: true,
-                  fillColor: const Color(0xFFFAFAFA),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFFDDDDDD)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: const BorderSide(color: Color(0xFF1B6B72)),
-                  ),
-                ),
+                expanded: _notesExpanded,
+                onToggle: () =>
+                    setState(() => _notesExpanded = !_notesExpanded),
               ),
 
               const SizedBox(height: 20),
@@ -2398,58 +2396,10 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
                 ),
               ),
               const SizedBox(height: 12),
-              LayoutBuilder(
-                builder: (context, constraints) {
-                  final compactMethods = isPhone && constraints.maxWidth < 430;
-                  final itemWidth = compactMethods
-                      ? constraints.maxWidth
-                      : (constraints.maxWidth - 36) / 4;
-                  return Wrap(
-                    spacing: 12,
-                    runSpacing: 12,
-                    children: [
-                      SizedBox(
-                        width: itemWidth,
-                        child: _PaymentMethodCard(
-                          icon: Icons.attach_money_outlined,
-                          label: 'Cash',
-                          isSelected: _paymentMethod == 'cash',
-                          onTap: () => setState(() => _paymentMethod = 'cash'),
-                        ),
-                      ),
-                      SizedBox(
-                        width: itemWidth,
-                        child: _PaymentMethodCard(
-                          icon: Icons.qr_code_2_outlined,
-                          label: 'QR Code',
-                          isSelected: _paymentMethod == 'qr_code',
-                          onTap: () =>
-                              setState(() => _paymentMethod = 'qr_code'),
-                        ),
-                      ),
-                      SizedBox(
-                        width: itemWidth,
-                        child: _PaymentMethodCard(
-                          icon: Icons.credit_card_outlined,
-                          label: 'Credit Card',
-                          isSelected: _paymentMethod == 'credit_card',
-                          onTap: () =>
-                              setState(() => _paymentMethod = 'credit_card'),
-                        ),
-                      ),
-                      SizedBox(
-                        width: itemWidth,
-                        child: _PaymentMethodCard(
-                          icon: Icons.credit_card,
-                          label: 'Debit Card',
-                          isSelected: _paymentMethod == 'debit_card',
-                          onTap: () =>
-                              setState(() => _paymentMethod = 'debit_card'),
-                        ),
-                      ),
-                    ],
-                  );
-                },
+              CheckoutPaymentMethodGrid(
+                selected: _paymentMethod,
+                onSelected: (method) =>
+                    setState(() => _paymentMethod = method),
               ),
 
               const SizedBox(height: 24),
@@ -2538,15 +2488,7 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
   final _phoneController = TextEditingController();
   final _genderController = TextEditingController();
   final _dobController = TextEditingController();
-  final _notesController = TextEditingController();
-  late final TextEditingController _joinDateController;
   bool _saving = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _joinDateController = TextEditingController(text: widget.defaultJoinDate);
-  }
 
   @override
   void dispose() {
@@ -2554,8 +2496,6 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
     _phoneController.dispose();
     _genderController.dispose();
     _dobController.dispose();
-    _joinDateController.dispose();
-    _notesController.dispose();
     super.dispose();
   }
 
@@ -2576,7 +2516,6 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
 
     setState(() => _saving = true);
     final dateOfBirth = _dobController.text.trim();
-    final joinDate = _joinDateController.text.trim();
     final data = {
       'name': _nameController.text.trim(),
       'phone': _phoneController.text.trim(),
@@ -2584,8 +2523,7 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
       // date_of_birth/join_date are DATE columns — an empty string is not a
       // valid date and Postgres rejects it, so omit rather than send ''.
       if (dateOfBirth.isNotEmpty) 'dateOfBirth': dateOfBirth,
-      if (joinDate.isNotEmpty) 'joinDate': joinDate,
-      'notes': _notesController.text.trim(),
+      'joinDate': widget.defaultJoinDate,
     };
 
     try {
@@ -2666,21 +2604,6 @@ class _QuickCustomerDialogState<T> extends State<_QuickCustomerDialog<T>> {
                   hint: 'YYYY-MM-DD',
                   keyboardType: TextInputType.datetime,
                   onCalendarTap: () => _openFieldDatePicker(_dobController),
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Join Date',
-                  controller: _joinDateController,
-                  hint: 'YYYY-MM-DD',
-                  keyboardType: TextInputType.datetime,
-                  onCalendarTap: () =>
-                      _openFieldDatePicker(_joinDateController),
-                ),
-                const SizedBox(height: 14),
-                _QuickCustomerField(
-                  label: 'Notes',
-                  controller: _notesController,
-                  maxLines: 3,
                 ),
                 const SizedBox(height: 24),
                 Row(
@@ -2927,7 +2850,6 @@ class _QuickCustomerField extends StatelessWidget {
   final TextEditingController controller;
   final TextInputType? keyboardType;
   final bool requiredField;
-  final int maxLines;
   final VoidCallback? onCalendarTap;
 
   const _QuickCustomerField({
@@ -2936,7 +2858,6 @@ class _QuickCustomerField extends StatelessWidget {
     this.hint,
     this.keyboardType,
     this.requiredField = false,
-    this.maxLines = 1,
     this.onCalendarTap,
   });
 
@@ -2945,7 +2866,6 @@ class _QuickCustomerField extends StatelessWidget {
     return TextFormField(
       controller: controller,
       keyboardType: keyboardType,
-      maxLines: maxLines,
       validator: requiredField
           ? (value) => value == null || value.trim().isEmpty
                 ? '$label is required'
@@ -3017,6 +2937,15 @@ class _QuickGenderDropdown extends StatelessWidget {
       ),
     );
   }
+}
+
+/// Maps a service catalogue category onto the checkout card's type pill.
+String _checkoutLineTypeLabel(String category) {
+  return switch (category.trim().toLowerCase()) {
+    'add-ons' || 'add-on' || 'addons' => 'Add-on',
+    'packages' || 'package' => 'Package',
+    _ => 'Main Service',
+  };
 }
 
 class _WalkInStepCard extends StatelessWidget {
@@ -3416,7 +3345,7 @@ class _WalkInGuestPaxRow extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final compact = constraints.maxWidth < 540;
-        final sectionPadding = EdgeInsets.all(compact ? 12 : 16);
+        final sectionPadding = EdgeInsets.all(compact ? 14 : 16);
 
         final guestSection = GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -3430,8 +3359,8 @@ class _WalkInGuestPaxRow extends StatelessWidget {
             child: Row(
               children: [
                 Container(
-                  width: compact ? 38 : 44,
-                  height: compact ? 38 : 44,
+                  width: compact ? 42 : 44,
+                  height: compact ? 42 : 44,
                   decoration: BoxDecoration(
                     color: const Color(0xFFE8F5F5),
                     borderRadius: BorderRadius.circular(11),
@@ -3485,8 +3414,8 @@ class _WalkInGuestPaxRow extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.center,
           children: [
             Container(
-              width: compact ? 38 : 44,
-              height: compact ? 38 : 44,
+              width: compact ? 42 : 44,
+              height: compact ? 42 : 44,
               decoration: BoxDecoration(
                 color: const Color(0xFFE8F5F5),
                 borderRadius: BorderRadius.circular(11),
@@ -3504,9 +3433,9 @@ class _WalkInGuestPaxRow extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Pax',
-                    style: TextStyle(
+                  Text(
+                    compact ? 'Number of guests' : 'Pax',
+                    style: const TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w800,
                       color: Color(0xFF1A1A2E),
@@ -3514,7 +3443,9 @@ class _WalkInGuestPaxRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '$configuredCount configured',
+                    compact
+                        ? '$configuredCount of $paxCount configured'
+                        : '$configuredCount configured',
                     style: const TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w600,
@@ -3549,24 +3480,14 @@ class _WalkInGuestPaxRow extends StatelessWidget {
 
         final paxSection = Padding(
           padding: sectionPadding,
-          child: compact
-              ? Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    paxIdentity,
-                    const SizedBox(height: 12),
-                    Align(alignment: Alignment.centerRight, child: paxControls),
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.center,
-                  children: [
-                    Expanded(child: paxIdentity),
-                    const SizedBox(width: 12),
-                    paxControls,
-                  ],
-                ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(child: paxIdentity),
+              const SizedBox(width: 12),
+              paxControls,
+            ],
+          ),
         );
 
         return Column(
@@ -3591,16 +3512,25 @@ class _WalkInGuestPaxRow extends StatelessWidget {
                   ),
                 ],
               ),
-              child: IntrinsicHeight(
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Expanded(flex: compact ? 11 : 10, child: guestSection),
-                    Container(width: 1, color: const Color(0xFFE2E8F0)),
-                    Expanded(flex: compact ? 9 : 10, child: paxSection),
-                  ],
-                ),
-              ),
+              child: compact
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        guestSection,
+                        Container(height: 1, color: const Color(0xFFE2E8F0)),
+                        paxSection,
+                      ],
+                    )
+                  : IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Expanded(child: guestSection),
+                          Container(width: 1, color: const Color(0xFFE2E8F0)),
+                          Expanded(child: paxSection),
+                        ],
+                      ),
+                    ),
             ),
             const SizedBox(height: 6),
             GestureDetector(
@@ -4002,100 +3932,6 @@ class _WalkInZoneCard extends StatelessWidget {
   }
 }
 
-class _WalkInRoomUnitCard extends StatelessWidget {
-  final RoomUnitAvailability unit;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _WalkInRoomUnitCard({
-    required this.unit,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final color = switch (unit.status) {
-      'occupied' => const Color(0xFFDC2626),
-      'cleaning' => const Color(0xFFF59E0B),
-      _ when !unit.availableForRequestedTime => const Color(0xFFF59E0B),
-      _ => const Color(0xFF059669),
-    };
-    var availableLabel = 'Available now';
-    if (unit.status != 'available' || !unit.availableForRequestedTime) {
-      final raw = unit.availableAt;
-      if (raw != null && raw.isNotEmpty) {
-        try {
-          final state = unit.status == 'cleaning'
-              ? 'Cleaning'
-              : unit.status == 'occupied'
-              ? 'Occupied'
-              : 'Next opening';
-          availableLabel =
-              '$state ${unit.status == 'available' ? 'at' : 'until'} ${DateFormat('h:mm a').format(DateFormat('HH:mm').parse(raw))}';
-        } catch (_) {
-          availableLabel = 'Next opening at $raw';
-        }
-      } else {
-        availableLabel = unit.status == 'cleaning'
-            ? 'Cleaning'
-            : unit.status == 'occupied'
-            ? 'Occupied'
-            : 'Unavailable for this service window';
-      }
-    }
-    return Material(
-      color: isSelected ? const Color(0xFFE8F5F5) : Colors.white,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(
-          color: isSelected ? const Color(0xFF1B6B72) : const Color(0xFFE5E7EB),
-          width: isSelected ? 2 : 1,
-        ),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: InkWell(
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 11),
-          child: Row(
-            children: [
-              Icon(Icons.meeting_room_outlined, color: color, size: 22),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      unit.name,
-                      style: const TextStyle(
-                        fontSize: 13.5,
-                        fontWeight: FontWeight.w800,
-                        color: Color(0xFF1A1A2E),
-                      ),
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      availableLabel,
-                      style: TextStyle(
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w700,
-                        color: color,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              if (isSelected)
-                const Icon(Icons.check_circle, color: Color(0xFF1B6B72)),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 class _WalkInRoomImage extends StatelessWidget {
   final String imageUrl;
   final String roomType;
@@ -4132,12 +3968,10 @@ class _WalkInRoomImage extends StatelessWidget {
 
 class _WalkInSummaryRow extends StatelessWidget {
   final String label, value;
-  final Color? valueColor;
 
   const _WalkInSummaryRow({
     required this.label,
     required this.value,
-    this.valueColor,
   });
 
   @override
@@ -4161,7 +3995,7 @@ class _WalkInSummaryRow extends StatelessWidget {
             style: TextStyle(
               fontSize: 14,
               fontWeight: FontWeight.w500,
-              color: valueColor ?? const Color(0xFF1A1A2E),
+              color: const Color(0xFF1A1A2E),
             ),
           ),
           const Divider(height: 14, color: Color(0xFFF0F0F0)),
@@ -4171,109 +4005,124 @@ class _WalkInSummaryRow extends StatelessWidget {
   }
 }
 
-class _WalkInPaxSummaryCard extends StatelessWidget {
-  final int index;
-  final _WalkInAllocation? allocation;
-  final bool selected;
-  final VoidCallback onTap;
-  final VoidCallback? onClear;
-
-  const _WalkInPaxSummaryCard({
-    required this.index,
-    required this.allocation,
-    required this.selected,
-    required this.onTap,
-    required this.onClear,
+/// Full-width but single-row notes control: collapsed it is a thin summary
+/// strip showing whatever note exists, and it only grows into a text field
+/// once the counter taps it.
+class _CheckoutNotesField extends StatelessWidget {
+  const _CheckoutNotesField({
+    required this.controller,
+    required this.expanded,
+    required this.onToggle,
   });
+
+  final TextEditingController controller;
+  final bool expanded;
+  final VoidCallback onToggle;
 
   @override
   Widget build(BuildContext context) {
-    final item = allocation;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFFE8F5F5) : const Color(0xFFF8FAFC),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: selected ? const Color(0xFF1B6B72) : const Color(0xFFE2E8F0),
-            width: selected ? 1.5 : 1,
-          ),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              width: 30,
-              height: 30,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: const Color(0xFFE8F5F5),
-                borderRadius: BorderRadius.circular(8),
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (context, value, _) {
+        final note = value.text.trim();
+        return AnimatedSize(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOut,
+          alignment: Alignment.topCenter,
+          child: Container(
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: const Color(0xFFFAFAFA),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: expanded
+                    ? const Color(0xFF1B6B72)
+                    : const Color(0xFFDDDDDD),
               ),
-              child: Text(
-                '$index',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF1B6B72),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                InkWell(
+                  onTap: onToggle,
+                  borderRadius: BorderRadius.circular(12),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(
+                          Icons.sticky_note_2_outlined,
+                          size: 17,
+                          color: Color(0xFF64748B),
+                        ),
+                        const SizedBox(width: 8),
+                        const Text(
+                          'Notes',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF475569),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            expanded
+                                ? ''
+                                : note.isEmpty
+                                ? 'Optional'
+                                : note,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.right,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: note.isEmpty
+                                  ? const Color(0xFF9E9E9E)
+                                  : const Color(0xFF1A1A2E),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Icon(
+                          expanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          size: 19,
+                          color: const Color(0xFF94A3B8),
+                        ),
+                      ],
+                    ),
+                  ),
                 ),
-              ),
+                if (expanded)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    child: TextField(
+                      controller: controller,
+                      autofocus: true,
+                      minLines: 2,
+                      maxLines: 4,
+                      style: const TextStyle(fontSize: 13),
+                      decoration: const InputDecoration(
+                        isDense: true,
+                        border: InputBorder.none,
+                        hintText: 'Add a note for this bill',
+                        hintStyle: TextStyle(
+                          fontSize: 13,
+                          color: Color(0xFF9E9E9E),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    item?.serviceNameSummary ?? 'Pax $index',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1A1A2E),
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    item == null
-                        ? 'Tap to configure service, staff, zone, and time'
-                        : '${item.therapist.name} - ${item.zone.name}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
-                      color: Color(0xFF64748B),
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    item == null
-                        ? (selected ? 'Editing' : 'Not configured')
-                        : '${item.startTime.timeLabel} - RM ${item.servicePrice.toStringAsFixed(2)}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: Color(0xFF1B6B72),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            if (onClear != null)
-              IconButton(
-                onPressed: onClear,
-                icon: const Icon(Icons.close, size: 18),
-                color: const Color(0xFFE53935),
-                tooltip: 'Clear pax',
-              ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
@@ -4296,59 +4145,6 @@ class _PaymentRow extends StatelessWidget {
           style: const TextStyle(fontSize: 14, color: Color(0xFF1A1A2E)),
         ),
       ],
-    );
-  }
-}
-
-class _PaymentMethodCard extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _PaymentMethodCard({
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(vertical: 20),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF1B6B72) : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected
-                ? const Color(0xFF1B6B72)
-                : const Color(0xFFEEEEEE),
-            width: isSelected ? 2 : 1,
-          ),
-        ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              size: 28,
-              color: isSelected ? Colors.white : const Color(0xFF6B6B6B),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                color: isSelected ? Colors.white : const Color(0xFF1A1A2E),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

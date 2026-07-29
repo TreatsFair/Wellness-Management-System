@@ -174,6 +174,38 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .booking-feedback.is-error { color: #8b2e24; border-color: rgba(174, 59, 45, 0.28); background: #fff2ef; }
 .booking-mode-notice { max-width: 720px; margin: 0 auto 1rem; padding: 0.65rem 0.9rem; border-radius: 10px; color: #74531b; background: rgba(255, 244, 221, 0.88); font-size: 0.7rem; text-align: center; }
 .booking-mode-notice.is-error { color: #8b2e24; background: #fff2ef; }
+.outlet-loading { grid-column: 1 / -1; }
+.payment-deadline {
+  max-width: 1120px;
+  margin: 0 auto 1rem;
+  padding: 0.9rem 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border: 1px solid rgba(167, 123, 45, 0.3);
+  border-radius: 14px;
+  color: #5d4318;
+  background: #fff4dd;
+  box-shadow: 0 10px 28px rgba(58, 46, 27, 0.08);
+}
+.payment-deadline[hidden] { display: none; }
+.payment-deadline > div { min-width: 0; display: grid; gap: 0.18rem; }
+.payment-deadline small { color: var(--gold-dark); font-size: 0.63rem; font-weight: 800; letter-spacing: 0.08em; text-transform: uppercase; }
+.payment-deadline strong { font: 600 1.05rem var(--font-display); }
+.payment-deadline span { color: var(--muted); font-size: 0.7rem; line-height: 1.45; }
+.payment-deadline > b {
+  min-width: 88px;
+  padding: 0.55rem 0.7rem;
+  border-radius: 10px;
+  color: #fff;
+  background: var(--green);
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.payment-deadline.is-urgent { border-color: rgba(174, 59, 45, 0.32); background: #fff2ef; }
+.payment-deadline.is-urgent > b { background: #a83f32; }
 
 .booking-summary { position: sticky; top: 1rem; overflow: hidden; border: 1px solid rgba(143, 95, 0, 0.25); border-radius: 18px; background: #fff8ed; box-shadow: var(--shadow); }
 .review-card { margin: 0; overflow: hidden; border: 0; border-radius: 0; background: #fff8ed; }

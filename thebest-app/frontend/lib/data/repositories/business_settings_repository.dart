@@ -1,7 +1,7 @@
 import '../services/supabase_table_service.dart';
 import 'repository_utils.dart';
 
-enum PaymentOrigin { billplz, counter }
+enum PaymentOrigin { billplz, counter, appointmentAddon }
 
 class BusinessSettingsRepository {
   BusinessSettingsRepository({SupabaseTableService? table})
@@ -40,6 +40,7 @@ class BusinessRuleSettings {
     required this.sstEnabled,
     required this.billplzSstPricingMode,
     required this.counterSstPricingMode,
+    required this.appointmentAddonSstPricingMode,
     required this.sstRatePercent,
     required this.sstRoundingMode,
     required this.lateGraceMinutes,
@@ -51,6 +52,7 @@ class BusinessRuleSettings {
   final bool sstEnabled;
   final String billplzSstPricingMode;
   final String counterSstPricingMode;
+  final String appointmentAddonSstPricingMode;
   final double sstRatePercent;
   final String sstRoundingMode;
   final int lateGraceMinutes;
@@ -63,6 +65,7 @@ class BusinessRuleSettings {
       sstEnabled: true,
       billplzSstPricingMode: 'inclusive',
       counterSstPricingMode: 'exclusive',
+      appointmentAddonSstPricingMode: 'exclusive',
       sstRatePercent: 6,
       sstRoundingMode: 'nearest_cent',
       lateGraceMinutes: 15,
@@ -86,6 +89,11 @@ class BusinessRuleSettings {
       row['counterSstPricingMode'] ?? row['counter_sst_pricing_mode'],
       legacyMode,
     );
+    final appointmentAddonMode = asString(
+      row['appointmentAddonSstPricingMode'] ??
+          row['appointment_addon_sst_pricing_mode'],
+      'exclusive',
+    );
     final rounding = asString(
       row['sstRoundingMode'] ?? row['sst_rounding_mode'],
     );
@@ -96,6 +104,10 @@ class BusinessRuleSettings {
       ),
       billplzSstPricingMode: _pricingMode(billplzMode),
       counterSstPricingMode: _pricingMode(counterMode),
+      appointmentAddonSstPricingMode: _pricingMode(
+        appointmentAddonMode,
+        allowDisabled: true,
+      ),
       sstRatePercent: asDouble(
         row['sstRatePercent'] ?? row['sst_rate_percent'],
         defaults.sstRatePercent,
@@ -138,6 +150,8 @@ class BusinessRuleSettings {
   bool isInclusiveFor(PaymentOrigin origin) => switch (origin) {
     PaymentOrigin.billplz => billplzSstPricingMode == 'inclusive',
     PaymentOrigin.counter => counterSstPricingMode == 'inclusive',
+    PaymentOrigin.appointmentAddon =>
+      appointmentAddonSstPricingMode == 'inclusive',
   };
 
   PriceBreakdown priceBreakdown(
@@ -145,7 +159,10 @@ class BusinessRuleSettings {
     PaymentOrigin origin = PaymentOrigin.counter,
   }) {
     final grossPrice = displayedServicePrice < 0 ? 0.0 : displayedServicePrice;
-    if (!sstEnabled || sstRatePercent <= 0) {
+    if (!sstEnabled ||
+        sstRatePercent <= 0 ||
+        (origin == PaymentOrigin.appointmentAddon &&
+            appointmentAddonSstPricingMode == 'disabled')) {
       final total = _roundAmount(grossPrice);
       return PriceBreakdown(
         servicePrice: total,
@@ -166,11 +183,11 @@ class BusinessRuleSettings {
     }
 
     final service = _roundToCents(grossPrice);
-    final sst = _roundToCents(service * rate);
+    final total = _roundAmount(service + (service * rate));
     return PriceBreakdown(
       servicePrice: service,
-      sstAmount: sst,
-      totalAmount: _roundAmount(service + sst),
+      sstAmount: _roundToCents(total - service),
+      totalAmount: total,
     );
   }
 
@@ -212,7 +229,10 @@ bool _validRoundingMode(String value) {
   }.contains(value);
 }
 
-String _pricingMode(String value) =>
-    value == 'inclusive' ? 'inclusive' : 'exclusive';
+String _pricingMode(String value, {bool allowDisabled = false}) {
+  if (value == 'inclusive') return 'inclusive';
+  if (allowDisabled && value == 'disabled') return 'disabled';
+  return 'exclusive';
+}
 
 double _roundToCents(double value) => (value * 100).round() / 100;

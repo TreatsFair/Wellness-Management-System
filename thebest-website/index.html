@@ -5,6 +5,20 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="preconnect" href="https://api.fontshare.com" />
     <link
+      rel="preload"
+      as="image"
+      href="./pics/beauty-spa-hero-1280.jpg"
+      media="(max-width: 899px)"
+      fetchpriority="high"
+    />
+    <link
+      rel="preload"
+      as="image"
+      href="./pics/beauty-spa-hero-1920.jpg"
+      media="(min-width: 900px)"
+      fetchpriority="high"
+    />
+    <link
       href="https://api.fontshare.com/v2/css?f[]=general-sans@400,500,600,700&f[]=sentient@400,401,500,501,700&display=swap"
       rel="stylesheet"
     />
@@ -25,7 +39,7 @@
     <link rel="stylesheet" href="./styles/styles.css" />
     <link rel="stylesheet" href="./styles/utils.css" />
     <link rel="stylesheet" href="./components/header.css" />
-    <link rel="stylesheet" href="./components/hero.css" />
+    <link rel="stylesheet" href="./components/hero.css?v=20260729" />
     <link rel="stylesheet" href="./components/menu.css" />
     <link rel="stylesheet" href="./components/pics.css" />
     <link rel="stylesheet" href="./components/testimonial.css" />
@@ -33,7 +47,7 @@
     <link rel="stylesheet" href="./components/footer.css" />
     <link rel="stylesheet" href="./components/mobile-nav.css" />
     <link rel="stylesheet" href="./components/location.css" />
-    <link rel="stylesheet" href="./styles/site-redesign.css" />
+    <link rel="stylesheet" href="./styles/site-redesign.css?v=20260729" />
     <title>The Best Family Wellness</title>
   </head>
   <body>
@@ -168,7 +182,7 @@
             <div class="home-service-card">
               <img
                 class="menu__img"
-                src="./pics/beauty-spa.jpg"
+                src="./pics/beauty-spa-hero-1280.jpg"
                 alt="Thai Massage"
                 loading="lazy"
               />

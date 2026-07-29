@@ -448,6 +448,11 @@ class _TimetableScreenState extends State<TimetableScreen> {
   }
 
   Future<bool> _startEntry(_TimetableEntry entry) async {
+    // Pay & Reserve already took the money and locked the therapist and room,
+    // it just deferred the start. There is nothing left to check in or check
+    // out, and the Appointments screen filters walk-ins out entirely -- routing
+    // there only produced "Appointment is no longer available". Start it here.
+    if (entry.isReservedPaidWalkIn) return _startReservedWalkIn(entry);
     final completed = await Navigator.push<bool>(
       context,
       MaterialPageRoute(
@@ -461,6 +466,43 @@ class _TimetableScreenState extends State<TimetableScreen> {
     if (!mounted) return false;
     await _loadTimetable();
     return completed == true;
+  }
+
+  /// Starts a paid, reserved walk-in in place. The service is auto-extended
+  /// from the real arrival moment, exactly like a late appointment start, so a
+  /// walk-in reserved for 8:00 PM and started at 8:12 PM still gets its full
+  /// booked duration.
+  Future<bool> _startReservedWalkIn(_TimetableEntry entry) async {
+    final startedAt = DateTime.now();
+    try {
+      await _appointmentRepository.startAppointment(
+        entry.id,
+        startedAt: startedAt,
+        expectedEndAt: startedAt.add(
+          Duration(minutes: entry.durationMinutes),
+        ),
+        allowLateExtensionOverlap: true,
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              'Unable to start this walk-in: ${friendlyErrorMessage(error)}',
+            ),
+            backgroundColor: const Color(0xFFE53935),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+      return false;
+    }
+    if (!mounted) return false;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Service started')),
+    );
+    await _loadTimetable();
+    return true;
   }
 
   Future<bool> _switchEntryTherapist(_TimetableEntry entry) async {
@@ -1155,23 +1197,7 @@ class _TimetableEntry {
   }
 
   String get staffDisplayName {
-    final normalizedType = type.trim().toLowerCase();
-    final isWalkIn =
-        normalizedType == 'walkin' ||
-        normalizedType == 'walk_in' ||
-        normalizedType == 'walk-in';
-    if (actualStartedAt != null ||
-        isWalkIn ||
-        isFixedTherapistAssignmentSource(assignmentSource)) {
-      return staffName;
-    }
-    if (assignmentSource.trim().toLowerCase() == 'gender_preference' &&
-        requestedGender.trim().isNotEmpty) {
-      final gender = requestedGender.trim();
-      return 'Auto assign at start · '
-          '${gender[0].toUpperCase()}${gender.substring(1).toLowerCase()}';
-    }
-    return 'Auto assign at start';
+    return staffName;
   }
 
   List<Map<String, dynamic>> get displayServiceItems {
@@ -1389,6 +1415,18 @@ class _TimetableEntry {
 
   // Payment can reserve a later walk-in. Only the explicit service-start
   // transition makes it operationally in progress.
+  /// A walk-in that was paid for up front but scheduled to begin later
+  /// ("Pay & Reserve"). It needs no check-in or checkout -- only the start
+  /// transition that writes actual_started_at and consumes a queue turn.
+  bool get isReservedPaidWalkIn =>
+      isWalkIn &&
+      hasPayment &&
+      actualStartedAt == null &&
+      !isCancelled &&
+      !isVoided &&
+      status != 'completed' &&
+      status != 'in_progress';
+
   bool get isPaidWalkInInProgress =>
       isWalkIn &&
       status == 'in_progress' &&
@@ -7902,6 +7940,7 @@ class _TimetableDetailCardState extends State<_TimetableDetailCard> {
             const SizedBox(height: 10),
             _TimetableServiceDetailCard(entry: entry, accent: accent),
             _TimetableGrandTotal(
+              sstLabel: _businessSettings?.sstLabel ?? 'SST',
               breakdown:
                   _pricingBreakdown ??
                   PriceBreakdown(
@@ -8455,7 +8494,13 @@ class _TimetablePriceRow extends StatelessWidget {
 class _TimetableGrandTotal extends StatelessWidget {
   final PriceBreakdown breakdown;
 
-  const _TimetableGrandTotal({required this.breakdown});
+  /// From the active outlet's business_settings, e.g. "SST (8%)".
+  final String sstLabel;
+
+  const _TimetableGrandTotal({
+    required this.breakdown,
+    required this.sstLabel,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -8473,7 +8518,7 @@ class _TimetableGrandTotal extends StatelessWidget {
               label: 'Subtotal',
               amount: breakdown.servicePrice,
             ),
-            _TimetablePriceRow(label: 'SST (6%)', amount: breakdown.sstAmount),
+            _TimetablePriceRow(label: sstLabel, amount: breakdown.sstAmount),
             const Divider(height: 18, color: Color(0xFFE5E7EB)),
           ],
           _TimetablePriceRow(

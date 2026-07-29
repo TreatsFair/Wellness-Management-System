@@ -474,6 +474,7 @@ class CounterCapacitySlot {
     this.conflictTherapistId,
     this.conflictStart,
     this.conflictEnd,
+    this.candidateKind = 'standard',
   });
 
   factory CounterCapacitySlot.fromMap(Map<String, dynamic> row) {
@@ -501,6 +502,10 @@ class CounterCapacitySlot {
       conflictEnd: _nullableCleanTime(
         row['conflict_end'] ?? row['conflictEnd'],
       ),
+      candidateKind:
+          row['candidate_kind']?.toString() ??
+          row['candidateKind']?.toString() ??
+          'standard',
     );
   }
 
@@ -514,6 +519,14 @@ class CounterCapacitySlot {
   final String? conflictTherapistId;
   final String? conflictStart;
   final String? conflictEnd;
+  final String candidateKind;
+
+  /// The soonest bookable start of the day. Ranked with Best Fit rather than
+  /// buried in the plain grid, because "as early as possible" is a real
+  /// counter preference alongside "packs tight against a nearby booking".
+  bool get isEarliest => candidateKind == 'earliest';
+
+  bool get isBestFit => candidateKind == 'best_fit' || isEarliest;
 }
 
 class CounterCapacityRequirement {
@@ -651,6 +664,8 @@ class RoomUnitAvailability {
     required this.status,
     required this.availableForRequestedTime,
     this.availableAt,
+    this.reservationStartAt,
+    this.reservationEndAt,
   });
 
   factory RoomUnitAvailability.fromMap(Map<String, dynamic> row) {
@@ -670,6 +685,12 @@ class RoomUnitAvailability {
       availableAt: _nullableCleanTime(
         row['available_at'] ?? row['availableAt'],
       ),
+      reservationStartAt: _nullableCleanTime(
+        row['reservation_start_at'] ?? row['reservationStartAt'],
+      ),
+      reservationEndAt: _nullableCleanTime(
+        row['reservation_end_at'] ?? row['reservationEndAt'],
+      ),
     );
   }
 
@@ -678,6 +699,8 @@ class RoomUnitAvailability {
   final String status;
   final bool availableForRequestedTime;
   final String? availableAt;
+  final String? reservationStartAt;
+  final String? reservationEndAt;
 }
 
 class CspService {
@@ -743,6 +766,7 @@ class CspService {
     required String date,
     required String startTime,
     required String endTime,
+    String? roomUnitId,
     required String therapistId,
     required String roomId,
     String? excludeId,
@@ -815,12 +839,13 @@ class CspService {
     required String date,
     required String startTime,
     required String endTime,
+    String? roomUnitId,
     String? assignmentSource,
     String? requestedTherapistId,
     String? requestedGender,
   }) async {
     final rows = await _client.rpc(
-      'update_appointment_with_csp',
+      'update_appointment_with_csp_v2',
       params: {
         'p_appointment_id': appointmentId,
         'p_therapist_id': therapistId,
@@ -828,6 +853,7 @@ class CspService {
         'p_date': date,
         'p_start_time': startTime,
         'p_end_time': endTime,
+        'p_room_unit_id': _nullIfBlank(roomUnitId),
         'p_assignment_source': assignmentSource,
         'p_requested_therapist_id': _nullIfBlank(requestedTherapistId),
         'p_requested_gender': requestedGender,
@@ -993,7 +1019,7 @@ class CspService {
     required int duration,
   }) async {
     final rows = await _client.rpc(
-      'get_room_unit_availability',
+      'get_room_unit_availability_v2',
       params: {
         'p_zone_id': zoneId,
         'p_date': date,
@@ -1092,8 +1118,8 @@ class CspService {
     );
   }
 
-  /// Capacity-based 30-minute grid for a counter booking. Every pax keeps its
-  /// own service duration, cleanup buffer, and required room type.
+  /// Hourly counter-booking grid plus exact best-fit boundaries. Every pax
+  /// keeps its own service duration, cleanup buffer, and required room type.
   static Future<List<CounterCapacitySlot>> getCounterCapacitySlots({
     required String outletId,
     required String date,
@@ -1102,7 +1128,7 @@ class CspService {
     String? excludeId,
   }) async {
     final rows = await _client.rpc(
-      'get_counter_preference_capacity_slots',
+      'get_counter_preference_capacity_slots_v2',
       params: {
         'p_outlet_id': outletId,
         'p_date': date,

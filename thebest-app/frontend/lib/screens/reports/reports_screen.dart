@@ -1217,7 +1217,7 @@ double _commissionForItem(
   required Map<String, dynamic> staff,
   required String staffRole,
 }) {
-  final overrides = _commissionMap(staff['serviceCommissions']);
+  final overrides = _commissionMap(staff['commissionOverrides']);
   if (item.id.isNotEmpty && overrides.containsKey(item.id)) {
     return overrides[item.id]!;
   }
@@ -1397,6 +1397,8 @@ String _paymentLabel(String value) {
       return 'Credit';
     case 'debit_card':
       return 'Debit Card';
+    case 'others':
+      return 'Others';
     case 'billplz':
     case 'online':
       return 'Online';
@@ -1416,6 +1418,8 @@ Color _paymentColor(String value) {
       return _violet;
     case 'debit_card':
       return _amber;
+    case 'others':
+      return _muted;
     default:
       return _muted;
   }

@@ -7,8 +7,7 @@
     text-align: center; /* Center the text */
     flex-direction: column;
     overflow: hidden; /* Ensure no overflow from the pseudo-element */
-    /* background-image: url('../pics/thebestwellness_massagearea.jpg'); */
-    background-image: url(../pics/beauty-spa.jpg);
+    background-image: none;
     background-position: center; /* Center the image */
     background-repeat: no-repeat; /* Prevent the image from repeating */
     background-size: cover; /* Ensure the image covers the entire section */

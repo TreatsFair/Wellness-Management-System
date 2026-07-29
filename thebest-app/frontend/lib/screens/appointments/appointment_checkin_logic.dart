@@ -8,7 +8,6 @@ String? therapistIdForFinalStart({
   required String assignmentSource,
   required String? selectedTherapistId,
 }) {
-  if (!isFixedTherapistAssignmentSource(assignmentSource)) return null;
   final therapistId = selectedTherapistId?.trim() ?? '';
   return therapistId.isEmpty ? null : therapistId;
 }

@@ -14,8 +14,8 @@
     />
     <link rel="icon" href="./pics/FB profile-180x180px-02.jpg" />
     <link rel="stylesheet" href="./styles/modern-normalise.css" />
-    <link rel="stylesheet" href="./styles/booking-page.css" />
-    <link rel="stylesheet" href="./styles/booking-responsive.css" />
+    <link rel="stylesheet" href="./styles/booking-page.css?v=20260729" />
+    <link rel="stylesheet" href="./styles/booking-responsive.css?v=20260729" />
     <title>Book an Appointment | The Best Family Wellness</title>
   </head>
   <body>
@@ -57,6 +57,22 @@
         </div>
       </div>
 
+      <section
+        class="payment-deadline"
+        id="payment-deadline"
+        aria-live="polite"
+        hidden
+      >
+        <div>
+          <small>Time temporarily reserved</small>
+          <strong id="payment-deadline-title">Complete payment before the deadline</strong>
+          <span id="payment-deadline-copy"
+            >Your booking will be cancelled if payment is not completed in time.</span
+          >
+        </div>
+        <b id="payment-countdown">10:00</b>
+      </section>
+
       <nav class="stepper" aria-label="Booking progress">
         <button class="step is-active" data-step-target="1" type="button">
           <span>1</span><b>Outlet</b>
@@ -91,10 +107,14 @@
             </div>
 
             <div class="outlet-grid" id="outlet-options">
+              <p class="booking-feedback outlet-loading" id="outlet-loading">
+                Loading available outlets...
+              </p>
               <button
                 class="outlet-card"
                 type="button"
                 data-outlet="taman-wahyu"
+                hidden
               >
                 <span class="card-image">
                   <img
@@ -116,7 +136,12 @@
                 </span>
               </button>
 
-              <button class="outlet-card" type="button" data-outlet="pv128">
+              <button
+                class="outlet-card"
+                type="button"
+                data-outlet="pv128"
+                hidden
+              >
                 <span class="card-image">
                   <img
                     src="./pics/thebest_setapak_outside.jpg"
@@ -157,7 +182,7 @@
               Groups share one visit time — every guest starts together.
             </p>
 
-            <div class="guest-names" id="guest-names">
+            <div class="guest-names" id="guest-names" hidden>
               <div class="guest-names-heading">
                 <h3>Guest Details</h3>
                 <span></span>
@@ -282,7 +307,7 @@
                 <input name="website" tabindex="-1" autocomplete="off" />
               </label>
               <label class="consent field-wide">
-                <input type="checkbox" required />
+                <input id="booking-consent" type="checkbox" required />
                 <span
                   >I agree to the
                   <button type="button" class="terms-link" id="terms-link">
@@ -374,8 +399,6 @@
               >
             </div>
             <p class="review-note">
-              Your selected time will be held for 10 minutes when you continue
-              to payment.
             </p>
           </article>
         </aside>
@@ -490,8 +513,8 @@
       </div>
     </dialog>
 
-    <script src="./js/booking-config.js"></script>
-    <script src="./js/booking-api.js"></script>
-    <script src="./js/booking-page.js"></script>
+    <script src="./js/booking-config.js?v=20260729"></script>
+    <script src="./js/booking-api.js?v=20260729"></script>
+    <script src="./js/booking-page.js?v=20260729"></script>
   </body>
 </html>

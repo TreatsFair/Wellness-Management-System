@@ -32,7 +32,9 @@ class CommissionRepository {
       service['id'],
       asString(service['serviceId'], asString(service['service_id'])),
     );
-    final overrides = _commissionMap(staff?['serviceCommissions']);
+    // Rates live in commission_overrides. service_commissions is the
+    // deprecated column that also acted as a service whitelist.
+    final overrides = _commissionMap(staff?['commissionOverrides']);
     if (serviceId.isNotEmpty && overrides.containsKey(serviceId)) {
       return overrides[serviceId]!;
     }

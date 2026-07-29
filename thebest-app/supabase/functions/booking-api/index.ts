@@ -18,15 +18,16 @@ function secretKey(): string {
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(supabaseUrl, secretKey(), { auth: { persistSession: false, autoRefreshToken: false } });
 
-// Pre-Billplz test switch: when enabled, a hold can be confirmed into an appointment
-// immediately (simulating an instant successful payment). Off unless explicitly set.
-const AUTO_CONFIRM = (Deno.env.get("BOOKING_TEST_AUTOCONFIRM") ?? "").trim() === "true";
+// Public unpaid auto-confirm is permanently disabled. Paid conversion is only
+// reached from the signature-verified Billplz callback below.
+const AUTO_CONFIRM = false;
 
 // Billplz (sandbox or production, selected entirely by which base URL/keys are set).
 const BILLPLZ_BASE_URL = (Deno.env.get("BILLPLZ_BASE_URL") ?? "").trim().replace(/\/$/, "");
 const BILLPLZ_API_KEY = (Deno.env.get("BILLPLZ_API_KEY") ?? "").trim();
 const BILLPLZ_COLLECTION_ID = (Deno.env.get("BILLPLZ_COLLECTION_ID") ?? "").trim();
 const BILLPLZ_X_SIGNATURE_KEY = (Deno.env.get("BILLPLZ_X_SIGNATURE_KEY") ?? "").trim();
+const BOOKING_CLEANUP_SECRET = (Deno.env.get("BOOKING_CLEANUP_SECRET") ?? "").trim();
 const BILLPLZ_CONFIGURED = Boolean(
   BILLPLZ_BASE_URL && BILLPLZ_API_KEY && BILLPLZ_COLLECTION_ID && BILLPLZ_X_SIGNATURE_KEY,
 );
@@ -82,6 +83,27 @@ async function billplzRequest(path: string, body: Record<string, string>) {
   return payload as Record<string, unknown>;
 }
 
+function billplzBillUrl(billId: string): string {
+  return `${BILLPLZ_BASE_URL}/bills/${encodeURIComponent(billId)}`;
+}
+
+async function deleteBillplzBill(billId: string): Promise<void> {
+  if (!billId) return;
+  const response = await fetch(
+    `${BILLPLZ_BASE_URL}/api/v3/bills/${encodeURIComponent(billId)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Basic ${btoa(`${BILLPLZ_API_KEY}:`)}` },
+    },
+  );
+  if (response.ok || response.status === 404) return;
+  const payload = await response.json().catch(() => ({})) as Record<string, unknown>;
+  const detail = billplzErrorDetail(payload);
+  throw new Error(
+    `Unable to cancel Billplz bill (${response.status})${detail ? `: ${detail}` : ""}`,
+  );
+}
+
 // Billplz error bodies are typically { error: { message: ["..."] } } or { error: "..." }.
 function billplzErrorDetail(payload: Record<string, unknown>): string {
   const err = payload.error;
@@ -121,7 +143,7 @@ function origin(request: Request): string {
 function responseHeaders(request: Request): HeadersInit {
   return {
     "Access-Control-Allow-Origin": origin(request),
-    "Access-Control-Allow-Headers": "apikey, authorization, content-type, x-client-info",
+    "Access-Control-Allow-Headers": "apikey, authorization, content-type, x-client-info, x-booking-cleanup-secret",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Content-Type": "application/json; charset=utf-8",
     Vary: "Origin",
@@ -132,6 +154,15 @@ function json(request: Request, body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: responseHeaders(request) });
 }
 function fail(request: Request, message: string, status = 400): Response { return json(request, { error: message }, status); }
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (error && typeof error === "object") {
+    const message = (error as Record<string, unknown>).message;
+    if (typeof message === "string") return message;
+  }
+  return String(error);
+}
 function pathOf(request: Request): string {
   const path = new URL(request.url).pathname;
   const index = path.indexOf("/booking-api");
@@ -235,6 +266,17 @@ function billDescription(hold: Record<string, unknown>): string {
     outlet ? `The Best Wellness ${outlet}` : "The Best Wellness",
     serviceLine,
     whenLine ? `Date: ${whenLine}` : "",
+    (() => {
+      const expiry = new Date(text(hold.expires_at));
+      if (Number.isNaN(expiry.getTime())) return "";
+      const deadline = new Intl.DateTimeFormat("en-MY", {
+        timeZone: "Asia/Kuala_Lumpur",
+        hour: "numeric",
+        minute: "2-digit",
+        hour12: true,
+      }).format(expiry);
+      return `Pay by: ${deadline}`;
+    })(),
   ].filter(Boolean);
 
   const notes = sanitize(text(hold.notes));
@@ -290,16 +332,206 @@ async function publicBookingOutlets() {
 
 // For RPCs that return a single scalar (not `returns table`), where a real
 // `null` result (e.g. "no matching row") must stay distinguishable from [].
-async function rpcScalar(name: string, args: Record<string, unknown> = {}) {
+async function rpcScalar<T = string>(
+  name: string,
+  args: Record<string, unknown> = {},
+): Promise<T | null> {
   const { data, error } = await supabase.rpc(name, args);
   if (error) throw error;
-  return data as string | null;
+  return data as T | null;
+}
+
+type BookingBillBinding = {
+  public_token: string;
+  booking_group_token: string | null;
+  guest_index: number | null;
+  billplz_bill_id: string | null;
+  status: string;
+  expires_at: string;
+};
+
+type BillCancellationClaim = {
+  hold_id: string | null;
+  bill_id: string | null;
+  cancellation_claim_token: string | null;
+  claim_acquired?: boolean;
+  already_cancelled?: boolean;
+  resulting_status?: string;
+};
+
+const BILL_BINDING_COLUMNS =
+  "public_token,booking_group_token,guest_index,billplz_bill_id,status,expires_at";
+
+async function bookingBillBinding(token: string): Promise<BookingBillBinding | null> {
+  const groupResult = await supabase
+    .from("booking_holds")
+    .select(BILL_BINDING_COLUMNS)
+    .eq("booking_group_token", token)
+    .order("guest_index", { ascending: true })
+    .limit(1);
+  if (groupResult.error) throw groupResult.error;
+  if (groupResult.data?.[0]) return groupResult.data[0] as BookingBillBinding;
+
+  const singleResult = await supabase
+    .from("booking_holds")
+    .select(BILL_BINDING_COLUMNS)
+    .eq("public_token", token)
+    .limit(1);
+  if (singleResult.error) throw singleResult.error;
+  return (singleResult.data?.[0] as BookingBillBinding | undefined) ?? null;
+}
+
+function bindingIsExpired(binding: BookingBillBinding): boolean {
+  return new Date(binding.expires_at).getTime() <= Date.now();
+}
+
+async function closeBookingHold(
+  token: string,
+  status: "cancelled" | "expired",
+): Promise<void> {
+  const rows = await rpc("claim_booking_bill_cancellation", {
+    p_token: token,
+    p_target_status: status,
+  }) as BillCancellationClaim[];
+  const claim = rows[0];
+  if (!claim) throw new Error("Booking reference not found");
+  if (!claim.bill_id || claim.already_cancelled) return;
+  if (
+    !claim.claim_acquired ||
+    !claim.hold_id ||
+    !claim.cancellation_claim_token
+  ) {
+    // Another cleanup worker owns the short claim lease. It will either finish
+    // or release the claim for retry; never issue a duplicate external delete.
+    return;
+  }
+
+  try {
+    await deleteBillplzBill(claim.bill_id);
+    const completed = await rpcScalar<boolean>("complete_billplz_cancellation", {
+      p_hold_id: claim.hold_id,
+      p_claim_token: claim.cancellation_claim_token,
+    });
+    if (completed !== true) {
+      throw new Error("Billplz cancellation claim was no longer current");
+    }
+  } catch (error) {
+    await rpcScalar<boolean>("fail_billplz_cancellation", {
+      p_hold_id: claim.hold_id,
+      p_claim_token: claim.cancellation_claim_token,
+      p_error: errorMessage(error),
+    }).catch((recordError) => {
+      console.error(
+        "Unable to record Billplz cancellation failure",
+        claim.bill_id,
+        errorMessage(recordError),
+      );
+    });
+    throw error;
+  }
+}
+
+async function claimBillplzBill(
+  binding: BookingBillBinding,
+  billId: string,
+): Promise<string> {
+  let query = supabase
+    .from("booking_holds")
+    .update({ billplz_bill_id: billId, updated_at: new Date().toISOString() })
+    .is("billplz_bill_id", null)
+    .eq("status", "pending_payment")
+    .gt("expires_at", new Date().toISOString());
+  query = binding.booking_group_token
+    ? query.eq("booking_group_token", binding.booking_group_token).eq("guest_index", 1)
+    : query.eq("public_token", binding.public_token);
+  const claimed = await query.select("billplz_bill_id");
+  if (claimed.error) throw claimed.error;
+  if (claimed.data?.[0]?.billplz_bill_id === billId) return billId;
+
+  const winner = await bookingBillBinding(
+    binding.booking_group_token ?? binding.public_token,
+  );
+  await deleteBillplzBill(billId);
+  if (winner?.billplz_bill_id) return winner.billplz_bill_id;
+  throw new Error("This booking hold can no longer accept payment");
+}
+
+async function cleanupExpiredPaymentHolds(): Promise<{
+  deleted_bills: number;
+  expired_holds: number;
+  failures: number;
+}> {
+  const claims = await rpc("claim_expired_billplz_cancellations", {
+    p_limit: 100,
+  }) as BillCancellationClaim[];
+
+  let deletedBills = 0;
+  let failures = 0;
+  for (const claim of claims) {
+    if (
+      !claim.hold_id ||
+      !claim.bill_id ||
+      !claim.cancellation_claim_token
+    ) continue;
+    try {
+      await deleteBillplzBill(claim.bill_id);
+      const completed = await rpcScalar<boolean>("complete_billplz_cancellation", {
+        p_hold_id: claim.hold_id,
+        p_claim_token: claim.cancellation_claim_token,
+      });
+      if (completed !== true) {
+        throw new Error("Billplz cancellation claim was no longer current");
+      }
+      deletedBills += 1;
+    } catch (error) {
+      failures += 1;
+      await rpcScalar<boolean>("fail_billplz_cancellation", {
+        p_hold_id: claim.hold_id,
+        p_claim_token: claim.cancellation_claim_token,
+        p_error: errorMessage(error),
+      }).catch((recordError) => {
+        console.error(
+          "Unable to record Billplz cancellation failure",
+          claim.bill_id,
+          errorMessage(recordError),
+        );
+      });
+      console.error(
+        "Unable to cancel expired Billplz bill",
+        claim.bill_id,
+        errorMessage(error),
+      );
+    }
+  }
+
+  return {
+    deleted_bills: deletedBills,
+    expired_holds: claims.length,
+    failures,
+  };
 }
 
 async function route(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = pathOf(request);
-  if (request.method === "GET" && path === "/health") return json(request, { ok: true, payment_enabled: BILLPLZ_CONFIGURED, auto_confirm: AUTO_CONFIRM });
+  if (request.method === "GET" && path === "/health") {
+    return json(request, {
+      ok: true,
+      payment_enabled: BILLPLZ_CONFIGURED,
+      payment_cleanup_enabled: Boolean(BOOKING_CLEANUP_SECRET),
+      auto_confirm: AUTO_CONFIRM,
+    });
+  }
+  if (request.method === "POST" && path === "/maintenance/expire-payment-holds") {
+    if (!BOOKING_CLEANUP_SECRET) {
+      return fail(request, "Payment cleanup is not configured", 503);
+    }
+    const supplied = request.headers.get("x-booking-cleanup-secret") ?? "";
+    if (!timingSafeEqual(supplied, BOOKING_CLEANUP_SECRET)) {
+      return fail(request, "Forbidden", 403);
+    }
+    return json(request, { ok: true, ...(await cleanupExpiredPaymentHolds()) });
+  }
   if (request.method === "GET" && path === "/outlets") {
     return json(request, { outlets: await publicBookingOutlets() });
   }
@@ -394,7 +626,7 @@ async function route(request: Request): Promise<Response> {
         status: "pending_payment",
       } }, 201);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (/no longer available|already booked|capacity/i.test(message)) {
         return fail(request, "That time can no longer fit the whole group — there may not be enough masseurs matching everyone's preference. Please pick another time.", 409);
       }
@@ -427,7 +659,7 @@ async function route(request: Request): Promise<Response> {
         duration_minutes: Number(hold.duration_minutes), status: "pending_payment",
       } }, 201);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (/no longer available/i.test(message)) return fail(request, "That time was just taken. Please choose another time.", 409);
       throw error;
     }
@@ -438,10 +670,21 @@ async function route(request: Request): Promise<Response> {
     const token = uuid(body?.token);
     if (!token) return fail(request, "A valid booking reference is required");
     try {
-      let groupPayment = true;
+      const binding = await bookingBillBinding(token);
+      if (!binding) return fail(request, "Booking reference not found", 404);
+      if (bindingIsExpired(binding)) {
+        await closeBookingHold(token, "expired");
+        return fail(request, "This booking hold has expired. Please start again.", 409);
+      }
+      if (binding.status !== "pending_payment") {
+        return fail(request, "This booking hold can no longer accept payment.", 409);
+      }
+      if (binding.billplz_bill_id) {
+        return json(request, { url: billplzBillUrl(binding.billplz_bill_id), reused: true });
+      }
+
       let rows = await rpc("get_booking_group_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
       if (!rows[0]) {
-        groupPayment = false;
         rows = await rpc("get_booking_hold_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
       }
       const hold = rows[0];
@@ -469,14 +712,17 @@ async function route(request: Request): Promise<Response> {
       const billId = String(bill.id ?? "");
       const billUrl = String(bill.url ?? "");
       if (!billId || !billUrl) return fail(request, "Unable to start payment. Please try again.", 502);
-
-      await rpc(groupPayment ? "record_billplz_group_bill" : "record_billplz_bill", {
-        p_token: token, p_bill_id: billId,
-      });
-      return json(request, { url: billUrl }, 201);
+      const claimedBillId = await claimBillplzBill(binding, billId);
+      return json(request, {
+        url: claimedBillId === billId ? billUrl : billplzBillUrl(claimedBillId),
+        reused: claimedBillId !== billId,
+      }, claimedBillId === billId ? 201 : 200);
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = errorMessage(error);
       if (/no longer accept payment/i.test(message)) return fail(request, "This booking hold has expired. Please start again.", 409);
+      if (/paid booking cannot be cancelled/i.test(message)) {
+        return fail(request, "This booking has already been paid and confirmed.", 409);
+      }
       if (/not found/i.test(message)) return fail(request, "Booking reference not found", 404);
       // Surface the actual Billplz/network failure instead of a generic 500 —
       // the caller sees exactly why payment couldn't start (bad credentials,
@@ -485,7 +731,35 @@ async function route(request: Request): Promise<Response> {
       return fail(request, `Unable to start payment: ${message}`, 502);
     }
   }
+  if (
+    request.method === "POST" &&
+    (path === "/booking-holds/cancel" || path === "/booking-holds/expire")
+  ) {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const token = uuid(body?.token);
+    if (!token) return fail(request, "A valid booking reference is required");
+    const binding = await bookingBillBinding(token);
+    if (!binding) return fail(request, "Booking reference not found", 404);
+    if (binding.status === "confirmed" || binding.status === "paid") {
+      return fail(request, "This booking has already been paid and confirmed.", 409);
+    }
+    try {
+      await closeBookingHold(
+        token,
+        path === "/booking-holds/cancel" ? "cancelled" : "expired",
+      );
+    } catch (error) {
+      if (/paid booking cannot be cancelled/i.test(errorMessage(error))) {
+        return fail(request, "This booking has already been paid and confirmed.", 409);
+      }
+      throw error;
+    }
+    return json(request, { ok: true });
+  }
   if (request.method === "POST" && path === "/billplz/callback") {
+    if (!BILLPLZ_CONFIGURED) {
+      return fail(request, "Payment callback is not configured", 503);
+    }
     // Billplz expects a fast 200 and posts application/x-www-form-urlencoded fields.
     const form = await request.formData().catch(() => null);
     if (!form) return fail(request, "Invalid callback payload", 400);
@@ -517,12 +791,21 @@ async function route(request: Request): Promise<Response> {
     const paid = get("paid") === "true";
     try {
       if (paid) {
-        await rpc(groupPayment ? "confirm_public_booking_group_v1" : "confirm_public_booking_hold", { p_token: token });
-        await rpc(groupPayment ? "record_online_booking_group_payment" : "record_online_booking_payment", { p_token: token });
+        await rpc(
+          groupPayment
+            ? "process_paid_public_booking_group"
+            : "process_paid_public_booking_hold",
+          { p_token: token, p_bill_id: billId },
+        );
       } else {
         await rpc(groupPayment ? "mark_booking_group_payment_failed" : "mark_booking_hold_payment_failed", { p_token: token });
       }
     } catch (error) {
+      const message = errorMessage(error);
+      if (/paid callback arrived after booking hold expired/i.test(message)) {
+        console.warn("Late Billplz callback was acknowledged without conversion", billId);
+        return json(request, { ok: true, outcome: "late_payment" });
+      }
       console.error("Billplz callback processing failed", error);
       // Ask Billplz to retry instead of silently leaving a paid booking without
       // its transaction/payment status if confirmation or payment recording fails.
@@ -531,36 +814,26 @@ async function route(request: Request): Promise<Response> {
     return json(request, { ok: true });
   }
   if (request.method === "POST" && path === "/booking-holds/confirm") {
-    if (!AUTO_CONFIRM) return fail(request, "Confirmation is not enabled", 403);
-    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
-    const token = uuid(body?.token);
-    if (!token) return fail(request, "A valid booking reference is required");
-    try {
-      const groupStatus = await rpc("get_public_booking_group_status_v1", { p_token: token }) as Array<Record<string, unknown>>;
-      const groupBooking = Boolean(groupStatus[0]);
-      const rows = await rpc(groupBooking ? "confirm_public_booking_group_v1" : "confirm_public_booking_hold", {
-        p_token: token,
-      }) as Array<Record<string, unknown>>;
-      const appointment = rows[0];
-      if (!appointment) return fail(request, "Unable to confirm this booking", 500);
-      return json(request, { appointment: {
-        id: groupBooking ? appointment.appointment_group_id : appointment.appointment_id,
-        appointment_ids: groupBooking ? appointment.appointment_ids : [appointment.appointment_id],
-        status: appointment.status,
-        start_at: appointment.start_at,
-        end_at: appointment.end_at,
-      } }, 201);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/no longer be confirmed/i.test(message)) return fail(request, "This booking can no longer be confirmed.", 409);
-      if (/not found/i.test(message)) return fail(request, "Booking reference not found", 404);
-      throw error;
-    }
+    return fail(request, "Route not found", 404);
   }
   if (request.method === "GET" && path === "/booking-holds/status") {
     const token = uuid(url.searchParams.get("token"));
     if (!token) return fail(request, "A valid booking reference is required");
-    await rpc("expire_stale_booking_holds");
+    const binding = await bookingBillBinding(token);
+    if (!binding) return fail(request, "Booking reference not found", 404);
+    if (
+      bindingIsExpired(binding) &&
+      binding.status !== "confirmed" &&
+      binding.status !== "paid"
+    ) {
+      try {
+        await closeBookingHold(token, "expired");
+      } catch (error) {
+        if (!/paid booking cannot be cancelled/i.test(errorMessage(error))) {
+          throw error;
+        }
+      }
+    }
     let groupBooking = true;
     let rows = await rpc("get_public_booking_group_status_v1", { p_token: token }) as Array<Record<string, unknown>>;
     if (!rows[0]) {

@@ -30,8 +30,8 @@ class TherapistAssignmentPick {
 /// Shared therapist-selection UI for the live running queue -- used
 /// identically by the walk-in flow, the counter appointment booking flow,
 /// and the appointment check-in flow. Shows free-first live queue order, a
-/// lightly highlighted up-next row, a gender preference filter, and an
-/// out-of-order reason prompt.
+/// lightly highlighted up-next row, and a gender preference filter. Queue
+/// order recommends a therapist; direct row taps are counter choices.
 class TherapistQueuePicker extends StatefulWidget {
   const TherapistQueuePicker({
     super.key,
@@ -41,11 +41,13 @@ class TherapistQueuePicker extends StatefulWidget {
     required this.durationMinutes,
     required this.onSelected,
     this.excludedTherapistIds = const {},
+    this.eligibleTherapistIds,
     this.selectedTherapistId,
     this.initialRequestedGender,
     this.initialAssignmentSource = 'queue',
     this.followLiveClock = true,
     this.compactAssignment = false,
+    this.allowFutureReservation = false,
     this.onPreferenceChanged,
     this.emptyLabel = 'No therapists available for this outlet.',
   });
@@ -55,11 +57,13 @@ class TherapistQueuePicker extends StatefulWidget {
   final String startTime;
   final int durationMinutes;
   final Set<String> excludedTherapistIds;
+  final Set<String>? eligibleTherapistIds;
   final String? selectedTherapistId;
   final String? initialRequestedGender;
   final String initialAssignmentSource;
   final bool followLiveClock;
   final bool compactAssignment;
+  final bool allowFutureReservation;
   final String emptyLabel;
   final ValueChanged<TherapistAssignmentPick> onSelected;
   final TherapistPreferenceChanged? onPreferenceChanged;
@@ -69,6 +73,10 @@ class TherapistQueuePicker extends StatefulWidget {
 }
 
 class TherapistQueuePickerState extends State<TherapistQueuePicker> {
+  // Keep the former hard queue-turn confirmation available for a later policy
+  // change, but disable it for the concrete-locking MVP.
+  static const bool _hardQueueTurnRestrictionEnabled = false;
+
   List<TherapistQueueEntry> _entries = [];
   bool _loading = true;
   String? _error;
@@ -253,6 +261,13 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
       .where(_matchesGender)
       .toList();
 
+  bool _isSelectable(TherapistQueueEntry entry) {
+    final eligibleIds = widget.eligibleTherapistIds;
+    return (entry.isFreeNow || widget.allowFutureReservation) &&
+        !widget.excludedTherapistIds.contains(entry.therapistId) &&
+        (eligibleIds == null || eligibleIds.contains(entry.therapistId));
+  }
+
   List<TherapistQueueEntry> get _orderedFiltered {
     final ordered = [..._filtered];
     final rankById = <String, int>{
@@ -275,17 +290,19 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   /// The up-next pick within the active filter: first free-now in live
   /// rotation order after gender and already-used therapists are considered.
   TherapistQueueEntry? get _contextualUpNext {
-    final freeNow = _filtered
-        .where(
-          (entry) =>
-              entry.isFreeNow &&
-              !widget.excludedTherapistIds.contains(entry.therapistId),
-        )
-        .toList();
-    return freeNow.isEmpty ? null : freeNow.first;
+    final freeNow = _filtered.where(_isSelectable).toList();
+    if (freeNow.isEmpty) return null;
+    final actuallyFree = freeNow.where((entry) => entry.isFreeNow);
+    return actuallyFree.isNotEmpty ? actuallyFree.first : freeNow.first;
   }
 
   Future<void> _handleTap(TherapistQueueEntry entry) async {
+    if (!_isSelectable(entry)) return;
+
+    // Tapping the therapist the queue already recommends is not an override —
+    // it keeps the automatic source. Anyone else is a counter choice, which in
+    // the concrete-locking MVP is allowed outright (manual_override) rather
+    // than gated on a queue-turn confirmation.
     final upNext = _contextualUpNext;
     if (upNext?.therapistId == entry.therapistId) {
       widget.onSelected(
@@ -299,7 +316,9 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
       return;
     }
 
-    final reason = await _showOutOfOrderDialog(entry);
+    final reason = _hardQueueTurnRestrictionEnabled
+        ? await _showOutOfOrderDialog(entry)
+        : 'manual_override';
     if (reason == null || !mounted) return;
     widget.onSelected(
       TherapistAssignmentPick(
@@ -312,12 +331,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   }
 
   Widget _buildCompactPicker(List<TherapistQueueEntry> filtered) {
-    final selectable = filtered
-        .where(
-          (entry) =>
-              !widget.excludedTherapistIds.contains(entry.therapistId),
-        )
-        .toList();
+    final selectable = filtered.where(_isSelectable).toList();
     final preservedMatches = _entries.where(
       (entry) => entry.therapistId == widget.selectedTherapistId,
     );
@@ -343,7 +357,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
           runSpacing: 8,
           children: [
             _PreferenceChip(
-              label: 'Auto assign at start',
+              label: 'Next in queue',
               isSelected: _assignmentSource == 'queue',
               onTap: () => _selectCompactPreference('queue', null),
             ),
@@ -389,7 +403,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
         if (_assignmentSource == 'queue')
           const _AutoAssignmentPreview(
             label:
-                'The final eligible therapist is chosen from the live queue when service starts.',
+                'The next eligible therapist is auto assigned from the live queue and locked when the appointment is saved.',
           )
         else if (_assignmentSource == 'gender_preference') ...[
           Container(
@@ -475,7 +489,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
           ),
           const SizedBox(height: 8),
           Text(
-            'Leave the list unselected to auto assign the next eligible $_genderFilterLabel therapist.',
+            'Leave the list unselected to auto assign the next eligible $_genderFilterLabel therapist when the appointment is saved.',
             style: const TextStyle(
               fontSize: 11.5,
               color: Color(0xFF64748B),
@@ -603,9 +617,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
           )
         else ...[
           ...filtered.map((entry) {
-            final isExcluded = widget.excludedTherapistIds.contains(
-              entry.therapistId,
-            );
+            final isDisabled = !_isSelectable(entry);
             final isSelected = widget.selectedTherapistId == entry.therapistId;
             final isUpNext = upNext?.therapistId == entry.therapistId;
             return Padding(
@@ -614,9 +626,9 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
                 entry: entry,
                 profileImageUrl: _profileImages[entry.therapistId] ?? '',
                 isSelected: isSelected,
-                isDisabled: isExcluded,
+                isDisabled: isDisabled,
                 emphasized: isUpNext,
-                onTap: isExcluded ? null : () => _handleTap(entry),
+                onTap: isDisabled ? null : () => _handleTap(entry),
               ),
             );
           }),
@@ -707,7 +719,7 @@ class _OutOfOrderQueueDialog extends StatelessWidget {
               ),
               const SizedBox(height: 12),
               const Text(
-                'Customer requested may preserve a missed normal turn. Counter override records the counter choice and does not create a protected turn.',
+                'Customer requested records a specific request. Counter override records a staff choice outside queue order. Both consume a normal turn only when service starts.',
                 style: TextStyle(
                   fontSize: 12.5,
                   height: 1.45,
@@ -917,11 +929,10 @@ class _QueueRow extends StatelessWidget {
         : entry.isReserved || entry.isTentativeHold
         ? _reservationLabel(entry)
         : 'Busy until ${_formatClock(entry.freeAt)}';
-    return entry.protectedTurnOwed ? 'Protected turn · $base' : base;
+    return base;
   }
 
   Color get _statusColor {
-    if (entry.protectedTurnOwed) return const Color(0xFF7C3AED);
     if (entry.isFreeNow) return const Color(0xFF4CAF50);
     if (entry.isReserved || entry.isTentativeHold) {
       return const Color(0xFF2563EB);
@@ -960,14 +971,13 @@ class _QueueRow extends StatelessWidget {
           width: double.infinity,
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
           decoration: BoxDecoration(
-            color: isSelected
-                ? const Color(0xFFDDF1F1)
-                : emphasized
-                ? const Color(0xFFF0FAF7)
-                : Colors.white,
+            // Only an actual selection is highlighted. The up-next therapist
+            // keeps a neutral row (marked by the sparkle only) so a
+            // recommendation never reads as an already-made choice.
+            color: isSelected ? const Color(0xFFDDF1F1) : Colors.white,
             borderRadius: BorderRadius.circular(12),
             border: Border.all(
-              color: isSelected || emphasized
+              color: isSelected
                   ? const Color(0xFF1B6B72)
                   : const Color(0xFFE2E8F0),
               width: isSelected ? 2 : 1,

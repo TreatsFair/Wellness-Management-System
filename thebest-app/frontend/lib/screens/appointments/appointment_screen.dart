@@ -4,6 +4,7 @@ import 'package:intl/intl.dart';
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/services/payment_service.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
 import '../../core/utils/staff_initials.dart';
@@ -12,6 +13,8 @@ import '../../data/repositories/business_settings_repository.dart';
 import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/services/supabase_table_service.dart';
+import '../../widgets/checkout_guest_card.dart';
+import '../../widgets/checkout_payment_method_grid.dart';
 import '../../widgets/detail_drawer_layout.dart';
 import '../../widgets/therapist_queue_picker.dart';
 import '../booking/booking_screen.dart';
@@ -53,6 +56,8 @@ String _paymentMethodLabel(String value) {
       return 'Debit Card';
     case 'cash':
       return 'Cash';
+    case 'others':
+      return 'Others';
     default:
       return value.trim().isEmpty ? 'Payment recorded' : value.trim();
   }
@@ -519,29 +524,19 @@ class _ScheduleAppointment {
       !isWalkIn && !isFixedTherapistAssignmentSource(assignmentSource);
 
   String get therapistDisplayName {
-    if (actualStartedAt == null && isFlexibleTherapistAssignment) {
-      final gender = requestedGender?.trim();
-      if (assignmentSource.toLowerCase() == 'gender_preference' &&
-          gender != null &&
-          gender.isNotEmpty) {
-        return 'Auto assign at start · $gender';
-      }
-      return 'Auto assign at start';
+    if (therapistName.trim().isEmpty || therapistName == '-') {
+      return 'Therapist not locked';
     }
-    switch (therapistAssignmentState) {
-      case 'auto_assigned':
-        return '$therapistName · Auto assigned';
-      case 'pending':
-        return 'Auto assign at start';
-      default:
-        return '$therapistName · Confirmed';
+    if (assignmentSource.toLowerCase() == 'queue' ||
+        assignmentSource.toLowerCase() == 'gender_preference') {
+      return '$therapistName · Auto assigned';
     }
+    return '$therapistName · Locked';
   }
 
-  String get roomDisplayName => isRoomConfirmed
-      ? '$roomName · Confirmed'
-      : 'Unassigned';
-  bool get showRoomAssignment => isRoomConfirmed;
+  String get roomDisplayName =>
+      roomName.trim().isEmpty || roomName == '-' ? 'Room not locked' : roomName;
+  bool get showRoomAssignment => roomName.trim().isNotEmpty && roomName != '-';
 
   static List<Map<String, dynamic>> _readServiceItems(
     Object? value, {
@@ -1162,57 +1157,7 @@ class _AppointmentGroup {
 
   String get therapistDisplayName {
     if (!isGroup) return primary.therapistDisplayName;
-    if (appointments.every(
-      (appointment) =>
-          appointment.actualStartedAt == null &&
-          appointment.isFlexibleTherapistAssignment,
-    )) {
-      final genders = appointments
-          .where(
-            (appointment) =>
-                appointment.assignmentSource.toLowerCase() ==
-                'gender_preference',
-          )
-          .map((appointment) => appointment.requestedGender?.trim())
-          .whereType<String>()
-          .where((gender) => gender.isNotEmpty)
-          .toSet();
-      if (genders.length == 1 &&
-          appointments.every(
-            (appointment) =>
-                appointment.assignmentSource.toLowerCase() ==
-                'gender_preference',
-          )) {
-        return 'Auto assign at start · ${genders.first}';
-      }
-      return 'Auto assign at start';
-    }
-    if (appointments.every((appointment) => appointment.actualStartedAt == null)) {
-      final fixedCount = appointments
-          .where(
-            (appointment) => !appointment.isFlexibleTherapistAssignment,
-          )
-          .length;
-      final flexibleCount = appointments.length - fixedCount;
-      if (flexibleCount > 0) {
-        return '$fixedCount fixed · $flexibleCount auto assign at start';
-      }
-    }
-    final confirmed = appointments
-        .where((appointment) => appointment.isTherapistConfirmed)
-        .length;
-    final autoAssigned = appointments
-        .where(
-          (appointment) =>
-              appointment.therapistAssignmentState == 'auto_assigned',
-        )
-        .length;
-    if (confirmed == appointments.length) return '$therapistName · Confirmed';
-    if (autoAssigned == appointments.length) {
-      return '$autoAssigned staff · Auto assigned';
-    }
-    if (confirmed == 0 && autoAssigned == 0) return 'Auto assign at start';
-    return '$confirmed confirmed · ${appointments.length - confirmed} pending';
+    return '$therapistName · Locked';
   }
 
   String get roomName {
@@ -1225,10 +1170,9 @@ class _AppointmentGroup {
   }
 
   bool get showRoomAssignment =>
-      appointments.every((appointment) => appointment.isRoomConfirmed);
-  String get roomDisplayName => showRoomAssignment
-      ? '$roomName · Confirmed'
-      : 'Unassigned';
+      appointments.every((appointment) => appointment.roomId.isNotEmpty);
+  String get roomDisplayName =>
+      showRoomAssignment ? roomName : 'Room not locked';
 
   List<Map<String, dynamic>> get serviceItems {
     final items = <Map<String, dynamic>>[];
@@ -1979,19 +1923,52 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         builder: (_) => NewAppointmentScreen(
           userRole: widget.userRole,
           editPayload: _editPayloadForAppointments([appointment]),
+          onRequestCheckout: () =>
+              _checkoutAfterInPlaceSave(appointmentId: appointment.id),
         ),
       ),
     );
     if (saved != null && mounted) {
       await _loadAppointments();
-      if (saved == 'collectAddOnPayment' && mounted) {
-        final updated = _appointmentGroups.where(
-          (group) =>
-              group.appointments.any((item) => item.id == appointment.id),
-        );
-        if (updated.isNotEmpty) await _openAddOnPayment(updated.first);
+      if (!mounted) return;
+      final updated = _appointmentGroups
+          .where(
+            (group) =>
+                group.appointments.any((item) => item.id == appointment.id),
+          )
+          .toList();
+      if (updated.isEmpty) return;
+      if (saved == 'collectAddOnPayment') {
+        await _openAddOnPayment(updated.first);
+      } else if (saved == 'checkout') {
+        await _openCheckoutForGroup(updated.first);
       }
     }
+  }
+
+  /// Opens checkout on top of a still-mounted View Appointment screen after it
+  /// saved in place. The appointment data has to be reloaded first to rebuild
+  /// the group, but that happens underneath the open screen so staff only see
+  /// the checkout page appear.
+  Future<void> _checkoutAfterInPlaceSave({
+    String? appointmentId,
+    String? groupId,
+  }) async {
+    await _loadAppointments();
+    if (!mounted) return;
+    final matches = _appointmentGroups.where(
+      (group) => groupId != null
+          ? group.id == groupId
+          : group.appointments.any((item) => item.id == appointmentId),
+    );
+    if (matches.isEmpty) return;
+    await _openCheckoutForGroup(matches.first);
+  }
+
+  /// Single checkout entry point. Check-in and the actual service start happen
+  /// only here, behind Confirm Payment & Start Service.
+  Future<bool> _openCheckoutForGroup(_AppointmentGroup group) {
+    return group.isGroup ? _openGroupCheckout(group) : _openCheckout(group.primary);
   }
 
   Future<void> _openEditGroup(
@@ -2007,19 +1984,22 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
             group.appointments,
             activeAppointmentId: activeAppointmentId,
           ),
+          onRequestCheckout: () => _checkoutAfterInPlaceSave(groupId: group.id),
         ),
       ),
     );
     if (result == null || !mounted) return;
 
     await _loadAppointments();
+    if (!mounted) return;
+    final updated = _appointmentGroups
+        .where((item) => item.id == group.id)
+        .toList();
+    if (updated.isEmpty) return;
     if (result == 'collectAddOnPayment') {
-      final updated = _appointmentGroups
-          .where((item) => item.id == group.id)
-          .toList();
-      if (updated.isNotEmpty && mounted) {
-        await _openAddOnPayment(updated.first);
-      }
+      await _openAddOnPayment(updated.first);
+    } else if (result == 'checkout') {
+      await _openCheckoutForGroup(updated.first);
     }
   }
 
@@ -2036,6 +2016,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   AppointmentEditPayload _editPayloadForAppointments(
     List<_ScheduleAppointment> appointments, {
     String? activeAppointmentId,
+    // No caller sets this any more: check-in is not a separate editor mode.
+    // Retained as the dormant rollback path for the old two-screen flow.
     bool checkInMode = false,
   }) {
     final sorted = [...appointments]
@@ -2060,6 +2042,13 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
       activePaxIndex: activeIndex < 0 ? 0 : activeIndex,
       checkInMode: checkInMode,
       hasPayment: sorted.every((appointment) => appointment.hasPayment),
+      isNoShow: sorted.length == 1 && primary.isNoShow,
+      canCheckout: sorted.any(
+        (appointment) =>
+            !appointment.isCancelled &&
+            !appointment.isNoShow &&
+            !appointment.isCompleted,
+      ),
       allocations: sorted.map((appointment) {
         final serviceIds = appointment.serviceItems
             .map(serviceItemId)
@@ -2103,6 +2092,8 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
           requestedGender: appointment.requestedGender,
           therapistAssignmentState: appointment.therapistAssignmentState,
           roomId: appointment.roomId,
+          roomUnitId: appointment.roomUnitId,
+          roomUnitName: appointment.roomUnitName,
           startTime: appointment.startTime,
           endTime: appointment.endTime,
         );
@@ -2154,28 +2145,29 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
     return false;
   }
 
+  /// "Edit services" from the checkout page reopens the same View Appointment
+  /// page staff use everywhere else — there is no separate check-in editor
+  /// interface any more — and returns to checkout once saved.
   Future<bool> _openCheckInServiceEditor(_AppointmentGroup group) async {
     final result = await Navigator.push<Object?>(
       context,
       MaterialPageRoute(
         builder: (_) => NewAppointmentScreen(
           userRole: widget.userRole,
-          editPayload: _editPayloadForAppointments(
-            group.appointments,
-            checkInMode: true,
-          ),
+          editPayload: _editPayloadForAppointments(group.appointments),
         ),
       ),
     );
-    if (result != 'checkInSaved' || !mounted) return false;
+    if (result == null || !mounted) return false;
     await _loadAppointments();
     if (!mounted) return false;
     final updated = _appointmentGroups.where((item) => item.id == group.id);
     if (updated.isEmpty) return false;
-    if (updated.first.isGroup) {
-      return _openGroupCheckout(updated.first);
+    if (result == 'collectAddOnPayment') {
+      await _openAddOnPayment(updated.first);
+      return true;
     }
-    return _openCheckout(updated.first.primary);
+    return _openCheckoutForGroup(updated.first);
   }
 
   Future<void> _openTherapistSwitch(_ScheduleAppointment appointment) async {
@@ -2415,13 +2407,14 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 16),
-                  if (receivesFullCommission)
-                    const Text(
-                      'The replacement receives 100% commission because the switch is before or within 15 minutes of service start.',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    )
-                  else ...[
+                  // Within the first 15 minutes the replacement simply takes
+                  // 100% of the commission, so there is nothing to split and
+                  // nothing to justify — the dialog stays down to the
+                  // therapist choice. Both the split control and the reason
+                  // field only appear once the switch is late enough to
+                  // actually divide the commission.
+                  if (!receivesFullCommission) ...[
+                    const SizedBox(height: 16),
                     const Text(
                       'Commission split',
                       style: TextStyle(fontWeight: FontWeight.w700),
@@ -2444,16 +2437,16 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       onSelectionChanged: (selection) =>
                           setDialogState(() => splitMethod = selection.first),
                     ),
-                  ],
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: reasonController,
-                    decoration: const InputDecoration(
-                      labelText: 'Reason (optional)',
-                      border: OutlineInputBorder(),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: reasonController,
+                      decoration: const InputDecoration(
+                        labelText: 'Reason (optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                      maxLines: 2,
                     ),
-                    maxLines: 2,
-                  ),
+                  ],
                 ],
               ),
             ),
@@ -2527,6 +2520,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
             child: group.isGroup
                 ? _AppointmentGroupSummaryPanel(
                     group: group,
+                    sstLabel: _businessRuleSettings.sstLabel,
                     compact: true,
                     onClose: () => Navigator.pop(routeContext),
                     onEditGroup: () async {
@@ -2544,12 +2538,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       Navigator.pop(routeContext);
                       await _openTherapistSwitch(appointment);
                     },
-                    onComplete: group.canFinalizeAndStart
-                        ? () async {
-                            Navigator.pop(routeContext);
-                            await _openGroupCheckout(group);
-                          }
-                        : null,
                     onCancel: group.isCompleted
                         ? null
                         : () async {
@@ -2559,6 +2547,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                   )
                 : _AppointmentSummaryPanel(
                     appointment: group.primary,
+                    sstLabel: _businessRuleSettings.sstLabel,
                     compact: true,
                     onClose: () => Navigator.pop(routeContext),
                     onEdit: () async {
@@ -2574,12 +2563,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                             Navigator.pop(routeContext);
                             await _openTherapistSwitch(group.primary);
                           },
-                    onComplete: group.primary.canFinalizeAndStart
-                        ? () async {
-                            Navigator.pop(routeContext);
-                            await _openCheckout(group.primary);
-                          }
-                        : null,
                     onCancel: group.isCompleted
                         ? null
                         : () async {
@@ -2775,6 +2758,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                             : _selectedGroup!.isGroup
                             ? _AppointmentGroupSummaryPanel(
                                 group: _selectedGroup!,
+                                sstLabel: _businessRuleSettings.sstLabel,
                                 onClose: () =>
                                     setState(() => _selectedGroup = null),
                                 onEditGroup: () =>
@@ -2784,10 +2768,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                                   activeAppointmentId: appointment.id,
                                 ),
                                 onSwitchPax: _openTherapistSwitch,
-                                onComplete:
-                                    _selectedGroup!.canFinalizeAndStart
-                                    ? () => _openGroupCheckout(_selectedGroup!)
-                                    : null,
                                 onCancel: _selectedGroup!.isCompleted
                                     ? null
                                     : () => _cancelAppointmentGroup(
@@ -2796,6 +2776,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                               )
                             : _AppointmentSummaryPanel(
                                 appointment: _selectedGroup!.primary,
+                                sstLabel: _businessRuleSettings.sstLabel,
                                 onClose: () =>
                                     setState(() => _selectedGroup = null),
                                 onEdit: () =>
@@ -2808,11 +2789,6 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                                     : () => _openTherapistSwitch(
                                         _selectedGroup!.primary,
                                       ),
-                                onComplete:
-                                    _selectedGroup!.primary.canFinalizeAndStart
-                                    ? () =>
-                                          _openCheckout(_selectedGroup!.primary)
-                                    : null,
                                 onCancel: _selectedGroup!.isCompleted
                                     ? null
                                     : () => _cancelAppointment(
@@ -6896,8 +6872,8 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
   final VoidCallback onEditGroup;
   final void Function(_ScheduleAppointment appointment) onEditPax;
   final void Function(_ScheduleAppointment appointment) onSwitchPax;
-  final VoidCallback? onComplete;
   final VoidCallback? onCancel;
+  final String sstLabel;
 
   const _AppointmentGroupSummaryPanel({
     required this.group,
@@ -6905,8 +6881,8 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
     required this.onEditGroup,
     required this.onEditPax,
     required this.onSwitchPax,
-    required this.onComplete,
     required this.onCancel,
+    required this.sstLabel,
     this.compact = false,
   });
 
@@ -6932,11 +6908,11 @@ class _AppointmentGroupSummaryPanel extends StatelessWidget {
       receiptNumber: group.receiptNumber,
       paymentMethod: group.paymentMethod,
       notes: group.notes,
+      sstLabel: sstLabel,
       onClose: onClose,
       onEdit: onEditGroup,
       onEditPax: onEditPax,
       onSwitchPax: onSwitchPax,
-      onComplete: onComplete,
       onCancel: onCancel,
     );
   }
@@ -6961,11 +6937,11 @@ class _AppointmentDetailContent extends StatelessWidget {
   final String receiptNumber;
   final String paymentMethod;
   final String notes;
+  final String sstLabel;
   final VoidCallback onClose;
   final VoidCallback onEdit;
   final void Function(_ScheduleAppointment appointment) onEditPax;
   final void Function(_ScheduleAppointment appointment)? onSwitchPax;
-  final VoidCallback? onComplete;
   final VoidCallback? onCancel;
 
   const _AppointmentDetailContent({
@@ -6987,11 +6963,11 @@ class _AppointmentDetailContent extends StatelessWidget {
     required this.receiptNumber,
     required this.paymentMethod,
     required this.notes,
+    required this.sstLabel,
     required this.onClose,
     required this.onEdit,
     required this.onEditPax,
     required this.onSwitchPax,
-    required this.onComplete,
     required this.onCancel,
   });
 
@@ -7006,11 +6982,26 @@ class _AppointmentDetailContent extends StatelessWidget {
         : const Color(0xFF7C3AED);
     final showOperationalStatus = _showsOperationalStatus(statusLabel);
     final linkedTransactions = _linkedTransactions(appointments);
-    final counterSst = linkedTransactions
-        .where(
-          (row) => row['paymentMethod']?.toString().toLowerCase() != 'billplz',
-        )
-        .fold<double>(0, (sum, row) => sum + _readDouble(row['sstAmount']));
+    final transactionTotal = linkedTransactions.fold<double>(
+      0,
+      (sum, row) => sum + _readDouble(row['totalAmount']),
+    );
+    final transactionSubtotal = linkedTransactions.fold<double>(0, (
+      sum,
+      row,
+    ) {
+      final isBillplz =
+          row['paymentMethod']?.toString().toLowerCase() == 'billplz';
+      return sum +
+          _readDouble(isBillplz ? row['totalAmount'] : row['servicePrice']);
+    });
+    final displayTotal = linkedTransactions.isEmpty ? total : transactionTotal;
+    final displaySubtotal = linkedTransactions.isEmpty
+        ? total
+        : transactionSubtotal;
+    final counterSst = (displayTotal - displaySubtotal)
+        .clamp(0, double.infinity)
+        .toDouble();
     final VoidCallback? switchAction =
         appointments.length == 1 && onSwitchPax != null
         ? () => onSwitchPax!(appointments.first)
@@ -7140,6 +7131,9 @@ class _AppointmentDetailContent extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 10),
+          // Same date row the checkout pages use, so the summary card and the
+          // checkout page read identically.
+          CheckoutDateHeader(label: DateFormat('EEE, d MMM yyyy').format(date)),
           for (var index = 0; index < appointments.length; index++)
             _GroupPaxDetailCard(
               index: index,
@@ -7154,22 +7148,17 @@ class _AppointmentDetailContent extends StatelessWidget {
                   ? null
                   : () => onSwitchPax!(appointments[index]),
             ),
-          _BookingTotalCard(total: total, sstAmount: counterSst),
+          _BookingTotalCard(
+            total: displayTotal,
+            subtotal: displaySubtotal,
+            sstAmount: counterSst,
+            sstLabel: sstLabel,
+          ),
           if (linkedTransactions.isNotEmpty) ...[
             const SizedBox(height: 10),
             _LinkedReceiptsCard(transactions: linkedTransactions),
           ],
           const SizedBox(height: 18),
-          if (onComplete != null) ...[
-            _VisibleDetailAction(
-              icon: Icons.login_rounded,
-              label: 'Check In & Start Service',
-              color: const Color(0xFF15803D),
-              filled: true,
-              onPressed: onComplete!,
-            ),
-            const SizedBox(height: 10),
-          ],
           if (switchAction != null) ...[
             _VisibleDetailAction(
               icon: Icons.swap_horiz_rounded,
@@ -7179,10 +7168,13 @@ class _AppointmentDetailContent extends StatelessWidget {
             ),
             const SizedBox(height: 10),
           ],
+          // The only way in. Editing, add-ons, check-in and checkout all live
+          // on the View page, so there is no separate check-in action here.
           _VisibleDetailAction(
-            icon: Icons.edit_outlined,
-            label: isWalkIn ? 'Edit Walk-in' : 'Edit Appointment',
+            icon: Icons.visibility_outlined,
+            label: isWalkIn ? 'View Walk-in' : 'View Appointment',
             color: accent,
+            filled: true,
             onPressed: onEdit,
           ),
           if (onCancel != null) ...[
@@ -7404,9 +7396,16 @@ class _TimingLine extends StatelessWidget {
 
 class _BookingTotalCard extends StatelessWidget {
   final double total;
+  final double subtotal;
   final double sstAmount;
+  final String sstLabel;
 
-  const _BookingTotalCard({required this.total, this.sstAmount = 0});
+  const _BookingTotalCard({
+    required this.total,
+    required this.subtotal,
+    required this.sstLabel,
+    this.sstAmount = 0,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -7420,8 +7419,8 @@ class _BookingTotalCard extends StatelessWidget {
       child: Column(
         children: [
           if (sstAmount > 0.005) ...[
-            _PaxPriceRow(label: 'Subtotal', amount: total - sstAmount),
-            _PaxPriceRow(label: 'SST (6%)', amount: sstAmount),
+            _PaxPriceRow(label: 'Subtotal', amount: subtotal),
+            _PaxPriceRow(label: sstLabel, amount: sstAmount),
             const Divider(height: 18, color: Color(0xFFE5E7EB)),
           ],
           _PaxPriceRow(label: 'Total', amount: total, emphasized: true),
@@ -8224,16 +8223,16 @@ class _AppointmentSummaryPanel extends StatelessWidget {
   final VoidCallback onClose;
   final VoidCallback onEdit;
   final VoidCallback? onSwitchTherapist;
-  final VoidCallback? onComplete;
   final VoidCallback? onCancel;
+  final String sstLabel;
 
   const _AppointmentSummaryPanel({
     required this.appointment,
     required this.onClose,
     required this.onEdit,
     required this.onSwitchTherapist,
-    required this.onComplete,
     required this.onCancel,
+    required this.sstLabel,
     this.compact = false,
   });
 
@@ -8259,13 +8258,13 @@ class _AppointmentSummaryPanel extends StatelessWidget {
       receiptNumber: appointment.receiptNumber,
       paymentMethod: appointment.paymentMethod,
       notes: appointment.notes,
+      sstLabel: sstLabel,
       onClose: onClose,
       onEdit: onEdit,
       onEditPax: (_) => onEdit(),
       onSwitchPax: onSwitchTherapist == null
           ? null
           : (_) => onSwitchTherapist!(),
-      onComplete: onComplete,
       onCancel: onCancel,
     );
   }
@@ -8486,6 +8485,484 @@ class _AddOnServiceRow extends StatelessWidget {
   }
 }
 
+Future<TherapistAssignmentPick?> _showFinalisationTherapistPicker(
+  BuildContext context, {
+  required int durationMinutes,
+  String? selectedTherapistId,
+  String initialAssignmentSource = 'queue',
+  String? initialRequestedGender,
+  Set<String> excludedTherapistIds = const {},
+}) {
+  final now = DateTime.now();
+  return showDialog<TherapistAssignmentPick>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      title: const Text('Choose another therapist'),
+      content: SizedBox(
+        width: 520,
+        height: 520,
+        child: SingleChildScrollView(
+          child: TherapistQueuePicker(
+            outletId: OutletContext.activeOutletId.value,
+            date: DateFormat('yyyy-MM-dd').format(now),
+            startTime: DateFormat('HH:mm:ss').format(now),
+            durationMinutes: durationMinutes,
+            selectedTherapistId: selectedTherapistId,
+            initialAssignmentSource: initialAssignmentSource,
+            initialRequestedGender: initialRequestedGender,
+            excludedTherapistIds: excludedTherapistIds,
+            followLiveClock: true,
+            onSelected: (pick) => Navigator.pop(dialogContext, pick),
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext),
+          child: const Text('Cancel'),
+        ),
+      ],
+    ),
+  );
+}
+
+class _AppointmentPaymentBackButton extends StatelessWidget {
+  const _AppointmentPaymentBackButton({required this.onTap});
+
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: const Padding(
+        padding: EdgeInsets.symmetric(vertical: 6, horizontal: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.chevron_left, size: 18, color: Color(0xFF1B6B72)),
+            Text(
+              'Back to Appointment',
+              style: TextStyle(
+                fontSize: 13,
+                color: Color(0xFF1B6B72),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AppointmentPaymentHeader extends StatelessWidget {
+  const _AppointmentPaymentHeader({
+    required this.receiptLabel,
+    required this.onBack,
+  });
+
+  final String receiptLabel;
+  final VoidCallback? onBack;
+
+  @override
+  Widget build(BuildContext context) {
+    final title = Column(
+      crossAxisAlignment: CrossAxisAlignment.center,
+      children: [
+        const Text(
+          'Payment',
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF1A1A2E),
+          ),
+        ),
+        Text(
+          receiptLabel,
+          style: const TextStyle(fontSize: 11, color: Color(0xFF9E9E9E)),
+        ),
+      ],
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < 430) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  _AppointmentPaymentBackButton(onTap: onBack),
+                  const Spacer(),
+                  const CheckoutStepPill(),
+                ],
+              ),
+              const SizedBox(height: 14),
+              Align(alignment: Alignment.centerLeft, child: title),
+            ],
+          );
+        }
+        return Row(
+          children: [
+            _AppointmentPaymentBackButton(onTap: onBack),
+            const Spacer(),
+            title,
+            const Spacer(),
+            const CheckoutStepPill(),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _TherapistStartConflictCard extends StatelessWidget {
+  const _TherapistStartConflictCard({
+    required this.feedback,
+    required this.waiting,
+    required this.canUseSuggestion,
+    required this.onWait,
+    required this.onChooseAnother,
+    required this.onUseSuggestion,
+  });
+
+  final PaymentResult feedback;
+  final bool waiting;
+  final bool canUseSuggestion;
+  final VoidCallback onWait;
+  final VoidCallback onChooseAnother;
+  final VoidCallback onUseSuggestion;
+
+  @override
+  Widget build(BuildContext context) {
+    final therapistName =
+        feedback.busyTherapistName?.trim().isNotEmpty == true
+        ? feedback.busyTherapistName!
+        : 'The selected therapist';
+    final busyUntil = feedback.busyUntil?.toLocal();
+    final busyLabel = busyUntil == null
+        ? 'is not free for the full service window'
+        : 'is busy until ${DateFormat('h:mm a').format(busyUntil)}';
+    final nextStart = feedback.nextAvailableStartAt?.toLocal();
+    final nextEnd = feedback.nextAvailableEndAt?.toLocal();
+    final nextTherapist =
+        feedback.nextAvailableTherapistName?.trim().isNotEmpty == true
+        ? feedback.nextAvailableTherapistName!
+        : therapistName;
+    final nextWindowLabel = nextStart == null || nextEnd == null
+        ? null
+        : '${DateFormat('EEE, d MMM · h:mm a').format(nextStart)}'
+              '–${DateFormat('h:mm a').format(nextEnd)}';
+    final searchedThrough = feedback.availabilitySearchedThrough?.toLocal();
+    final message = feedback.errorCode == 'THERAPIST_BUSY'
+        ? '$therapistName $busyLabel. No payment or start changes were saved.'
+        : 'A therapist must be selected and confirmed before service can start.';
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFF7ED),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: const Color(0xFFF59E0B)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.schedule_rounded,
+                size: 20,
+                color: Color(0xFFB45309),
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Therapist unavailable at start time',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w900,
+                  color: Color(0xFF92400E),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            waiting
+                ? '$message The recommended delayed window is selected for '
+                      'staff reference; confirm again only when the guest is '
+                      'actually ready to start.'
+                : message,
+            style: const TextStyle(
+              fontSize: 12,
+              height: 1.4,
+              fontWeight: FontWeight.w600,
+              color: Color(0xFF78350F),
+            ),
+          ),
+          if (nextWindowLabel != null) ...[
+            const SizedBox(height: 10),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(11),
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFFFFF),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: const Color(0xFFFCD34D)),
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Icon(
+                    Icons.auto_awesome_rounded,
+                    size: 17,
+                    color: Color(0xFFB45309),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          waiting
+                              ? 'Selected delayed start'
+                              : 'Next best complete window',
+                          style: const TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w800,
+                            color: Color(0xFF92400E),
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          '$nextWindowLabel · $nextTherapist',
+                          style: const TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w900,
+                            color: Color(0xFF78350F),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ] else if (feedback.errorCode == 'THERAPIST_BUSY' &&
+              searchedThrough != null) ...[
+            const SizedBox(height: 8),
+            Text(
+              'No complete therapist and room window was found through '
+              '${DateFormat('d MMM').format(searchedThrough)}.',
+              style: const TextStyle(
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: Color(0xFF92400E),
+              ),
+            ),
+          ],
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: [
+              OutlinedButton(
+                onPressed: onWait,
+                child: Text(
+                  waiting
+                      ? 'Delayed time selected'
+                      : nextStart == null
+                      ? 'Wait for therapist'
+                      : 'Wait until ${DateFormat('h:mm a').format(nextStart)}',
+                ),
+              ),
+              OutlinedButton(
+                onPressed: onChooseAnother,
+                child: const Text('Choose another therapist'),
+              ),
+              if (canUseSuggestion)
+                FilledButton(
+                  onPressed: onUseSuggestion,
+                  child: Text(
+                    feedback.suggestedTherapistName?.trim().isNotEmpty == true
+                        ? 'Use next: ${feedback.suggestedTherapistName}'
+                        : 'Use next available therapist',
+                  ),
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Classifies a failed service start. The overlap trigger
+/// (`prevent_appointment_resource_overlap`) raises one of a small set of
+/// messages; a late arrival that auto-extends past another booking lands here.
+/// How far ahead of the booked start the counter may begin without being
+/// asked to confirm. Anything earlier moves the whole service window forward,
+/// so it is a deliberate decision rather than a side effect of collecting an
+/// add-on payment.
+const int _earlyStartWarningMinutes = 10;
+
+/// Confirms an early start and spells out the window the service will actually
+/// occupy. Returns true when the counter chooses to go ahead.
+Future<bool> _confirmEarlyStart({
+  required BuildContext context,
+  required DateTime scheduledStart,
+  required DateTime startedAt,
+  required int durationMinutes,
+  required bool isGroup,
+}) async {
+  final minutesEarly = scheduledStart.difference(startedAt).inMinutes;
+  if (minutesEarly < _earlyStartWarningMinutes) return true;
+  final time = DateFormat('h:mm a');
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (dialogContext) => AlertDialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+      title: Text('Starting $minutesEarly minutes early'),
+      content: Text(
+        'The booked time is ${time.format(scheduledStart)}. Starting now runs '
+        '${isGroup ? 'the services' : 'the service'} from '
+        '${time.format(startedAt)} to '
+        '${time.format(startedAt.add(Duration(minutes: durationMinutes)))} '
+        'instead, and the earlier window has to be free for '
+        '${isGroup ? 'every therapist and room' : 'the therapist and room'}.',
+        style: const TextStyle(fontSize: 13.5, height: 1.45),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(dialogContext, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(dialogContext, true),
+          style: FilledButton.styleFrom(
+            backgroundColor: const Color(0xFF1B6B72),
+          ),
+          child: const Text('Start early'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
+}
+
+enum LateStartConflictKind { therapist, therapistHold, room, busy, unknown }
+
+LateStartConflictKind lateStartConflictKind(Object error) {
+  final text = error.toString().toLowerCase();
+  if (text.contains('therapist is already booked')) {
+    return LateStartConflictKind.therapist;
+  }
+  if (text.contains('temporarily reserved by an online booking hold')) {
+    return LateStartConflictKind.therapistHold;
+  }
+  if (text.contains('room or bed capacity is already full')) {
+    return LateStartConflictKind.room;
+  }
+  if (text.contains('another appointment update is in progress')) {
+    return LateStartConflictKind.busy;
+  }
+  return LateStartConflictKind.unknown;
+}
+
+/// Explains why a late service start was refused and offers real routes out.
+///
+/// Deliberately has NO "start anyway" action: the database is the authority on
+/// double-booking and `allow_late_extension_overlap` would blind-override a
+/// therapist already serving another guest.
+class _LateStartConflictDialog extends StatelessWidget {
+  const _LateStartConflictDialog({
+    required this.kind,
+    required this.therapistLabel,
+    required this.roomLabel,
+    required this.attemptedWindow,
+    required this.canSwitchTherapist,
+  });
+
+  final LateStartConflictKind kind;
+  final String therapistLabel;
+  final String roomLabel;
+  final String attemptedWindow;
+  final bool canSwitchTherapist;
+
+  String get _title => switch (kind) {
+    LateStartConflictKind.room => 'Room is not free for the full service',
+    LateStartConflictKind.busy => 'Another update is in progress',
+    _ => 'Therapist is not free for the full service',
+  };
+
+  String get _body => switch (kind) {
+    LateStartConflictKind.therapist =>
+      '$therapistLabel is already booked during $attemptedWindow. Starting now '
+          'would run the service into that booking.',
+    LateStartConflictKind.therapistHold =>
+      '$therapistLabel is held by an online booking during $attemptedWindow. '
+          'The hold has to expire or be released first.',
+    LateStartConflictKind.room =>
+      '$roomLabel has no free capacity during $attemptedWindow, including the '
+          'cleanup buffer.',
+    LateStartConflictKind.busy =>
+      'Someone else is updating this booking right now. Wait a moment and try '
+          'again.',
+    LateStartConflictKind.unknown =>
+      'The service could not be started for $attemptedWindow because a '
+          'therapist or room is no longer free for the whole window.',
+  };
+
+  @override
+  Widget build(BuildContext context) {
+    final offerSwitch =
+        canSwitchTherapist &&
+        (kind == LateStartConflictKind.therapist ||
+            kind == LateStartConflictKind.therapistHold ||
+            kind == LateStartConflictKind.unknown);
+    return AlertDialog(
+      title: Text(_title),
+      content: SizedBox(
+        width: 460,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(_body),
+            const SizedBox(height: 14),
+            const Text(
+              'The booking has not been started and no payment was taken.',
+              style: TextStyle(fontSize: 12, color: Color(0xFF64748B)),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, _LateStartAction.dismiss),
+          child: const Text('Back to booking'),
+        ),
+        if (offerSwitch)
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(context, _LateStartAction.switchTherapist),
+            child: const Text('Switch therapist'),
+          ),
+        if (kind == LateStartConflictKind.busy)
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _LateStartAction.retry),
+            child: const Text('Try again'),
+          ),
+      ],
+    );
+  }
+}
+
+enum _LateStartAction { dismiss, switchTherapist, retry }
+
 class _AppointmentCheckoutSheet extends StatefulWidget {
   final _ScheduleAppointment appointment;
   final bool canOverrideConflict;
@@ -8514,7 +8991,8 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
   String? _requestedGender;
   String? _roomUnitId;
   List<RoomUnitAvailability> _roomUnits = const [];
-  bool _loadingRoomUnits = false;
+  PaymentResult? _therapistFeedback;
+  bool _waitingForTherapist = false;
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
@@ -8522,27 +9000,35 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       _businessSettings.priceBreakdown(widget.appointment.price);
 
   bool get _hasPriorPayment => widget.appointment.hasPayment;
+  bool get _isManualCheckIn =>
+      _hasPriorPayment && widget.appointment.checkedInAt == null;
+
+  /// Set once the add-on charge and check-in have been written. A start that
+  /// fails on a clash keeps the sheet open and offers Retry, and retrying must
+  /// never take the add-on money a second time.
+  bool _addOnCollected = false;
+
   double get _addOnSubtotal => widget.appointment.unpaidAddOnServiceItems.fold(
     0,
     (total, item) => total + _readDouble(item['price']),
   );
   PriceBreakdown get _chargePriceBreakdown => _businessSettings.priceBreakdown(
     _hasPriorPayment ? _addOnSubtotal : widget.appointment.price,
+    origin: _hasPriorPayment
+        ? PaymentOrigin.appointmentAddon
+        : PaymentOrigin.counter,
   );
   double get _amountDue => _chargePriceBreakdown.totalAmount;
-  bool get _hasFixedTherapist =>
-      isFixedTherapistAssignmentSource(_assignmentSource);
-
   bool get _canConfirm {
     if (_saving) return false;
     if (_nameController.text.trim().isEmpty) return false;
     if (widget.appointment.roomId.isEmpty) return false;
-    if (_hasFixedTherapist && _therapistId == null) return false;
+    if (_therapistId == null) return false;
+    if (widget.appointment.usesSpecificRoom && _roomUnitId == null) {
+      return false;
+    }
     return _amountDue <= 0.005 || _paymentMethod != null;
   }
-
-  DateTime get _expectedEndAt =>
-      DateTime.now().add(Duration(minutes: widget.appointment.displayDurationMinutes));
 
   @override
   void initState() {
@@ -8556,11 +9042,8 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
           ? ''
           : widget.appointment.customerPhone,
     )..addListener(_refresh);
-    final hasFixedTherapist = isFixedTherapistAssignmentSource(
-      widget.appointment.assignmentSource,
-    );
     _therapistId =
-        hasFixedTherapist && widget.appointment.therapistId.trim().isNotEmpty
+        widget.appointment.therapistId.trim().isNotEmpty
         ? widget.appointment.therapistId
         : null;
     _therapistName = _therapistId == null
@@ -8593,7 +9076,6 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
         widget.appointment.roomId.isEmpty) {
       return;
     }
-    setState(() => _loadingRoomUnits = true);
     try {
       final now = DateTime.now();
       final units = await CspService.getRoomUnitAvailability(
@@ -8609,41 +9091,15 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       if (mounted) {
         setState(() => _roomUnits = const []);
       }
-    } finally {
-      if (mounted) setState(() => _loadingRoomUnits = false);
     }
-  }
-
-  void _selectTherapist(TherapistAssignmentPick pick) {
-    final fixed = isFixedTherapistAssignmentSource(pick.assignmentSource);
-    setState(() {
-      _therapistId = fixed ? pick.therapistId : null;
-      _therapistName = fixed ? pick.therapistName : null;
-      _assignmentSource = pick.assignmentSource;
-      _requestedGender = pick.requestedGender;
-    });
-  }
-
-  void _selectTherapistPreference(String source, String? requestedGender) {
-    setState(() {
-      _therapistId = null;
-      _therapistName = null;
-      _assignmentSource = source;
-      _requestedGender = requestedGender;
-    });
   }
 
   String get _therapistRecapLabel {
-    if (_hasFixedTherapist &&
-        _therapistId != null &&
+    if (_therapistId != null &&
         (_therapistName?.trim().isNotEmpty ?? false)) {
       return _therapistName!;
     }
-    if (_assignmentSource == 'gender_preference' &&
-        _requestedGender != null) {
-      return 'Auto assign at start · $_requestedGender';
-    }
-    return 'Auto assign at start';
+    return 'Therapist not locked';
   }
 
   String get _roomRecapLabel {
@@ -8656,7 +9112,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
         widget.appointment.roomUnitName.trim().isNotEmpty) {
       return widget.appointment.roomUnitName;
     }
-    return 'Auto assigned at service start';
+    return 'Exact room not locked';
   }
 
   Future<void> _loadBusinessSettings() async {
@@ -8677,15 +9133,56 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
     try {
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
+      final transactionValues = <String, dynamic>{
+        if (counterStaff != null) ...{
+          'counterStaffId': counterStaff['id'],
+          'counterStaffName': counterStaff['name'],
+        },
+        'servicePrice': _chargePriceBreakdown.servicePrice,
+        'sstAmount': _chargePriceBreakdown.sstAmount,
+        'totalAmount': _amountDue,
+        'paymentMethod': _paymentMethod ?? 'cash',
+        'receiptNumber': _receiptNumber,
+      };
+      // A customer standing at the counter paying for an add-on is, by that
+      // act, present. Collect the money, record the check-in and start the
+      // service as one action instead of making staff walk the same booking
+      // through three separate confirmations.
+      if (_isManualCheckIn && !_addOnCollected) {
+        if (!mounted) return;
+        final proceed = await _confirmEarlyStart(
+          context: context,
+          scheduledStart: widget.appointment._serviceStartDateTime,
+          startedAt: DateTime.now(),
+          durationMinutes: widget.appointment.displayDurationMinutes,
+          isGroup: false,
+        );
+        if (!mounted) return;
+        if (!proceed) {
+          setState(() => _saving = false);
+          return;
+        }
+        await _appointmentRepository.checkInPaidAppointmentWithAddOn(
+          appointmentId: widget.appointment.id,
+          addOnServiceItems: widget.appointment.unpaidAddOnServiceItems,
+          appointmentUpdates: const {},
+          transactionValues: transactionValues,
+        );
+        _addOnCollected = true;
+      }
       final startedAt = DateTime.now();
-      await _appointmentRepository.finalizeAndStartAppointment(
+      final result = await _appointmentRepository.finalizeAndStartAppointment(
         appointmentId: widget.appointment.id,
         customerName: _nameController.text.trim(),
         customerPhone: _phoneController.text.trim(),
         guestName: _nameController.text.trim(),
         guestPhone: _phoneController.text.trim(),
         serviceItems: widget.appointment.serviceItems,
-        paymentItems: widget.appointment.unpaidServiceItems,
+        // The add-on was just settled by the call above, so the start must not
+        // charge again — it only needs to begin the service.
+        paymentItems: _addOnCollected
+            ? const <Map<String, dynamic>>[]
+            : widget.appointment.unpaidServiceItems,
         therapistId: therapistIdForFinalStart(
           assignmentSource: _assignmentSource,
           selectedTherapistId: _therapistId,
@@ -8698,24 +9195,28 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
         expectedEndAt: startedAt.add(
           Duration(minutes: widget.appointment.displayDurationMinutes),
         ),
-        transactionValues: {
-          if (counterStaff != null) ...{
-            'counterStaffId': counterStaff['id'],
-            'counterStaffName': counterStaff['name'],
-          },
-          'servicePrice': _chargePriceBreakdown.servicePrice,
-          'sstAmount': _chargePriceBreakdown.sstAmount,
-          'totalAmount': _amountDue,
-          'paymentMethod': _paymentMethod ?? 'cash',
-          'receiptNumber': _receiptNumber,
-        },
+        transactionValues: _addOnCollected
+            ? _startOnlyTransactionValues(counterStaff)
+            : transactionValues,
       );
 
       if (!mounted) return;
+      if (!result.success) {
+        setState(() {
+          _saving = false;
+          _therapistFeedback = result;
+          _waitingForTherapist = false;
+        });
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Payment confirmed and service started'),
-          backgroundColor: Color(0xFF1B6B72),
+        SnackBar(
+          content: Text(
+            _addOnCollected
+                ? 'Add-ons paid, customer checked in and service started'
+                : 'Payment confirmed and service started',
+          ),
+          backgroundColor: const Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -8724,16 +9225,98 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
       debugPrint('finalize_and_start_appointment failed: $e\n$stackTrace');
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Unable to confirm booking: ${friendlyErrorMessage(e)}',
-          ),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      // Keep the drawer open and explain the clash rather than surfacing a raw
+      // trigger message. A late arrival that auto-extends past another booking
+      // is the common case here.
+      await _handleLateStartConflict(e);
     }
+  }
+
+  /// Zero-value transaction inputs for the start half of a combined
+  /// pay-and-start. The RPC only records a transaction when both a total and
+  /// payment items are supplied, so this starts the service without writing a
+  /// second, duplicate charge.
+  Map<String, dynamic> _startOnlyTransactionValues(
+    Map<String, dynamic>? counterStaff,
+  ) => <String, dynamic>{
+    if (counterStaff != null) ...{
+      'counterStaffId': counterStaff['id'],
+      'counterStaffName': counterStaff['name'],
+    },
+    'servicePrice': 0,
+    'sstAmount': 0,
+    'totalAmount': 0,
+    'paymentMethod': _paymentMethod ?? 'cash',
+    'receiptNumber': _receiptNumber,
+  };
+
+  /// Shows the conflict dialog and performs whatever the counter chose. The
+  /// sheet stays open in every branch so nothing is silently lost.
+  Future<void> _handleLateStartConflict(Object error) async {
+    final action = await showDialog<_LateStartAction>(
+      context: context,
+      builder: (_) => _LateStartConflictDialog(
+        kind: lateStartConflictKind(error),
+        therapistLabel: _therapistRecapLabel,
+        roomLabel: _roomRecapLabel,
+        attemptedWindow: _attemptedStartWindowLabel,
+        canSwitchTherapist: !widget.appointment.isCompleted,
+      ),
+    );
+    if (!mounted) return;
+    switch (action) {
+      case _LateStartAction.switchTherapist:
+        await _chooseAnotherTherapist();
+      case _LateStartAction.retry:
+        await _confirmCheckout();
+      case _LateStartAction.dismiss:
+      case null:
+        break;
+    }
+  }
+
+  /// now -> now + full service duration: the window the refused start would
+  /// have occupied.
+  String get _attemptedStartWindowLabel {
+    final start = DateTime.now();
+    final end = start.add(
+      Duration(minutes: widget.appointment.displayDurationMinutes),
+    );
+    final format = DateFormat('h:mm a');
+    return '${format.format(start)} - ${format.format(end)}';
+  }
+
+  Future<void> _chooseAnotherTherapist() async {
+    final pick = await _showFinalisationTherapistPicker(
+      context,
+      durationMinutes: widget.appointment.displayDurationMinutes,
+      selectedTherapistId: _therapistId,
+      initialAssignmentSource: _assignmentSource,
+      initialRequestedGender: _requestedGender,
+    );
+    if (!mounted || pick == null) return;
+    setState(() {
+      _therapistId = pick.therapistId;
+      _therapistName = pick.therapistName;
+      // An explicit replacement is a manual decision, even if the picker was
+      // initially filtered using the appointment's old preference.
+      _assignmentSource = 'manual_override';
+      _requestedGender = null;
+      _therapistFeedback = null;
+      _waitingForTherapist = false;
+    });
+  }
+
+  void _useSuggestedTherapist() {
+    final feedback = _therapistFeedback;
+    final id = feedback?.suggestedTherapistId;
+    if (id == null) return;
+    setState(() {
+      _therapistId = id;
+      _therapistName = feedback?.suggestedTherapistName ?? 'Next therapist';
+      _therapistFeedback = null;
+      _waitingForTherapist = false;
+    });
   }
 
   @override
@@ -8760,93 +9343,34 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Check In & Start Service',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w900,
-                                color: Color(0xFF111827),
-                              ),
-                            ),
-                            const SizedBox(height: 3),
-                            Text(
-                              _amountDue > 0.005
-                                  ? '#$_receiptNumber'
-                                  : 'No payment due',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _saving
-                            ? null
-                            : () => Navigator.pop(context),
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
+                  _AppointmentPaymentHeader(
+                    receiptLabel: _amountDue > 0.005
+                        ? '#$_receiptNumber'
+                        : 'No payment due',
+                    onBack: _saving
+                        ? null
+                        : () => Navigator.pop(
+                            context,
+                            _CheckInSheetResult.editServices,
+                          ),
                   ),
                   const SizedBox(height: 18),
-                  const _FinalisationSectionTitle(
-                    icon: Icons.person_outline_rounded,
-                    label: 'Customer details',
+                  CheckoutDateHeader(
+                    label: DateFormat(
+                      'EEE, d MMM yyyy',
+                    ).format(widget.appointment.date),
                   ),
-                  const SizedBox(height: 10),
-                  _EditField(
-                    label: 'Name',
-                    controller: _nameController,
-                  ),
-                  const SizedBox(height: 12),
-                  _EditField(
-                    label: 'Phone',
-                    controller: _phoneController,
-                    keyboardType: TextInputType.phone,
-                  ),
-                  const SizedBox(height: 16),
                   _FinalisationGuestCard(
                     index: 0,
                     appointment: widget.appointment,
                     guestName: _nameController.text,
                     therapistLabel: _therapistRecapLabel,
                     roomLabel: _roomRecapLabel,
+                    // The card header already shows the therapist and room,
+                    // and checkout is not where either is changed, so the
+                    // locked-therapist and duration blocks are not repeated.
                     controls: [
-                      const Align(
-                        alignment: Alignment.centerLeft,
-                        child: _FinalisationSectionTitle(
-                          icon: Icons.person_pin_circle_outlined,
-                          label: 'Therapist',
-                        ),
-                      ),
-                      const SizedBox(height: 10),
-                      TherapistQueuePicker(
-                        outletId: OutletContext.activeOutletId.value,
-                        date: widget.appointment.dateKey,
-                        startTime: DateFormat(
-                          'HH:mm:ss',
-                        ).format(DateTime.now()),
-                        durationMinutes:
-                            widget.appointment.displayDurationMinutes,
-                        selectedTherapistId:
-                            _hasFixedTherapist ? _therapistId : null,
-                        initialRequestedGender: _requestedGender,
-                        initialAssignmentSource: _assignmentSource,
-                        followLiveClock: true,
-                        compactAssignment: true,
-                        onPreferenceChanged: _selectTherapistPreference,
-                        onSelected: _selectTherapist,
-                      ),
                       if (widget.appointment.usesSpecificRoom) ...[
-                        const SizedBox(height: 18),
                         const _FinalisationSectionTitle(
                           icon: Icons.meeting_room_outlined,
                           label: 'Exact room',
@@ -8861,67 +9385,30 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        if (_loadingRoomUnits)
-                          const Center(
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        else
-                          Wrap(
-                            spacing: 8,
-                            runSpacing: 8,
-                            children: [
-                              ChoiceChip(
-                                label: const Text('Auto assign'),
-                                selected: _roomUnitId == null,
-                                selectedColor: const Color(0xFFDDF7EE),
-                                backgroundColor: const Color(0xFFEAF8F5),
-                                side: const BorderSide(
-                                  color: Color(0xFF99D5C9),
-                                ),
-                                labelStyle: const TextStyle(
-                                  color: Color(0xFF0F766E),
-                                  fontWeight: FontWeight.w800,
-                                ),
-                                onSelected: _saving
-                                    ? null
-                                    : (_) =>
-                                          setState(() => _roomUnitId = null),
-                              ),
-                              for (final unit in _roomUnits)
-                                _FinalisationRoomUnitChip(
-                                  unit: unit,
-                                  selected: _roomUnitId == unit.id,
-                                  ownedByAppointment:
-                                      widget.appointment.roomUnitId == unit.id,
-                                  enabled: !_saving,
-                                  onSelected: () =>
-                                      setState(() => _roomUnitId = unit.id),
-                                ),
-                            ],
-                          ),
+                        _LockedResourceCard(
+                          icon: Icons.meeting_room_outlined,
+                          label: _roomRecapLabel,
+                          helper:
+                              'This exact numbered room is already locked for the full service and cleanup window.',
+                        ),
                       ],
-                      const SizedBox(height: 16),
-                      _FinalisationTimingCard(
-                        durationMinutes:
-                            widget.appointment.displayDurationMinutes,
-                        expectedEndAt: _expectedEndAt,
-                      ),
                     ],
                   ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _saving
-                          ? null
-                          : () => Navigator.pop(
-                              context,
-                              _CheckInSheetResult.editServices,
-                            ),
-                      icon: const Icon(Icons.add_rounded),
-                      label: const Text('Add Services'),
+                  if (_therapistFeedback != null) ...[
+                    const SizedBox(height: 12),
+                    _TherapistStartConflictCard(
+                      feedback: _therapistFeedback!,
+                      waiting: _waitingForTherapist,
+                      canUseSuggestion:
+                          (_assignmentSource == 'queue' ||
+                              _assignmentSource == 'gender_preference') &&
+                          _therapistFeedback?.suggestedTherapistId != null,
+                      onWait: () =>
+                          setState(() => _waitingForTherapist = true),
+                      onChooseAnother: _chooseAnotherTherapist,
+                      onUseSuggestion: _useSuggestedTherapist,
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 16),
                   _CheckoutPriceCard(
                     servicePrice: _hasPriorPayment
@@ -8941,7 +9428,7 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                   if (_amountDue > 0.005) ...[
                     const SizedBox(height: 18),
                     const Text(
-                      'Payment Method',
+                      'Select Payment Method',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w900,
@@ -8949,61 +9436,10 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                       ),
                     ),
                     const SizedBox(height: 12),
-                    LayoutBuilder(
-                      builder: (context, constraints) {
-                        final compact = constraints.maxWidth < 460;
-                        final width = compact
-                            ? constraints.maxWidth
-                            : (constraints.maxWidth - 36) / 4;
-                        return Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
-                          children: [
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.payments_outlined,
-                                label: 'Cash',
-                                isSelected: _paymentMethod == 'cash',
-                                onTap: () =>
-                                    setState(() => _paymentMethod = 'cash'),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.qr_code_2_outlined,
-                                label: 'QR Code',
-                                isSelected: _paymentMethod == 'qr_code',
-                                onTap: () =>
-                                    setState(() => _paymentMethod = 'qr_code'),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.credit_card_outlined,
-                                label: 'Credit Card',
-                                isSelected: _paymentMethod == 'credit_card',
-                                onTap: () => setState(
-                                  () => _paymentMethod = 'credit_card',
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.credit_card,
-                                label: 'Debit Card',
-                                isSelected: _paymentMethod == 'debit_card',
-                                onTap: () => setState(
-                                  () => _paymentMethod = 'debit_card',
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      },
+                    CheckoutPaymentMethodGrid(
+                      selected: _paymentMethod,
+                      onSelected: (method) =>
+                          setState(() => _paymentMethod = method),
                     ),
                   ],
                   const SizedBox(height: 22),
@@ -9023,7 +9459,11 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                             )
                           : const Icon(Icons.check, size: 18),
                       label: Text(
-                        'Confirm Payment & Start Service',
+                        // Same wording as the walk-in checkout: one action that
+                        // settles whatever is due and starts the service.
+                        _amountDue > 0.005
+                            ? 'Complete Payment and Start Service'
+                            : 'Start Service',
                       ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
@@ -9035,6 +9475,8 @@ class _AppointmentCheckoutSheetState extends State<_AppointmentCheckoutSheet> {
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  CheckoutConfirmHint(canConfirm: _canConfirm),
                 ],
               ),
             ),
@@ -9069,7 +9511,10 @@ class _AppointmentAddOnPaymentSheetState
     0,
     (total, item) => total + _readDouble(item['price']),
   );
-  PriceBreakdown get _breakdown => _businessSettings.priceBreakdown(_subtotal);
+  PriceBreakdown get _breakdown => _businessSettings.priceBreakdown(
+    _subtotal,
+    origin: PaymentOrigin.appointmentAddon,
+  );
 
   @override
   void initState() {
@@ -9178,7 +9623,7 @@ class _AppointmentAddOnPaymentSheetState
                     children: [
                       const Expanded(
                         child: Text(
-                          'Collect Add-on Payment',
+                          'Checkout',
                           style: TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.w900,
@@ -9186,6 +9631,8 @@ class _AppointmentAddOnPaymentSheetState
                           ),
                         ),
                       ),
+                      const CheckoutStepPill(),
+                      const SizedBox(width: 4),
                       IconButton(
                         onPressed: _saving
                             ? null
@@ -9224,7 +9671,7 @@ class _AppointmentAddOnPaymentSheetState
                     ),
                   ),
                   const SizedBox(height: 12),
-                  _CheckoutPaymentMethodGrid(
+                  CheckoutPaymentMethodGrid(
                     selected: _paymentMethod,
                     onSelected: (method) =>
                         setState(() => _paymentMethod = method),
@@ -9289,9 +9736,10 @@ class _AppointmentGroupCheckoutSheetState
   final Map<String, String?> _requestedGenders = {};
   final Map<String, String?> _roomUnitIds = {};
   final Map<String, List<RoomUnitAvailability>> _roomUnits = {};
-  final Set<String> _loadingRoomUnitIds = {};
   late final String _receiptNumber;
   String? _paymentMethod;
+  PaymentResult? _therapistFeedback;
+  bool _waitingForTherapist = false;
   bool _saving = false;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
 
@@ -9299,12 +9747,24 @@ class _AppointmentGroupCheckoutSheetState
       _businessSettings.priceBreakdown(widget.group.price);
 
   bool get _hasPriorPayment => widget.group.hasPayment;
+  bool get _isManualCheckIn =>
+      _hasPriorPayment &&
+      widget.group.appointments.any(
+        (appointment) => appointment.checkedInAt == null,
+      );
+
+  /// Set once the add-on charge and check-in have been written, so a Retry
+  /// after a start clash never charges the group twice.
+  bool _addOnCollected = false;
   double get _addOnSubtotal => widget.group.unpaidAddOnServiceItems.fold(
     0,
     (total, item) => total + _readDouble(item['price']),
   );
   PriceBreakdown get _chargePriceBreakdown => _businessSettings.priceBreakdown(
     _hasPriorPayment ? _addOnSubtotal : widget.group.price,
+    origin: _hasPriorPayment
+        ? PaymentOrigin.appointmentAddon
+        : PaymentOrigin.counter,
   );
   double get _amountDue => _chargePriceBreakdown.totalAmount;
 
@@ -9313,9 +9773,12 @@ class _AppointmentGroupCheckoutSheetState
     if (_amountDue > 0.005 && _paymentMethod == null) return false;
     return widget.group.appointments.every((appointment) {
       if (appointment.roomId.isEmpty) return false;
-      final source = _assignmentSources[appointment.id] ?? 'queue';
-      return !isFixedTherapistAssignmentSource(source) ||
-          _therapistIds[appointment.id] != null;
+      if (_therapistIds[appointment.id] == null) return false;
+      if (appointment.usesSpecificRoom &&
+          _roomUnitIds[appointment.id] == null) {
+        return false;
+      }
+      return true;
     });
   }
 
@@ -9332,11 +9795,8 @@ class _AppointmentGroupCheckoutSheetState
               : widget.group.customerPhone,
         )..addListener(_refresh);
     for (final appointment in widget.group.appointments) {
-      final hasFixedTherapist = isFixedTherapistAssignmentSource(
-        appointment.assignmentSource,
-      );
       _therapistIds[appointment.id] =
-          hasFixedTherapist && appointment.therapistId.trim().isNotEmpty
+          appointment.therapistId.trim().isNotEmpty
           ? appointment.therapistId
           : null;
       _therapistNames[appointment.id] =
@@ -9375,7 +9835,6 @@ class _AppointmentGroupCheckoutSheetState
   }
 
   Future<void> _loadRoomUnits(_ScheduleAppointment appointment) async {
-    setState(() => _loadingRoomUnitIds.add(appointment.id));
     try {
       final now = DateTime.now();
       final units = await CspService.getRoomUnitAvailability(
@@ -9390,55 +9849,16 @@ class _AppointmentGroupCheckoutSheetState
         'group finalisation room availability failed: $error\n$stackTrace',
       );
       if (mounted) setState(() => _roomUnits[appointment.id] = const []);
-    } finally {
-      if (mounted) setState(() => _loadingRoomUnitIds.remove(appointment.id));
     }
-  }
-
-  void _selectTherapist(
-    String appointmentId,
-    TherapistAssignmentPick pick,
-  ) {
-    final fixed = isFixedTherapistAssignmentSource(pick.assignmentSource);
-    setState(() {
-      _therapistIds[appointmentId] =
-          fixed ? pick.therapistId : null;
-      _therapistNames[appointmentId] =
-          fixed ? pick.therapistName : null;
-      _assignmentSources[appointmentId] = pick.assignmentSource;
-      _requestedGenders[appointmentId] = pick.requestedGender;
-    });
-  }
-
-  void _selectTherapistPreference(
-    String appointmentId,
-    String source,
-    String? requestedGender,
-  ) {
-    setState(() {
-      _therapistIds[appointmentId] = null;
-      _therapistNames[appointmentId] = null;
-      _assignmentSources[appointmentId] = source;
-      _requestedGenders[appointmentId] = requestedGender;
-    });
   }
 
   String _therapistLabelFor(_ScheduleAppointment appointment) {
     final name = _therapistNames[appointment.id];
-    final fixed = isFixedTherapistAssignmentSource(
-      _assignmentSources[appointment.id] ?? 'queue',
-    );
-    if (fixed &&
-        _therapistIds[appointment.id] != null &&
+    if (_therapistIds[appointment.id] != null &&
         (name?.trim().isNotEmpty ?? false)) {
       return name!;
     }
-    final gender = _requestedGenders[appointment.id];
-    if (_assignmentSources[appointment.id] == 'gender_preference' &&
-        gender != null) {
-      return 'Auto assign at start · $gender';
-    }
-    return 'Auto assign at start';
+    return 'Therapist not locked';
   }
 
   String _roomLabelFor(_ScheduleAppointment target) {
@@ -9449,7 +9869,7 @@ class _AppointmentGroupCheckoutSheetState
       final match = units.where((unit) => unit.id == selectedId);
       return match.isEmpty ? target.roomUnitName : match.first.name;
     }
-    return 'Auto assigned at service start';
+    return 'Exact room not locked';
   }
 
   Future<void> _loadBusinessSettings() async {
@@ -9470,8 +9890,50 @@ class _AppointmentGroupCheckoutSheetState
     try {
       final counterStaff = await _commissionRepository
           .getAvailableCounterStaff();
+      final transactionValues = <String, dynamic>{
+        if (counterStaff != null) ...{
+          'counterStaffId': counterStaff['id'],
+          'counterStaffName': counterStaff['name'],
+        },
+        'servicePrice': _chargePriceBreakdown.servicePrice,
+        'sstAmount': _chargePriceBreakdown.sstAmount,
+        'totalAmount': _amountDue,
+        'paymentMethod': _paymentMethod ?? 'cash',
+        'receiptNumber': _receiptNumber,
+      };
+      // One action: the group is here paying for add-ons, so collect, check in
+      // and start together rather than across three separate confirmations.
+      if (_isManualCheckIn && !_addOnCollected) {
+        if (!mounted) return;
+        final proceed = await _confirmEarlyStart(
+          context: context,
+          scheduledStart: widget.group.primary._serviceStartDateTime,
+          startedAt: DateTime.now(),
+          durationMinutes: widget.group.primary.displayDurationMinutes,
+          isGroup: true,
+        );
+        if (!mounted) return;
+        if (!proceed) {
+          setState(() => _saving = false);
+          return;
+        }
+        await _appointmentRepository.checkInPaidAppointmentGroupWithAddOn(
+          appointmentGroupId: widget.group.appointmentGroupId,
+          appointmentIds: widget.group.appointments
+              .map((appointment) => appointment.id)
+              .toList(),
+          addOnItemsByAppointment: {
+            for (final appointment in widget.group.appointments)
+              appointment.id: appointment.unpaidAddOnServiceItems,
+          },
+          appointmentUpdatesById: const {},
+          transactionValues: transactionValues,
+        );
+        _addOnCollected = true;
+      }
       final startedAt = DateTime.now();
-      await _appointmentRepository.finalizeAndStartAppointmentGroup(
+      final result = await _appointmentRepository
+          .finalizeAndStartAppointmentGroup(
         appointmentGroupId: widget.group.appointmentGroupId,
         appointmentIds: widget.group.appointments.map((a) => a.id).toList(),
         customerName: _nameController.text.trim(),
@@ -9498,30 +9960,38 @@ class _AppointmentGroupCheckoutSheetState
                   .toIso8601String(),
             },
         },
-        paymentItems: [
-          for (final appointment in widget.group.appointments)
-            for (final item in appointment.unpaidServiceItems)
-              {...item, 'appointmentId': appointment.id},
-        ],
+        // Already settled by the add-on collection above — the start must not
+        // charge a second time.
+        paymentItems: _addOnCollected
+            ? const <Map<String, dynamic>>[]
+            : [
+                for (final appointment in widget.group.appointments)
+                  for (final item in appointment.unpaidServiceItems)
+                    {...item, 'appointmentId': appointment.id},
+              ],
         startedAt: startedAt,
-        transactionValues: {
-          if (counterStaff != null) ...{
-            'counterStaffId': counterStaff['id'],
-            'counterStaffName': counterStaff['name'],
-          },
-          'servicePrice': _chargePriceBreakdown.servicePrice,
-          'sstAmount': _chargePriceBreakdown.sstAmount,
-          'totalAmount': _amountDue,
-          'paymentMethod': _paymentMethod ?? 'cash',
-          'receiptNumber': _receiptNumber,
-        },
+        transactionValues: _addOnCollected
+            ? _startOnlyTransactionValues(counterStaff)
+            : transactionValues,
       );
 
       if (!mounted) return;
+      if (!result.success) {
+        setState(() {
+          _saving = false;
+          _therapistFeedback = result;
+          _waitingForTherapist = false;
+        });
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Group payment confirmed and service started'),
-          backgroundColor: Color(0xFF1B6B72),
+        SnackBar(
+          content: Text(
+            _addOnCollected
+                ? 'Add-ons paid, group checked in and services started'
+                : 'Group payment confirmed and service started',
+          ),
+          backgroundColor: const Color(0xFF1B6B72),
           behavior: SnackBarBehavior.floating,
         ),
       );
@@ -9532,23 +10002,115 @@ class _AppointmentGroupCheckoutSheetState
       );
       if (!mounted) return;
       setState(() => _saving = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            'Unable to confirm group booking: ${friendlyErrorMessage(e)}',
-          ),
-          backgroundColor: const Color(0xFFE53935),
-          behavior: SnackBarBehavior.floating,
+      // Same treatment as a single booking: name the clash, keep the sheet
+      // open, never surface a raw trigger message.
+      final action = await showDialog<_LateStartAction>(
+        context: context,
+        builder: (_) => _LateStartConflictDialog(
+          kind: lateStartConflictKind(e),
+          therapistLabel: _therapistLabelFor(widget.group.primary),
+          roomLabel: _roomLabelFor(widget.group.primary),
+          attemptedWindow: _attemptedStartWindowLabel,
+          // A group start touches several therapists at once, so a single
+          // replacement pick would be ambiguous. Reschedule instead.
+          canSwitchTherapist: false,
         ),
       );
+      if (!mounted) return;
+      if (action == _LateStartAction.retry) await _confirmCheckout();
     }
+  }
+
+  /// Zero-value transaction inputs for the start half of a combined
+  /// pay-and-start: the add-on charge is already recorded, so the start writes
+  /// no second transaction.
+  Map<String, dynamic> _startOnlyTransactionValues(
+    Map<String, dynamic>? counterStaff,
+  ) => <String, dynamic>{
+    if (counterStaff != null) ...{
+      'counterStaffId': counterStaff['id'],
+      'counterStaffName': counterStaff['name'],
+    },
+    'servicePrice': 0,
+    'sstAmount': 0,
+    'totalAmount': 0,
+    'paymentMethod': _paymentMethod ?? 'cash',
+    'receiptNumber': _receiptNumber,
+  };
+
+  _ScheduleAppointment? get _busyAppointment {
+    final id = _therapistFeedback?.busyAppointmentId;
+    if (id == null) return null;
+    for (final appointment in widget.group.appointments) {
+      if (appointment.id == id) return appointment;
+    }
+    return null;
+  }
+
+  Future<void> _chooseAnotherTherapistForBusyPax() async {
+    final appointment = _busyAppointment;
+    if (appointment == null) return;
+    final pick = await _showFinalisationTherapistPicker(
+      context,
+      durationMinutes: appointment.displayDurationMinutes,
+      selectedTherapistId: _therapistIds[appointment.id],
+      initialAssignmentSource:
+          _assignmentSources[appointment.id] ?? 'queue',
+      initialRequestedGender: _requestedGenders[appointment.id],
+      excludedTherapistIds: {
+        for (final entry in _therapistIds.entries)
+          if (entry.key != appointment.id && entry.value != null) entry.value!,
+      },
+    );
+    if (!mounted || pick == null) return;
+    setState(() {
+      _therapistIds[appointment.id] = pick.therapistId;
+      _therapistNames[appointment.id] = pick.therapistName;
+      _assignmentSources[appointment.id] = 'manual_override';
+      _requestedGenders[appointment.id] = null;
+      _therapistFeedback = null;
+      _waitingForTherapist = false;
+    });
+  }
+
+  void _useSuggestedTherapistForBusyPax() {
+    final appointment = _busyAppointment;
+    final feedback = _therapistFeedback;
+    final id = feedback?.suggestedTherapistId;
+    if (appointment == null || id == null) return;
+    if (_therapistIds.entries.any(
+      (entry) => entry.key != appointment.id && entry.value == id,
+    )) {
+      return;
+    }
+    setState(() {
+      _therapistIds[appointment.id] = id;
+      _therapistNames[appointment.id] =
+          feedback?.suggestedTherapistName ?? 'Next therapist';
+      _therapistFeedback = null;
+      _waitingForTherapist = false;
+    });
+  }
+
+  /// now -> now + longest pax duration: the window the refused group start
+  /// would have occupied.
+  String get _attemptedStartWindowLabel {
+    final start = DateTime.now();
+    final longest = widget.group.appointments.fold<int>(
+      0,
+      (best, a) => a.displayDurationMinutes > best
+          ? a.displayDurationMinutes
+          : best,
+    );
+    final end = start.add(Duration(minutes: longest));
+    final format = DateFormat('h:mm a');
+    return '${format.format(start)} - ${format.format(end)}';
   }
 
   Widget _buildPaxFinalisationCard(
     _ScheduleAppointment appointment,
     int index,
   ) {
-    final units = _roomUnits[appointment.id] ?? const [];
     final therapistLabel = _therapistLabelFor(appointment);
     final roomLabel = _roomLabelFor(appointment);
 
@@ -9560,50 +10122,10 @@ class _AppointmentGroupCheckoutSheetState
         guestName: _nameController.text,
         therapistLabel: therapistLabel,
         roomLabel: roomLabel,
+        // Therapist and room are already on the card header, and duration is
+        // not actionable at checkout, so neither is repeated here.
         controls: [
-            const Align(
-              alignment: Alignment.centerLeft,
-              child: _FinalisationSectionTitle(
-                icon: Icons.person_pin_circle_outlined,
-                label: 'Therapist',
-              ),
-            ),
-            const SizedBox(height: 10),
-            TherapistQueuePicker(
-              outletId: OutletContext.activeOutletId.value,
-              date: appointment.dateKey,
-              startTime: DateFormat('HH:mm:ss').format(DateTime.now()),
-              durationMinutes: appointment.displayDurationMinutes,
-              selectedTherapistId: isFixedTherapistAssignmentSource(
-                _assignmentSources[appointment.id] ?? 'queue',
-              )
-                  ? _therapistIds[appointment.id]
-                  : null,
-              initialRequestedGender: _requestedGenders[appointment.id],
-              initialAssignmentSource:
-                  _assignmentSources[appointment.id] ?? 'queue',
-              followLiveClock: true,
-              compactAssignment: true,
-              excludedTherapistIds: {
-                for (final entry in _therapistIds.entries)
-                  if (entry.key != appointment.id &&
-                      entry.value != null &&
-                      isFixedTherapistAssignmentSource(
-                        _assignmentSources[entry.key] ?? 'queue',
-                      ))
-                    entry.value!,
-              },
-              onPreferenceChanged: (source, gender) =>
-                  _selectTherapistPreference(
-                    appointment.id,
-                    source,
-                    gender,
-                  ),
-              onSelected: (pick) =>
-                  _selectTherapist(appointment.id, pick),
-            ),
             if (appointment.usesSpecificRoom) ...[
-              const SizedBox(height: 16),
               Text(
                 '${appointment.roomName} - exact room',
                 style: const TextStyle(
@@ -9613,53 +10135,13 @@ class _AppointmentGroupCheckoutSheetState
                 ),
               ),
               const SizedBox(height: 8),
-              if (_loadingRoomUnitIds.contains(appointment.id))
-                const Center(
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              else
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    ChoiceChip(
-                      label: const Text('Auto assign'),
-                      selected: _roomUnitIds[appointment.id] == null,
-                      selectedColor: const Color(0xFFDDF7EE),
-                      backgroundColor: const Color(0xFFEAF8F5),
-                      side: const BorderSide(color: Color(0xFF99D5C9)),
-                      labelStyle: const TextStyle(
-                        color: Color(0xFF0F766E),
-                        fontWeight: FontWeight.w800,
-                      ),
-                      onSelected: _saving
-                          ? null
-                          : (_) => setState(
-                              () => _roomUnitIds[appointment.id] = null,
-                            ),
-                    ),
-                    for (final unit in units)
-                      _FinalisationRoomUnitChip(
-                        unit: unit,
-                        selected:
-                            _roomUnitIds[appointment.id] == unit.id,
-                        ownedByAppointment:
-                            appointment.roomUnitId == unit.id,
-                        enabled: !_saving,
-                        onSelected: () => setState(
-                          () => _roomUnitIds[appointment.id] = unit.id,
-                        ),
-                      ),
-                  ],
-                ),
-            ],
-            const SizedBox(height: 14),
-            _FinalisationTimingCard(
-              durationMinutes: appointment.displayDurationMinutes,
-              expectedEndAt: DateTime.now().add(
-                Duration(minutes: appointment.displayDurationMinutes),
+              _LockedResourceCard(
+                icon: Icons.meeting_room_outlined,
+                label: roomLabel,
+                helper:
+                    'This exact numbered room is already locked for the full service and cleanup window.',
               ),
-            ),
+            ],
           ],
       ),
     );
@@ -9689,81 +10171,23 @@ class _AppointmentGroupCheckoutSheetState
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text(
-                              'Check In & Start Group',
-                              style: TextStyle(
-                                fontSize: 20,
-                                fontWeight: FontWeight.w900,
-                                color: Color(0xFF111827),
-                              ),
-                            ),
-                            const SizedBox(height: 3),
-                            Text(
-                              _amountDue > 0.005
-                                  ? '#$_receiptNumber'
-                                  : 'No payment due',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                                color: Color(0xFF6B7280),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      IconButton(
-                        onPressed: _saving
-                            ? null
-                            : () => Navigator.pop(context),
-                        icon: const Icon(Icons.close),
-                      ),
-                    ],
+                  _AppointmentPaymentHeader(
+                    receiptLabel: _amountDue > 0.005
+                        ? '#$_receiptNumber'
+                        : 'No payment due',
+                    onBack: _saving
+                        ? null
+                        : () => Navigator.pop(
+                            context,
+                            _CheckInSheetResult.editServices,
+                          ),
                   ),
                   const SizedBox(height: 18),
-                  const _FinalisationSectionTitle(
-                    icon: Icons.person_outline_rounded,
-                    label: 'Primary customer',
+                  CheckoutDateHeader(
+                    label: DateFormat(
+                      'EEE, d MMM yyyy',
+                    ).format(widget.group.primary.date),
                   ),
-                  const SizedBox(height: 6),
-                  const Text(
-                    'Guest details will be applied to every pax in this group.',
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Color(0xFF64748B),
-                    ),
-                  ),
-                  const SizedBox(height: 10),
-                  _EditField(
-                    label: 'Name',
-                    controller: _nameController,
-                  ),
-                  const SizedBox(height: 12),
-                  _EditField(
-                    label: 'Phone',
-                    controller: _phoneController,
-                    keyboardType: TextInputType.phone,
-                  ),
-                  const SizedBox(height: 10),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      onPressed: _saving
-                          ? null
-                          : () => Navigator.pop(
-                              context,
-                              _CheckInSheetResult.editServices,
-                            ),
-                      icon: const Icon(Icons.add_rounded),
-                      label: const Text('Add Services'),
-                    ),
-                  ),
-                  const SizedBox(height: 18),
                   for (
                     var index = 0;
                     index < widget.group.appointments.length;
@@ -9773,6 +10197,25 @@ class _AppointmentGroupCheckoutSheetState
                       widget.group.appointments[index],
                       index,
                     ),
+                  if (_therapistFeedback != null) ...[
+                    const SizedBox(height: 2),
+                    _TherapistStartConflictCard(
+                      feedback: _therapistFeedback!,
+                      waiting: _waitingForTherapist,
+                      canUseSuggestion:
+                          _busyAppointment != null &&
+                          ((_assignmentSources[_busyAppointment!.id] ==
+                                  'queue') ||
+                              (_assignmentSources[_busyAppointment!.id] ==
+                                  'gender_preference')) &&
+                          _therapistFeedback?.suggestedTherapistId != null,
+                      onWait: () =>
+                          setState(() => _waitingForTherapist = true),
+                      onChooseAnother: _chooseAnotherTherapistForBusyPax,
+                      onUseSuggestion: _useSuggestedTherapistForBusyPax,
+                    ),
+                    const SizedBox(height: 10),
+                  ],
                   const SizedBox(height: 16),
                   _CheckoutPriceCard(
                     servicePrice: _hasPriorPayment
@@ -9792,7 +10235,7 @@ class _AppointmentGroupCheckoutSheetState
                   if (_amountDue > 0.005) ...[
                     const SizedBox(height: 18),
                     const Text(
-                      'Payment Method',
+                      'Select Payment Method',
                       style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w900,
@@ -9800,61 +10243,10 @@ class _AppointmentGroupCheckoutSheetState
                       ),
                     ),
                     const SizedBox(height: 12),
-                    LayoutBuilder(
-                      builder: (context, constraints) {
-                        final compact = constraints.maxWidth < 460;
-                        final width = compact
-                            ? constraints.maxWidth
-                            : (constraints.maxWidth - 36) / 4;
-                        return Wrap(
-                          spacing: 12,
-                          runSpacing: 12,
-                          children: [
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.payments_outlined,
-                                label: 'Cash',
-                                isSelected: _paymentMethod == 'cash',
-                                onTap: () =>
-                                    setState(() => _paymentMethod = 'cash'),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.qr_code_2_outlined,
-                                label: 'QR Code',
-                                isSelected: _paymentMethod == 'qr_code',
-                                onTap: () =>
-                                    setState(() => _paymentMethod = 'qr_code'),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.credit_card_outlined,
-                                label: 'Credit Card',
-                                isSelected: _paymentMethod == 'credit_card',
-                                onTap: () => setState(
-                                  () => _paymentMethod = 'credit_card',
-                                ),
-                              ),
-                            ),
-                            SizedBox(
-                              width: width,
-                              child: _CheckoutPaymentMethodCard(
-                                icon: Icons.credit_card,
-                                label: 'Debit Card',
-                                isSelected: _paymentMethod == 'debit_card',
-                                onTap: () => setState(
-                                  () => _paymentMethod = 'debit_card',
-                                ),
-                              ),
-                            ),
-                          ],
-                        );
-                      },
+                    CheckoutPaymentMethodGrid(
+                      selected: _paymentMethod,
+                      onSelected: (method) =>
+                          setState(() => _paymentMethod = method),
                     ),
                   ],
                   const SizedBox(height: 22),
@@ -9874,7 +10266,11 @@ class _AppointmentGroupCheckoutSheetState
                             )
                           : const Icon(Icons.check, size: 18),
                       label: Text(
-                        'Confirm Payment & Start Service',
+                        // Same wording as the walk-in checkout: one action that
+                        // settles whatever is due and starts the services.
+                        _amountDue > 0.005
+                            ? 'Complete Payment and Start Services'
+                            : 'Start Services',
                       ),
                       style: FilledButton.styleFrom(
                         backgroundColor: const Color(0xFF1B6B72),
@@ -9886,6 +10282,8 @@ class _AppointmentGroupCheckoutSheetState
                       ),
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  CheckoutConfirmHint(canConfirm: _canConfirm),
                 ],
               ),
             ),
@@ -9924,61 +10322,6 @@ class _FinalisationSectionTitle extends StatelessWidget {
   }
 }
 
-class _FinalisationTimingCard extends StatelessWidget {
-  const _FinalisationTimingCard({
-    required this.durationMinutes,
-    required this.expectedEndAt,
-  });
-
-  final int durationMinutes;
-  final DateTime expectedEndAt;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: double.infinity,
-      padding: const EdgeInsets.all(12),
-      decoration: BoxDecoration(
-        color: const Color(0xFFEFF8F7),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: const Color(0xFFB8DDD8)),
-      ),
-      child: Row(
-        children: [
-          const Icon(
-            Icons.schedule_outlined,
-            color: Color(0xFF1B6B72),
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  '$durationMinutes minutes',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w900,
-                    color: Color(0xFF1A1A2E),
-                  ),
-                ),
-                const SizedBox(height: 3),
-                Text(
-                  'Expected end ${DateFormat('h:mm a').format(expectedEndAt)}',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    color: Color(0xFF64748B),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
 class _FinalisationGuestCard extends StatelessWidget {
   const _FinalisationGuestCard({
     required this.index,
@@ -10012,6 +10355,7 @@ class _FinalisationGuestCard extends StatelessWidget {
         data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
         child: ExpansionTile(
           key: PageStorageKey('finalisation-guest-${appointment.id}'),
+          initiallyExpanded: true,
           maintainState: true,
           tilePadding: const EdgeInsets.all(12),
           childrenPadding: EdgeInsets.zero,
@@ -10057,6 +10401,12 @@ class _FinalisationGuestCard extends StatelessWidget {
                     icon: Icons.meeting_room_outlined,
                     text: roomLabel,
                   ),
+                // Plain start-end window. The date is shown once above the
+                // cards, so it is not repeated per guest.
+                _PaxMeta(
+                  icon: Icons.schedule_outlined,
+                  text: appointment.timeRange,
+                ),
               ],
             ),
           ),
@@ -10307,65 +10657,58 @@ class _FinalAssignmentRow extends StatelessWidget {
   }
 }
 
-class _FinalisationRoomUnitChip extends StatelessWidget {
-  const _FinalisationRoomUnitChip({
-    required this.unit,
-    required this.selected,
-    required this.ownedByAppointment,
-    required this.enabled,
-    required this.onSelected,
+class _LockedResourceCard extends StatelessWidget {
+  const _LockedResourceCard({
+    required this.icon,
+    required this.label,
+    required this.helper,
   });
 
-  final RoomUnitAvailability unit;
-  final bool selected;
-  final bool ownedByAppointment;
-  final bool enabled;
-  final VoidCallback onSelected;
+  final IconData icon;
+  final String label;
+  final String helper;
 
   @override
   Widget build(BuildContext context) {
-    final available = unit.availableForRequestedTime || ownedByAppointment;
-    final canSelect = enabled && available;
-    final busyUntil = unit.availableAt?.trim();
-    final label = available
-        ? unit.name
-        : busyUntil == null || busyUntil.isEmpty
-        ? '${unit.name} · Busy'
-        : '${unit.name} · Until ${_clockLabel(busyUntil)}';
-    final foreground = available
-        ? const Color(0xFF0F766E)
-        : const Color(0xFF94A3B8);
-    return ChoiceChip(
-      label: Text(label),
-      avatar: selected
-          ? const Icon(
-              Icons.check_circle_rounded,
-              size: 17,
-              color: Color(0xFF0F766E),
-            )
-          : null,
-      selected: selected,
-      showCheckmark: false,
-      selectedColor: const Color(0xFFDDF7EE),
-      backgroundColor: available
-          ? const Color(0xFFEAF8F5)
-          : const Color(0xFFF1F5F9),
-      side: BorderSide(
-        color: selected
-            ? const Color(0xFF0F766E)
-            : available
-            ? const Color(0xFF99D5C9)
-            : const Color(0xFFCBD5E1),
-        width: selected ? 1.6 : 1,
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF0F9F7),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFB8DDD8)),
       ),
-      labelStyle: TextStyle(
-        color: foreground,
-        fontSize: 12,
-        fontWeight: selected
-            ? FontWeight.w900
-            : FontWeight.w700,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 20, color: const Color(0xFF0F766E)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w900,
+                    color: Color(0xFF115E59),
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  helper,
+                  style: const TextStyle(
+                    fontSize: 11.5,
+                    height: 1.35,
+                    color: Color(0xFF475569),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
-      onSelected: canSelect ? (_) => onSelected() : null,
     );
   }
 }
@@ -10465,104 +10808,6 @@ class _CheckoutPriceRow extends StatelessWidget {
           style: const TextStyle(fontSize: 13, color: Color(0xFF1A1A2E)),
         ),
       ],
-    );
-  }
-}
-
-class _CheckoutPaymentMethodGrid extends StatelessWidget {
-  final String? selected;
-  final ValueChanged<String> onSelected;
-
-  const _CheckoutPaymentMethodGrid({
-    required this.selected,
-    required this.onSelected,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    const methods = [
-      ('cash', Icons.payments_outlined, 'Cash'),
-      ('qr_code', Icons.qr_code_2_outlined, 'QR Code'),
-      ('credit_card', Icons.credit_card_outlined, 'Credit Card'),
-      ('debit_card', Icons.credit_card, 'Debit Card'),
-    ];
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 460;
-        final width = compact
-            ? (constraints.maxWidth - 12) / 2
-            : (constraints.maxWidth - 36) / 4;
-        return Wrap(
-          spacing: 12,
-          runSpacing: 12,
-          children: [
-            for (final method in methods)
-              SizedBox(
-                width: width,
-                child: _CheckoutPaymentMethodCard(
-                  icon: method.$2,
-                  label: method.$3,
-                  isSelected: selected == method.$1,
-                  onTap: () => onSelected(method.$1),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _CheckoutPaymentMethodCard extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
-
-  const _CheckoutPaymentMethodCard({
-    required this.icon,
-    required this.label,
-    required this.isSelected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 150),
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFF1B6B72) : Colors.white,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected
-                ? const Color(0xFF1B6B72)
-                : const Color(0xFFEEEEEE),
-            width: isSelected ? 2 : 1,
-          ),
-        ),
-        child: Column(
-          children: [
-            Icon(
-              icon,
-              size: 24,
-              color: isSelected ? Colors.white : const Color(0xFF6B6B6B),
-            ),
-            const SizedBox(height: 7),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w800,
-                color: isSelected ? Colors.white : const Color(0xFF1A1A2E),
-              ),
-            ),
-          ],
-        ),
-      ),
     );
   }
 }

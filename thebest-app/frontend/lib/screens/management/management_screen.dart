@@ -151,7 +151,9 @@ class ManagementScreen extends StatelessWidget {
                     icon: Icons.content_cut,
                     color: _teal,
                     title: 'Services',
-                    subtitle: 'Manage service offerings and pricing',
+                    subtitle: userRole.trim().toLowerCase() == 'admin'
+                        ? 'Manage service offerings and pricing'
+                        : 'View service offerings and pricing',
                     onTap: () => Navigator.push(
                       context,
                       MaterialPageRoute(

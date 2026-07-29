@@ -105,6 +105,7 @@ class _TherapistStatus {
   final String name;
   final String imageUrl;
   final String status;
+  final String reservationStatus;
   final bool isFree;
   final int doneCount;
   final int queuePosition;
@@ -119,6 +120,7 @@ class _TherapistStatus {
     required this.name,
     this.imageUrl = '',
     required this.status,
+    this.reservationStatus = '',
     required this.isFree,
     required this.doneCount,
     this.queuePosition = 0,
@@ -127,6 +129,7 @@ class _TherapistStatus {
 
   _TherapistStatus copyWith({
     String? status,
+    String? reservationStatus,
     bool? isFree,
     int? doneCount,
     int? queuePosition,
@@ -136,6 +139,7 @@ class _TherapistStatus {
     name: name,
     imageUrl: imageUrl,
     status: status ?? this.status,
+    reservationStatus: reservationStatus ?? this.reservationStatus,
     isFree: isFree ?? this.isFree,
     doneCount: doneCount ?? this.doneCount,
     queuePosition: queuePosition ?? this.queuePosition,
@@ -295,7 +299,17 @@ String _queueReservationLabel(TherapistQueueEntry entry) {
   if (start != null && start.isNotEmpty && end != null && end.isNotEmpty) {
     return 'Reserved ${_timeLabel(start)}–${_timeLabel(end)}';
   }
-  return 'Reserved until ${_timeLabel(end ?? entry.freeAt ?? '')}';
+  return 'Reserved';
+}
+
+bool _reservationApproaches(
+  String? startTime,
+  DateTime now, {
+  int thresholdMinutes = 60,
+}) {
+  if (startTime == null || startTime.isEmpty) return false;
+  final delta = _timeToMinutes(startTime) - (now.hour * 60 + now.minute);
+  return delta >= 0 && delta <= thresholdMinutes;
 }
 
 bool _isCancelled(Map<String, dynamic> data) {
@@ -868,8 +882,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
             ? endTime.isEmpty
                   ? 'Busy now'
                   : 'Busy until ${_timeLabel(endTime)}'
-            : nextReservation != null
-            ? 'Reserved $reservationRange'
             : isFree
             ? 'Free now'
             : busyUntil.isEmpty
@@ -884,6 +896,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _asString(data['imageUrl']),
           ),
           status: status,
+          reservationStatus:
+              nextReservation != null &&
+                  _reservationApproaches(
+                    _asString(nextReservation['startTime']),
+                    now,
+                  )
+              ? 'Reserved $reservationRange'
+              : '',
           isFree: isFree,
           doneCount: doneCount,
         );
@@ -1032,16 +1052,15 @@ class _DashboardScreenState extends State<DashboardScreen> {
         ordered.add(
           status.copyWith(
             status: entry.isFreeNow
-                ? status.status.startsWith('Reserved ')
-                      ? status.status
-                      : 'Free now'
-                : entry.isReserved || entry.isTentativeHold
-                ? status.status.startsWith('Reserved ')
-                      ? status.status
-                      : _queueReservationLabel(entry)
+                ? 'Free now'
                 : entry.freeAt == null || entry.freeAt!.isEmpty
                 ? 'Busy now'
                 : 'Busy until ${_timeLabel(entry.freeAt!)}',
+            reservationStatus:
+                (entry.isReserved || entry.isTentativeHold) &&
+                    _reservationApproaches(entry.reservationStartAt, now)
+                ? _queueReservationLabel(entry)
+                : status.reservationStatus,
             isFree: entry.isFreeNow,
             isNext: entry.therapistId == nextId,
           ),
@@ -2022,6 +2041,10 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                       color: context.appText,
                     ),
                   ),
+                  if (!isLoading) ...[
+                    const SizedBox(width: 14),
+                    _LiveQueueHeaderMetrics(therapists: therapists),
+                  ],
                   const Spacer(),
                   TextButton.icon(
                     onPressed: onManageTodayQueue,
@@ -2048,8 +2071,6 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              _LiveTherapistQueueSummary(therapists: therapists),
               const SizedBox(height: 12),
               if (isLoading)
                 const Text(
@@ -5709,6 +5730,54 @@ class _AppointmentRow extends StatelessWidget {
   }
 }
 
+/// Compact inline availability counts for the tablet Staff Availability header.
+/// The phone keeps the fuller one-line strip below its header where space is
+/// more constrained.
+class _LiveQueueHeaderMetrics extends StatelessWidget {
+  const _LiveQueueHeaderMetrics({required this.therapists});
+
+  final List<_TherapistStatus> therapists;
+
+  @override
+  Widget build(BuildContext context) {
+    final total = therapists.length;
+    final free = therapists.where((therapist) => therapist.isFree).length;
+    final busy = total - free;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const _LiveQueueDot(),
+          const SizedBox(width: 7),
+          _QueueMetric(
+            label: 'Free',
+            value: free,
+            color: const Color(0xFF16A34A),
+          ),
+          const _QueueMetricDivider(),
+          _QueueMetric(
+            label: 'Busy',
+            value: busy,
+            color: const Color(0xFFD97706),
+          ),
+          const _QueueMetricDivider(),
+          _QueueMetric(
+            label: 'Total',
+            value: total,
+            color: context.appMuted,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _LiveTherapistQueueSummary extends StatelessWidget {
   const _LiveTherapistQueueSummary({
     required this.therapists,
@@ -5720,9 +5789,12 @@ class _LiveTherapistQueueSummary extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final total = therapists.length;
     final free = therapists.where((therapist) => therapist.isFree).length;
-    final busy = therapists.length - free;
+    final busy = total - free;
 
+    // Deliberately one line tall: this is a glanceable status strip above the
+    // therapist cards, not a stat panel competing with them.
     return Container(
       width: double.infinity,
       padding: EdgeInsets.symmetric(
@@ -5730,42 +5802,41 @@ class _LiveTherapistQueueSummary extends StatelessWidget {
         vertical: compact ? 7 : 8,
       ),
       decoration: BoxDecoration(
-        color: context.appSurface,
-        borderRadius: BorderRadius.circular(12),
+        color: const Color(0xFFF8FAFC),
+        borderRadius: BorderRadius.circular(10),
         border: Border.all(color: context.appBorder),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.025),
-            blurRadius: 6,
-            offset: const Offset(0, 2),
-          ),
-        ],
       ),
-      child: Wrap(
-        spacing: compact ? 8 : 10,
-        runSpacing: 6,
-        crossAxisAlignment: WrapCrossAlignment.center,
+      child: Row(
         children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const _LiveQueueDot(),
-              const SizedBox(width: 7),
-              Text(
-                'Live therapist queue',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  fontWeight: FontWeight.w800,
-                  color: context.appText,
-                ),
+          const _LiveQueueDot(),
+          const SizedBox(width: 7),
+          Flexible(
+            child: Text(
+              'Live team availability',
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
               ),
-            ],
+            ),
           ),
-          _QueueCount(label: 'Free', value: free, color: const Color(0xFF16A34A)),
-          _QueueCount(label: 'Busy', value: busy, color: const Color(0xFFD97706)),
-          _QueueCount(
-            label: 'Total',
-            value: therapists.length,
+          const Spacer(),
+          _QueueMetric(
+            label: 'Free',
+            value: free,
+            color: const Color(0xFF16A34A),
+          ),
+          _QueueMetricDivider(),
+          _QueueMetric(
+            label: 'Busy',
+            value: busy,
+            color: const Color(0xFFD97706),
+          ),
+          _QueueMetricDivider(),
+          _QueueMetric(
+            label: 'On shift',
+            value: total,
             color: context.appMuted,
           ),
         ],
@@ -5790,8 +5861,22 @@ class _LiveQueueDot extends StatelessWidget {
   }
 }
 
-class _QueueCount extends StatelessWidget {
-  const _QueueCount({
+class _QueueMetricDivider extends StatelessWidget {
+  const _QueueMetricDivider();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 1,
+      height: 11,
+      margin: const EdgeInsets.symmetric(horizontal: 9),
+      color: context.appBorder,
+    );
+  }
+}
+
+class _QueueMetric extends StatelessWidget {
+  const _QueueMetric({
     required this.label,
     required this.value,
     required this.color,
@@ -5803,21 +5888,31 @@ class _QueueCount extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.09),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color.withValues(alpha: 0.18)),
-      ),
-      child: Text(
-        '$label $value',
-        style: TextStyle(
-          fontSize: 10.5,
-          fontWeight: FontWeight.w800,
-          color: color,
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.baseline,
+      textBaseline: TextBaseline.alphabetic,
+      children: [
+        Text(
+          '$value',
+          style: TextStyle(
+            fontSize: 13,
+            height: 1,
+            fontWeight: FontWeight.w800,
+            color: color,
+          ),
         ),
-      ),
+        const SizedBox(width: 4),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 10.5,
+            height: 1,
+            fontWeight: FontWeight.w600,
+            color: context.appMuted,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -5867,9 +5962,7 @@ class _TherapistQueueCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final statusColor = therapist.status.startsWith('Reserved ')
-        ? const Color(0xFF2563EB)
-        : therapist.isFree
+    final statusColor = therapist.isFree
         ? const Color(0xFF16A34A)
         : const Color(0xFFD97706);
     final serviceLabel = therapist.doneCount == 1
@@ -5883,12 +5976,7 @@ class _TherapistQueueCard extends StatelessWidget {
       decoration: BoxDecoration(
         color: context.appSurface,
         borderRadius: BorderRadius.circular(11),
-        border: Border.all(
-          color: therapist.isNext
-              ? const Color(0xFF1B6B72)
-              : context.appBorder,
-          width: therapist.isNext ? 1.4 : 1,
-        ),
+        border: Border.all(color: context.appBorder),
       ),
       child: Row(
         children: [
@@ -5899,49 +5987,44 @@ class _TherapistQueueCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        therapist.name,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w800,
-                          color: context.appText,
+                Text(
+                  therapist.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w800,
+                    color: context.appText,
+                  ),
+                ),
+                if (therapist.reservationStatus.isNotEmpty) ...[
+                  const SizedBox(height: 3),
+                  Row(
+                    children: [
+                      Container(
+                        width: 6,
+                        height: 6,
+                        decoration: const BoxDecoration(
+                          color: Color(0xFF2563EB),
+                          shape: BoxShape.circle,
                         ),
-                      ),
-                    ),
-                    if (therapist.isNext) ...[
-                      const SizedBox(width: 6),
-                      const Icon(
-                        Icons.auto_awesome,
-                        size: 15,
-                        color: Color(0xFF1B6B72),
                       ),
                       const SizedBox(width: 5),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 7,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF1B6B72),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: const Text(
-                          'Next',
-                          style: TextStyle(
-                            fontSize: 9,
-                            fontWeight: FontWeight.w800,
-                            color: Colors.white,
+                      Flexible(
+                        child: Text(
+                          therapist.reservationStatus,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 10.5,
+                            fontWeight: FontWeight.w600,
+                            color: Color(0xFF2563EB),
                           ),
                         ),
                       ),
                     ],
-                  ],
-                ),
+                  ),
+                ],
                 const SizedBox(height: 3),
                 Row(
                   children: [

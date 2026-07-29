@@ -1450,6 +1450,8 @@ class _HistoryOrder {
         return 'Credit Card';
       case 'debit_card':
         return 'Debit Card';
+      case 'others':
+        return 'Others';
       case 'billplz':
       case 'online':
         return 'Online';
@@ -1469,6 +1471,8 @@ class _HistoryOrder {
         return Icons.credit_card_outlined;
       case 'debit_card':
         return Icons.credit_card;
+      case 'others':
+        return Icons.more_horiz_rounded;
       default:
         return Icons.receipt_long_outlined;
     }
@@ -1672,7 +1676,13 @@ class _HistorySummary {
     orderCount: 0,
     itemCount: 0,
     customerCount: 0,
-    paymentTotals: {'cash': 0, 'qr_code': 0, 'credit_card': 0, 'debit_card': 0},
+    paymentTotals: {
+      'cash': 0,
+      'qr_code': 0,
+      'credit_card': 0,
+      'debit_card': 0,
+      'others': 0,
+    },
     totalTherapistCommission: 0,
   );
 
@@ -1697,6 +1707,7 @@ class _HistorySummary {
       'qr_code': 0.0,
       'credit_card': 0.0,
       'debit_card': 0.0,
+      'others': 0.0,
       'online': 0.0,
       'other': 0.0,
     };
@@ -1863,6 +1874,12 @@ class _HistorySidePanel extends StatelessWidget {
                 iconColor: const Color(0xFFF59E0B),
                 label: 'Debit Card',
                 value: _money(summary.paymentTotals['debit_card'] ?? 0),
+              ),
+              _SideMetricRow(
+                icon: Icons.more_horiz_rounded,
+                iconColor: const Color(0xFF64748B),
+                label: 'Others',
+                value: _money(summary.paymentTotals['others'] ?? 0),
               ),
               _SideMetricRow(
                 icon: Icons.language_outlined,

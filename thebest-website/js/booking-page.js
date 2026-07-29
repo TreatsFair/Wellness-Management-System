@@ -6,6 +6,7 @@ const fallbackOutlets = {
 const api = window.BookingApi;
 const outlets = JSON.parse(JSON.stringify(fallbackOutlets));
 const MAX_GUESTS = 6;
+const BOOKING_SESSION_KEY = "thebest-booking-session-v2";
 let services = [];
 let serviceLoadError = "";
 let availabilityLoadError = "";
@@ -34,6 +35,8 @@ const state = {
   loadingDates: false,
   loadingTimes: false,
   hold: null,
+  holdFingerprint: "",
+  paymentUrl: "",
   appointment: null,
 };
 
@@ -46,8 +49,107 @@ const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
 const summaryOverlay = document.querySelector("#summary-overlay");
+const paymentDeadline = document.querySelector("#payment-deadline");
+const paymentCountdown = document.querySelector("#payment-countdown");
 const stepNames = ["Outlet", "Guests", "Treatments", "Date & time", "Billing"];
 let dateRequestSerial = 0;
+let holdCountdownTimer = null;
+let holdExpiryInProgress = false;
+
+function readBookingSession() {
+  try {
+    const value = JSON.parse(sessionStorage.getItem(BOOKING_SESSION_KEY) || "null");
+    return value && typeof value === "object" ? value : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function formSnapshot() {
+  const form = new FormData(detailsForm);
+  return {
+    name: String(form.get("name") || ""),
+    phone: String(form.get("phone") || ""),
+    email: String(form.get("email") || ""),
+    notes: String(form.get("notes") || ""),
+    consent: Boolean(document.querySelector("#booking-consent")?.checked),
+  };
+}
+
+function applyFormSnapshot(snapshot) {
+  if (!snapshot) return;
+  for (const name of ["name", "phone", "email", "notes"]) {
+    const field = detailsForm.elements.namedItem(name);
+    if (field) field.value = String(snapshot[name] || "");
+  }
+  const consent = document.querySelector("#booking-consent");
+  if (consent) consent.checked = Boolean(snapshot.consent);
+}
+
+function persistBookingSession() {
+  try {
+    sessionStorage.setItem(BOOKING_SESSION_KEY, JSON.stringify({
+      step: state.step,
+      outlet: state.outlet,
+      guests: state.guests,
+      treatmentGuest: state.treatmentGuest,
+      date: state.date,
+      time: state.time,
+      hold: state.hold,
+      holdFingerprint: state.holdFingerprint,
+      paymentUrl: state.paymentUrl,
+      form: formSnapshot(),
+    }));
+  } catch (_) {
+    // The booking still works when private browsing blocks session storage.
+  }
+}
+
+function restoreBookingSession() {
+  const saved = readBookingSession();
+  if (!saved) return false;
+  if (typeof saved.outlet === "string" && outlets[saved.outlet]) state.outlet = saved.outlet;
+  if (Array.isArray(saved.guests) && saved.guests.length >= 1 && saved.guests.length <= MAX_GUESTS) {
+    state.guests = saved.guests.map((guest, index) => ({
+      ...newGuest(index),
+      ...guest,
+      label: String(guest?.label || `Guest ${index + 1}`),
+    }));
+  }
+  state.treatmentGuest = Math.min(Number(saved.treatmentGuest) || 0, state.guests.length - 1);
+  state.date = typeof saved.date === "string" ? saved.date : null;
+  state.time = saved.time?.startAt ? saved.time : null;
+  state.hold = saved.hold?.token ? saved.hold : null;
+  state.holdFingerprint = typeof saved.holdFingerprint === "string" ? saved.holdFingerprint : "";
+  state.paymentUrl = typeof saved.paymentUrl === "string" ? saved.paymentUrl : "";
+  state.step = Math.min(5, Math.max(1, Number(saved.step) || 1));
+  applyFormSnapshot(saved.form);
+  return true;
+}
+
+function currentBookingFingerprint(form = new FormData(detailsForm)) {
+  return JSON.stringify({
+    outlet: state.outlet,
+    allocations: allocationsPayload(),
+    start_at: state.time?.startAt || "",
+    customer_name: String(form.get("name") || "").trim(),
+    customer_phone: String(form.get("phone") || "").trim(),
+    customer_email: String(form.get("email") || "").trim().toLowerCase(),
+    notes: String(form.get("notes") || "").trim(),
+  });
+}
+
+function clearActiveHold() {
+  state.hold = null;
+  state.holdFingerprint = "";
+  state.paymentUrl = "";
+  holdExpiryInProgress = false;
+  if (holdCountdownTimer) clearInterval(holdCountdownTimer);
+  holdCountdownTimer = null;
+  paymentDeadline.hidden = true;
+  paymentDeadline.classList.remove("is-urgent");
+  persistBookingSession();
+}
 
 function escapeHtml(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;")
@@ -106,7 +208,10 @@ function showNotice(message, isError = false) {
 function clearNotice() { document.querySelector(".booking-mode-notice")?.remove(); }
 
 async function loadOutlets() {
+  const loading = document.querySelector("#outlet-loading");
   if (!api.configured) {
+    document.querySelectorAll("[data-outlet]").forEach((button) => { button.hidden = false; });
+    if (loading) loading.hidden = true;
     showNotice("Preview mode: configure Supabase to use live availability.");
     return;
   }
@@ -122,9 +227,15 @@ async function loadOutlets() {
       button.hidden = !availableCodes.has(button.dataset.outlet);
       renderOutletHours(button, outlets[button.dataset.outlet]);
     });
+    if (state.outlet && !availableCodes.has(state.outlet)) state.outlet = null;
     if (!availableCodes.size) showNotice("Online booking is not currently enabled for any outlet.", true);
     else clearNotice();
-  } catch (error) { showNotice(error.message || "Unable to connect to the booking service.", true); }
+  } catch (error) {
+    document.querySelectorAll("[data-outlet]").forEach((button) => { button.hidden = true; });
+    showNotice(error.message || "Unable to connect to the booking service.", true);
+  } finally {
+    if (loading) loading.hidden = true;
+  }
 }
 
 function fallbackImageFor(service) {
@@ -132,7 +243,7 @@ function fallbackImageFor(service) {
   if (name.includes("foot")) return "./pics/best_footmassage2.jpg";
   if (name.includes("aroma") || name.includes("oil")) return "./pics/best_oilmassage.jpg";
   if (name.includes("combo") || name.includes("package")) return "./pics/best_combo.jpg";
-  return "./pics/beauty-spa.jpg";
+  return "./pics/beauty-spa-hero-1280.jpg";
 }
 
 function resetAvailability() {
@@ -148,9 +259,11 @@ function resetAvailability() {
   renderTimes();
 }
 
-async function loadServices() {
-  state.guests.forEach((guest) => { guest.serviceId = null; });
-  resetAvailability();
+async function loadServices({ preserveBooking = false } = {}) {
+  if (!preserveBooking) {
+    state.guests.forEach((guest) => { guest.serviceId = null; });
+    resetAvailability();
+  }
   serviceLoadError = "";
   state.loadingServices = true;
   renderServices();
@@ -174,6 +287,10 @@ async function loadServices() {
       showPrice: Boolean(service.show_price),
       image: service.public_image_url || fallbackImageFor(service),
     }));
+    const validIds = new Set(services.map((service) => service.id));
+    state.guests.forEach((guest) => {
+      if (guest.serviceId && !validIds.has(guest.serviceId)) guest.serviceId = null;
+    });
     if (!services.length) serviceLoadError = "No online treatments are available for this outlet yet.";
     clearNotice();
   } catch (error) {
@@ -260,6 +377,7 @@ function renderGuestUi() {
   const prefOptions = ["No preference", "Female masseur", "Male masseur"];
   const prefShort = { "No preference": "No preference", "Female masseur": "Female", "Male masseur": "Male" };
   const preview = document.querySelector("#guest-preview");
+  document.querySelector("#guest-names").hidden = false;
   preview.innerHTML = state.guests.map((guest, index) => {
     const prefField = allowPref
       ? `<div class="guest-card-fields">
@@ -477,7 +595,9 @@ function canContinue() {
 function setContinueLabel() {
   const missingTreatments = state.guests.filter((guest) => !guest.serviceId).length;
   const labels = ["Continue to guests", "Continue to treatments", "See available times", "Continue to billing"];
-  let label = state.step === 5 ? "Reserve and pay" : labels[state.step - 1];
+  let label = state.step === 5
+    ? (state.hold?.token ? "Continue to secure payment" : "Reserve and pay")
+    : labels[state.step - 1];
   if (state.step === 3 && missingTreatments) {
     label = `Choose ${missingTreatments} more treatment${missingTreatments === 1 ? "" : "s"}`;
   } else if (state.step === 3 && state.loadingDates) {
@@ -535,7 +655,13 @@ function updateProgress() {
     dot.classList.toggle("is-current", index + 1 === state.step);
   });
 }
-function updateUi() { nextButton.disabled = !canContinue(); setContinueLabel(); updateReview(); updateProgress(); }
+function updateUi() {
+  nextButton.disabled = !canContinue();
+  setContinueLabel();
+  updateReview();
+  updateProgress();
+  persistBookingSession();
+}
 
 function openSummary() { summarySheet.classList.add("is-open"); summaryOverlay.classList.add("is-open"); summaryToggle.setAttribute("aria-expanded", "true"); document.body.classList.add("summary-open"); summaryClose.focus(); }
 function closeSummary() { summarySheet.classList.remove("is-open"); summaryOverlay.classList.remove("is-open"); summaryToggle.setAttribute("aria-expanded", "false"); document.body.classList.remove("summary-open"); }
@@ -553,6 +679,95 @@ function showConfirmation({ preview = false, hold = null } = {}) {
     eyebrow.textContent = "Time temporarily reserved"; title.textContent = "Your group hold was created."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. This hold expires at ${expires}.`;
   }
   document.querySelector("#confirmation-dialog").showModal();
+}
+
+function holdRemainingMs() {
+  if (!state.hold?.expires_at) return 0;
+  return Math.max(0, new Date(state.hold.expires_at).getTime() - Date.now());
+}
+
+function deadlineTimeLabel() {
+  return new Date(state.hold.expires_at).toLocaleTimeString("en-MY", {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function renderHoldCountdown() {
+  if (!state.hold?.token) {
+    paymentDeadline.hidden = true;
+    return 0;
+  }
+  const remaining = holdRemainingMs();
+  const totalSeconds = Math.ceil(remaining / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  document.querySelector("#payment-deadline-title").textContent =
+    `Complete payment by ${deadlineTimeLabel()}`;
+  document.querySelector("#payment-deadline-copy").textContent =
+    "Your booking will be cancelled if payment is not completed before this deadline.";
+  paymentCountdown.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  paymentDeadline.hidden = false;
+  paymentDeadline.classList.toggle("is-urgent", remaining <= 120000);
+  return remaining;
+}
+
+function showPaymentHandoff() {
+  const dialog = document.querySelector("#confirmation-dialog");
+  const close = document.querySelector("#close-dialog");
+  dialog.dataset.paymentState = "handoff";
+  setDialogIcon("pending");
+  document.querySelector("#confirmation-title").textContent = "Continue to secure payment";
+  document.querySelector("#confirmation-message").textContent =
+    `Please complete payment by ${deadlineTimeLabel()}. Your appointment is only confirmed after a successful payment.`;
+  close.style.display = "";
+  close.textContent = "Continue to Payment";
+  close.dataset.action = "pay";
+  if (!dialog.open) dialog.showModal();
+}
+
+function showHoldExpired() {
+  const dialog = document.querySelector("#confirmation-dialog");
+  const close = document.querySelector("#close-dialog");
+  dialog.dataset.paymentState = "expired";
+  setDialogIcon("failed");
+  document.querySelector("#confirmation-eyebrow").textContent = "Payment deadline expired";
+  document.querySelector("#confirmation-title").textContent = "Your selected time is no longer reserved.";
+  document.querySelector("#confirmation-message").textContent =
+    "Please choose an available time and create a new payment reservation. Your contact details have been kept for convenience.";
+  close.style.display = "";
+  close.textContent = "Choose another time";
+  close.dataset.action = "availability";
+  if (!dialog.open) dialog.showModal();
+}
+
+async function expireActiveHold() {
+  if (!state.hold?.token || holdExpiryInProgress) return;
+  holdExpiryInProgress = true;
+  const token = state.hold.token;
+  try {
+    await api.expireHold(token);
+  } catch (_) {
+    // The server and scheduled cleanup remain authoritative. The local session
+    // must stop offering payment as soon as its server-issued deadline passes.
+  }
+  clearActiveHold();
+  state.time = null;
+  updateUi();
+  showHoldExpired();
+}
+
+function startHoldCountdown() {
+  if (holdCountdownTimer) clearInterval(holdCountdownTimer);
+  holdCountdownTimer = null;
+  if (!state.hold?.token) return;
+  if (renderHoldCountdown() <= 0) {
+    expireActiveHold();
+    return;
+  }
+  holdCountdownTimer = setInterval(() => {
+    if (renderHoldCountdown() <= 0) expireActiveHold();
+  }, 1000);
 }
 
 let paymentPollTimer = null;
@@ -574,9 +789,9 @@ function showPaymentStatus(kind, { reference = "" } = {}) {
   const close = document.querySelector("#close-dialog");
   dialog.dataset.paymentState = kind;
   close.style.display = kind === "checking" ? "none" : "";
-  if (kind === "checking") { setDialogIcon("pending"); eyebrow.textContent = "Confirming your payment"; title.textContent = "Just a moment..."; message.textContent = "We're confirming your group booking with Billplz."; }
-  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your group is booked."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}.`; close.textContent = "Done"; close.dataset.action = "home"; }
-  else if (kind === "failed") { setDialogIcon("failed"); eyebrow.textContent = "Payment not completed"; title.textContent = "We couldn't confirm your booking."; message.textContent = "Your group time was not reserved. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
+  if (kind === "checking") { setDialogIcon("pending"); eyebrow.textContent = "Confirming your payment"; title.textContent = "Just a moment..."; message.textContent = "We're confirming your booking."; }
+  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your booking is confirmed."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}`; close.textContent = "Done"; close.dataset.action = "home"; }
+  else if (kind === "failed") { setDialogIcon("failed"); eyebrow.textContent = "Payment not completed"; title.textContent = "We couldn't confirm your booking."; message.textContent = "Your booking was unsuccessful. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
   else { setDialogIcon("pending"); eyebrow.textContent = "Still confirming"; title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
 }
@@ -589,6 +804,7 @@ async function pollPaymentStatus(token) {
       // Same receipt number the app shows for this booking's transaction; falls
       // back to the hold's own reference only if the webhook hasn't landed yet.
       const reference = payload.hold.receipt_number || String(token).slice(0, 8).toUpperCase();
+      try { sessionStorage.removeItem(BOOKING_SESSION_KEY); } catch (_) { /* Optional browser storage. */ }
       showPaymentStatus("confirmed", { reference });
       return;
     }
@@ -604,34 +820,87 @@ function initializePaymentReturn() {
   paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); return true;
 }
 
+async function redirectActivePayment() {
+  if (!state.hold?.token) return;
+  if (holdRemainingMs() <= 0) {
+    await expireActiveHold();
+    return;
+  }
+  nextButton.disabled = true;
+  nextButton.textContent = "Opening secure payment...";
+  try {
+    if (!state.paymentUrl) {
+      const pay = await api.payHold(state.hold.token);
+      state.paymentUrl = pay.url;
+    }
+    persistBookingSession();
+    window.location.assign(state.paymentUrl);
+  } catch (error) {
+    if (error.status === 409) {
+      await expireActiveHold();
+      return;
+    }
+    showNotice(error.message || "Unable to open payment. Please try again.", true);
+    setContinueLabel();
+    updateUi();
+  }
+}
+
 async function submitHold() {
   if (!detailsForm.reportValidity() || !state.time) return;
   if (!api.configured) { showConfirmation({ preview: true }); return; }
   const form = new FormData(detailsForm);
+  const fingerprint = currentBookingFingerprint(form);
   nextButton.disabled = true;
   nextButton.textContent = "Reserving your group...";
   try {
+    if (state.hold?.token) {
+      const payload = await api.getHoldStatus(state.hold.token);
+      const status = payload?.hold?.status;
+      const stillPending = status === "pending_payment" && holdRemainingMs() > 0;
+      if (stillPending && fingerprint === state.holdFingerprint) {
+        await redirectActivePayment();
+        return;
+      }
+      if (status === "confirmed") {
+        showPaymentStatus("confirmed", {
+          reference: payload.hold.receipt_number || String(state.hold.token).slice(0, 8).toUpperCase(),
+        });
+        return;
+      }
+      if (stillPending || ["payment_failed", "cancelled"].includes(status)) {
+        await api.cancelHold(state.hold.token);
+      } else if (status === "expired" || holdRemainingMs() <= 0) {
+        await api.expireHold(state.hold.token);
+      }
+      clearActiveHold();
+    }
+
     const payload = await api.createGroupHold({
       allocations: allocationsPayload(), start_at: state.time.startAt,
       customer_name: form.get("name"), customer_phone: form.get("phone"), customer_email: form.get("email"),
       notes: form.get("notes"), website: form.get("website"),
     });
     state.hold = payload.hold;
+    state.holdFingerprint = fingerprint;
+    state.paymentUrl = "";
     state.appointment = null;
     let holdNoticeMessage = null;
     try {
-      nextButton.textContent = "Redirecting to payment...";
+      nextButton.textContent = "Preparing secure payment...";
       const pay = await api.payHold(payload.hold.token);
-      window.location.href = pay.url;
-      return;
+      state.paymentUrl = pay.url;
     } catch (payError) {
       if (window.BOOKING_CONFIG?.testAutoConfirm) {
         try { state.appointment = (await api.confirmHold(payload.hold.token)).appointment; }
         catch (error) { holdNoticeMessage = error.message || "The time was reserved, but automatic confirmation failed."; }
       } else holdNoticeMessage = payError.message || "Unable to start payment. Please try again.";
     }
+    persistBookingSession();
+    startHoldCountdown();
     if (holdNoticeMessage) showNotice(holdNoticeMessage, true); else clearNotice();
-    showConfirmation({ hold: payload.hold });
+    if (state.paymentUrl) showPaymentHandoff();
+    else showConfirmation({ hold: payload.hold });
   } catch (error) {
     showNotice(error.message || "Unable to reserve this group time.", true);
     if (error.status === 409) { state.time = null; await loadAvailability(); showStep(4); }
@@ -672,6 +941,17 @@ document.addEventListener("keydown", (event) => { if (event.key === "Escape" && 
 window.addEventListener("resize", () => { if (window.innerWidth > 900 && summarySheet.classList.contains("is-open")) closeSummary(); });
 document.querySelector("#close-dialog").addEventListener("click", () => {
   const close = document.querySelector("#close-dialog");
+  if (close.dataset.action === "pay") {
+    document.querySelector("#confirmation-dialog").close();
+    redirectActivePayment();
+    return;
+  }
+  if (close.dataset.action === "availability") {
+    document.querySelector("#confirmation-dialog").close();
+    showStep(4);
+    loadAvailability();
+    return;
+  }
   if (close.dataset.action === "retry") { window.location.href = "./booking.html"; return; }
   if (close.dataset.action === "home") { window.location.href = "./index.html"; return; }
   if (close.dataset.action === "recheck") { const token = new URLSearchParams(window.location.search).get("bp_token"); if (token) { paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); } return; }
@@ -688,8 +968,58 @@ document.querySelector("#terms-dialog-close").addEventListener("click", () => {
 
 async function initializeBooking() {
   if (initializePaymentReturn()) return;
+  const restored = restoreBookingSession();
   document.querySelectorAll("[data-outlet]").forEach((button) => renderOutletHours(button, outlets[button.dataset.outlet]));
   renderGuestUi(); renderServices(); renderDates(); renderTimes(); updateUi();
   await loadOutlets();
+  if (state.outlet) {
+    const selectedButton = document.querySelector(`[data-outlet="${state.outlet}"]`);
+    if (selectedButton && !selectedButton.hidden) {
+      document.querySelectorAll("[data-outlet]").forEach((button) => {
+        button.classList.toggle("is-selected", button === selectedButton);
+      });
+      const savedDate = state.date;
+      const savedTime = state.time;
+      await loadServices({ preserveBooking: restored });
+      if (restored && savedDate && allTreatmentsChosen()) {
+        await loadDates();
+        state.date = savedDate;
+        await loadAvailability();
+        state.time = state.slots.find((slot) => slot.startAt === savedTime?.startAt) || savedTime;
+      }
+      renderGuestUi();
+      showStep(state.step);
+    }
+  }
+  if (state.hold?.token) {
+    try {
+      const payload = await api.getHoldStatus(state.hold.token);
+      if (payload?.hold?.status === "pending_payment" && holdRemainingMs() > 0) {
+        startHoldCountdown();
+      } else if (payload?.hold?.status === "confirmed") {
+        showPaymentStatus("confirmed", {
+          reference: payload.hold.receipt_number || String(state.hold.token).slice(0, 8).toUpperCase(),
+        });
+        clearActiveHold();
+      } else {
+        clearActiveHold();
+      }
+    } catch (error) {
+      if (holdRemainingMs() > 0) {
+        startHoldCountdown();
+        showNotice("We could not refresh your payment status. Your existing reservation has been kept.", true);
+      } else {
+        await expireActiveHold();
+      }
+    }
+  }
+  updateUi();
 }
 initializeBooking();
+
+window.addEventListener("pageshow", () => {
+  if (state.hold?.token) startHoldCountdown();
+});
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && state.hold?.token) startHoldCountdown();
+});

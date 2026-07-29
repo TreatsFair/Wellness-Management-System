@@ -538,10 +538,16 @@ body {
   position: absolute;
   inset: 0;
   z-index: 0;
-  background-image: url(../pics/beauty-spa.jpg);
+  background-image: url(../pics/beauty-spa-hero-1280.jpg);
   background-size: cover;
   background-position: center 42%;
   background-repeat: no-repeat;
+}
+
+@media (min-width: 900px) {
+  .hero::after {
+    background-image: url(../pics/beauty-spa-hero-1920.jpg);
+  }
 }
 
 .hero__content {

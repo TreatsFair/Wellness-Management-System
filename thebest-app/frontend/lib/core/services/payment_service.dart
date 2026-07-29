@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../utils/error_message.dart';
@@ -15,12 +17,26 @@ class PaymentResult {
     this.therapistId,
     this.roomId,
     this.roomUnitId,
+    this.busyAppointmentId,
+    this.busyTherapistId,
+    this.busyTherapistName,
+    this.busyUntil,
+    this.suggestedTherapistId,
+    this.suggestedTherapistName,
+    this.nextAvailableStartAt,
+    this.nextAvailableEndAt,
+    this.nextAvailableTherapistId,
+    this.nextAvailableTherapistName,
+    this.availabilitySearchedThrough,
     this.errorCode,
     this.errorMessage,
   });
 
   factory PaymentResult.fromMap(Map<String, dynamic> row) {
     final ids = row['appointment_ids'] ?? row['appointmentIds'];
+    final rawErrorMessage =
+        row['error_message']?.toString() ?? row['errorMessage']?.toString();
+    final errorPayload = _readErrorPayload(rawErrorMessage);
     return PaymentResult(
       success: row['success'] == true,
       appointmentId:
@@ -47,9 +63,32 @@ class PaymentResult {
       roomId: row['room_id']?.toString() ?? row['roomId']?.toString(),
       roomUnitId:
           row['room_unit_id']?.toString() ?? row['roomUnitId']?.toString(),
-      errorCode: row['error_code']?.toString() ?? row['errorCode']?.toString(),
-      errorMessage:
-          row['error_message']?.toString() ?? row['errorMessage']?.toString(),
+      busyAppointmentId: errorPayload?['appointment_id']?.toString(),
+      busyTherapistId: errorPayload?['therapist_id']?.toString(),
+      busyTherapistName: errorPayload?['therapist_name']?.toString(),
+      busyUntil: _readDateTime(errorPayload?['busy_until']),
+      suggestedTherapistId:
+          errorPayload?['suggested_therapist_id']?.toString(),
+      suggestedTherapistName:
+          errorPayload?['suggested_therapist_name']?.toString(),
+      nextAvailableStartAt: _readDateTime(
+        errorPayload?['next_available_start_at'],
+      ),
+      nextAvailableEndAt: _readDateTime(
+        errorPayload?['next_available_end_at'],
+      ),
+      nextAvailableTherapistId:
+          errorPayload?['next_available_therapist_id']?.toString(),
+      nextAvailableTherapistName:
+          errorPayload?['next_available_therapist_name']?.toString(),
+      availabilitySearchedThrough: _readDateTime(
+        errorPayload?['availability_searched_through'],
+      ),
+      errorCode:
+          errorPayload?['code']?.toString() ??
+          row['error_code']?.toString() ??
+          row['errorCode']?.toString(),
+      errorMessage: errorPayload?['message']?.toString() ?? rawErrorMessage,
     );
   }
 
@@ -64,8 +103,23 @@ class PaymentResult {
   final String? therapistId;
   final String? roomId;
   final String? roomUnitId;
+  final String? busyAppointmentId;
+  final String? busyTherapistId;
+  final String? busyTherapistName;
+  final DateTime? busyUntil;
+  final String? suggestedTherapistId;
+  final String? suggestedTherapistName;
+  final DateTime? nextAvailableStartAt;
+  final DateTime? nextAvailableEndAt;
+  final String? nextAvailableTherapistId;
+  final String? nextAvailableTherapistName;
+  final DateTime? availabilitySearchedThrough;
   final String? errorCode;
   final String? errorMessage;
+
+  bool get needsTherapistConfirmation =>
+      errorCode == 'THERAPIST_BUSY' ||
+      errorCode == 'THERAPIST_CONFIRMATION_REQUIRED';
 
   String get message => friendlyBookingErrorMessage(
     errorMessage ?? errorCode,
@@ -75,6 +129,16 @@ class PaymentResult {
   static DateTime? _readDateTime(Object? value) {
     if (value is DateTime) return value;
     return DateTime.tryParse(value?.toString() ?? '');
+  }
+
+  static Map<String, dynamic>? _readErrorPayload(String? value) {
+    if (value == null || !value.trimLeft().startsWith('{')) return null;
+    try {
+      final decoded = jsonDecode(value);
+      return decoded is Map<String, dynamic> ? decoded : null;
+    } catch (_) {
+      return null;
+    }
   }
 }
 

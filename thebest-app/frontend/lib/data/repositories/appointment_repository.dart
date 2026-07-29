@@ -134,6 +134,36 @@ class AppointmentRepository {
     return _table.update(id, values);
   }
 
+  /// Dedicated no-show lifecycle transition. The server locks, validates,
+  /// reschedules and reactivates in one transaction while audit/payment
+  /// history remains untouched.
+  Future<Map<String, dynamic>> reactivateNoShowAppointment({
+    required String appointmentId,
+    required String date,
+    required String startTime,
+    required String endTime,
+    required String therapistId,
+    required String roomId,
+    String? roomUnitId,
+    Map<String, dynamic> updates = const {},
+  }) async {
+    return _firstResultMap(await _table.client.rpc(
+      'reactivate_no_show_appointment',
+      params: {
+        'p_appointment_id': appointmentId,
+        'p_date': date,
+        'p_start_time': startTime,
+        'p_end_time': endTime,
+        'p_therapist_id': therapistId,
+        'p_room_id': roomId,
+        'p_room_unit_id': roomUnitId?.trim().isEmpty == true
+            ? null
+            : roomUnitId,
+        'p_updates': updates,
+      },
+    ));
+  }
+
   /// Dedicated server-side cancellation keeps cancellation metadata and
   /// resource release atomic. Never replace this with a table update.
   Future<Map<String, dynamic>> cancelAppointment(
@@ -343,12 +373,13 @@ class AppointmentRepository {
       paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
       receiptNumber: asString(transactionValues['receiptNumber']),
     );
-    if (!result.success) {
+    if (!result.success && !result.needsTherapistConfirmation) {
       throw AppointmentOperationException(
         code: result.errorCode ?? 'FINALIZE_FAILED',
         message: result.message,
       );
     }
+    if (!result.success) return result;
     if (result.appointmentId != appointmentId ||
         result.actualStartedAt == null ||
         result.expectedEndAt == null ||
@@ -498,12 +529,13 @@ class AppointmentRepository {
       paymentMethod: asString(transactionValues['paymentMethod'], 'cash'),
       receiptNumber: asString(transactionValues['receiptNumber']),
     );
-    if (!result.success) {
+    if (!result.success && !result.needsTherapistConfirmation) {
       throw AppointmentOperationException(
         code: result.errorCode ?? 'GROUP_FINALIZE_FAILED',
         message: result.message,
       );
     }
+    if (!result.success) return result;
     if (result.appointmentGroupId != appointmentGroupId ||
         result.actualStartedAt == null ||
         result.appointmentIds.length != appointmentIds.length) {
