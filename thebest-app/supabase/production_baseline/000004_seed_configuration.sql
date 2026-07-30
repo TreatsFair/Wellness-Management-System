@@ -29,9 +29,14 @@
 --
 -- CONTAINS NO CLOSURE ROWS. online_booking_closures is intentionally empty.
 --
--- Idempotent: every statement is INSERT … ON CONFLICT (id) DO UPDATE, so the
--- file may be re-run safely. Transactional: a single BEGIN/COMMIT, so any
--- failure leaves production untouched.
+-- Idempotent: every statement is INSERT … ON CONFLICT DO UPDATE/NOTHING, so the
+-- file may be re-run safely. The transaction boundary is supplied externally by
+-- psql --single-transaction with ON_ERROR_STOP=1, so any failure leaves
+-- production untouched.
+--
+-- 10 explicit INSERT statements producing 48 rows. A further 14 rows appear in
+-- room_units, created by the rooms_sync_room_units trigger — 62 rows in the
+-- final state. See SECTION 10.
 --
 -- PRIVILEGE REQUIREMENT: run as `postgres`. After 000001, Migration 132's
 -- trigger `therapists_commission_overrides_admin_only` and the admin-only
@@ -56,10 +61,11 @@
 --   5. service_categories           -> outlets
 --   6. services                     -> outlets, service_categories(by name)
 --   7. rooms                        -> outlets
---   8. room_units                   -> rooms (via zone_id), outlets
---   9. online_booking_outlet_settings -> outlets
---  10. online_booking_services      -> outlets, services
---  11. online_booking_service_rooms -> online_booking_services, rooms
+--      (room_units is created here by the rooms_sync_room_units trigger, NOT by
+--       an explicit statement — see SECTION 10)
+--   8. online_booking_outlet_settings -> outlets
+--   9. online_booking_services      -> outlets, services
+--  10. online_booking_service_rooms -> online_booking_services, rooms
 --
 -- Deliberately absent: therapists, therapist_working_hours,
 -- therapist_unavailability, online_booking_closures, online_booking_service_hours,
@@ -415,27 +421,35 @@ on conflict (id) do update set
   allocation_mode = excluded.allocation_mode,
   equipment       = excluded.equipment;
 
-insert into public.room_units (id, zone_id, outlet_id, name, unit_number, is_active) values
-  ('7e69cd81-b306-4e3f-a4d6-b1bcce7363e7', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 1', 1, true),
-  ('d8227fb6-ed59-411d-94d7-151e0bb012a4', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 2', 2, true),
-  ('87c6c5a1-e77e-45f7-b1bc-6ca1de9de488', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 3', 3, true),
-  ('2f796fac-b1fc-4429-91eb-d82cb35b0e8e', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 4', 4, true),
-  ('e75b7ee4-76c4-413e-8372-fb2a2fe958e6', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 5', 5, true),
-  ('2905fa44-e334-4bc3-86b7-6db66b4a7de8', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 6', 6, true),
-  ('086e6ee4-af7e-499c-ac3b-927543a96dac', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 7', 7, true),
-  ('7ffe0b97-77f6-4463-b6da-f99393e2f4e0', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 8', 8, true),
-  -- PV128 Ground Body Massage Rooms (zone 0f1503b5…)
-  ('3b6d1f7d-6760-4708-bcff-57b3576c9c6a', '0f1503b5-1ed8-4f65-b421-55696bdb229a', '00000000-0000-0000-0000-000000000128', 'Room 1', 1, true),
-  ('551b9624-24b2-46d8-8868-f4c5f7ed3e5c', '0f1503b5-1ed8-4f65-b421-55696bdb229a', '00000000-0000-0000-0000-000000000128', 'Room 2', 2, true),
-  ('45f856d6-c55f-4a82-abe0-39ca852394a8', '0f1503b5-1ed8-4f65-b421-55696bdb229a', '00000000-0000-0000-0000-000000000128', 'Room 3', 3, true),
-  -- PV128 Upper Body Massage Rooms (zone f01292e8…)
-  ('17f942d8-5611-4114-9efd-5e33161df1e0', 'f01292e8-928e-4256-9c81-866fff17d566', '00000000-0000-0000-0000-000000000128', 'Room 1', 1, true),
-  ('e4a1178d-2af4-4718-a414-864c3e8d8fa3', 'f01292e8-928e-4256-9c81-866fff17d566', '00000000-0000-0000-0000-000000000128', 'Room 2', 2, true),
-  ('121920e5-bdff-4681-b3cf-2b7b80872cdf', 'f01292e8-928e-4256-9c81-866fff17d566', '00000000-0000-0000-0000-000000000128', 'Room 3', 3, true)
-on conflict (id) do update set
-  zone_id = excluded.zone_id, outlet_id = excluded.outlet_id,
-  name = excluded.name, unit_number = excluded.unit_number,
-  is_active = excluded.is_active;
+-- room_units is NOT seeded here. The trigger `rooms_sync_room_units` fires AFTER
+-- the rooms insert above and calls `sync_room_units_for_zone()`, which creates
+-- one unit per slot for every zone that is `allocation_mode = 'specific_room'`
+-- and active:
+--
+--     insert into public.room_units (zone_id, outlet_id, name, unit_number, is_active)
+--     select new.id, new.outlet_id, 'Room ' || unit_number, unit_number, true
+--     from generate_series(1, greatest(coalesce(new.total_slots,1),1)) unit_number
+--     on conflict (zone_id, unit_number) do update ...
+--
+-- That yields exactly the 14 units this file used to insert by hand:
+--
+--     Upper Massage Room        (Taman Wahyu, 8 slots)  -> Room 1..8
+--     Ground Body Massage Rooms (PV128,       3 slots)  -> Room 1..3
+--     Upper Body Massage Rooms  (PV128,       3 slots)  -> Room 1..3
+--
+-- An earlier revision inserted them explicitly with `on conflict (id) do update`.
+-- Because the trigger generates its own UUIDs, the collision landed instead on
+-- `room_units_zone_id_name_key` — a different unique constraint, unhandled — and
+-- the whole transaction aborted. `room_units` has three unique constraints:
+-- (id), (zone_id, name) and (zone_id, unit_number).
+--
+-- The trigger is the authority for this table and is deliberately left in place.
+--
+-- CONSEQUENCE: production's room_unit UUIDs are generated at insert time and
+-- will NOT match staging's. That is acceptable — no operational row references a
+-- room unit in a fresh project, and the app resolves units by zone and number,
+-- not by hard-coded id. The four foot-chair zones use `allocation_mode =
+-- 'capacity'` and correctly receive no units at all.
 
 
 -- ============================================================================
@@ -674,7 +688,7 @@ on conflict (online_booking_service_id, room_id) do nothing;
 --  select count(*) from public.service_categories;                   -- 1
 --  select count(*) from public.services;                             -- 5
 --  select count(*) from public.rooms;                                -- 8  (4 TW + 4 PV128)
---  select count(*) from public.room_units;                           -- 14 (8 TW + 6 PV128)
+--  select count(*) from public.room_units;                           -- 14 (trigger-created: 8 TW + 6 PV128)
 --  select count(*) from public.online_booking_outlet_settings;       -- 2
 --  select count(*) from public.online_booking_services;              -- 5
 --  select count(*) from public.online_booking_service_rooms;         -- 8

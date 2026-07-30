@@ -375,7 +375,7 @@ Every value below is a complete 64-character SHA-256 of the file as committed at
 pre-Stage-4A values, so "checksums match README" was not a strict gate. It is
 now. Verify with `sha256sum <file>` before any production application.
 
-Current as of **v1.0.0-rc6**.
+Current as of **v1.0.0-rc7**.
 
 | File | SHA-256 | Applied to production? |
 |---|---|---|
@@ -385,7 +385,7 @@ Current as of **v1.0.0-rc6**.
 | `000002_storage.sql` | `840de7e73e45cba37fc4e01c12d492055597d23bf7f01374eabeb965b85d7a5b` | **yes, RC5** (at its previous checksum; the RC6 change removes only the internal `begin`/`commit` and is **not** reapplied) |
 | `000003_ab_internal_cron.sql` | `31302509a4f6ae9ddb4f79c04ca4832d16e367ad8fa497b7337e923b12800b74` | **yes, RC5** |
 | `000003_cron.sql` | `a67acd1d8160c3bc2184a3112fe902f178a9ecfd0ab0379bf4c2f850d6a59b37` | no — Section C only, later stage |
-| `000004_seed_configuration.sql` | `792a110f15385f5c93e8a7c5e01b0a21068dc783bc5bc747c77ac45628a6f297` | RC6 |
+| `000004_seed_configuration.sql` | `399e32c9ea7c9ccff3622a12d4e27df1d0c40af055efda069056607f8d4323aa` | not yet — RC7 rehearsed locally, production application pending approval |
 | `000005_controlled_smoke_test_data.sql` | `9367b2726839946899d608e64fd8de8d4f5115070719c5bb4e690f389c43284e` | no — separate approval |
 | `000005_cleanup_smoke_test_data.sql` | `6905aaee079af486578698775947fde40cbf2a880b0888845fd3ea2a8ef6d742` | no — before go-live |
 | `image_migration_manifest.md` | `07bb76828778b4298c3082a64439ad78d10cb36ea9939ca6851e1d2e4ffb60c1` | n/a |
@@ -549,6 +549,141 @@ naive text parsing during this stage — a substring count of `estrict`, a
 comment-filter regex missing its anchor, and a comma-split row counter defeated by
 commas inside a quoted address. Each was investigated and disproved rather than
 accepted. Seed verification now uses quote-aware parsing.
+
+### RC7 — a trigger already owned `room_units`
+
+The RC6 attempt got eight statements further and then failed:
+
+```
+INSERT 0 2 / 0 1 / DELETE 0 / 0 14 / 0 2 / 0 1 / 0 5 / 0 8   <- all succeeded
+psql:000004_seed_configuration.sql:438: ERROR: duplicate key value violates
+unique constraint "room_units_zone_id_name_key"
+DETAIL: Key (zone_id, name)=(8df942f1-..., Room 1) already exists.
+```
+
+**Full rollback confirmed** — all nine configuration tables re-checked read-only
+and every one at zero. The schema, Storage and Cron applied at RC5 were
+untouched.
+
+**Trigger ownership of `room_units`.** `room_units` was empty, so the duplicate
+had to originate inside the same transaction — and it did. Trigger
+`rooms_sync_room_units` fires AFTER insert on `rooms` and calls
+`sync_room_units_for_zone()`, which for every `allocation_mode = 'specific_room'`
+and active zone creates one unit per slot named `'Room ' || unit_number`. The
+`INSERT 0 8` on `rooms` therefore generated exactly the 14 units the file then
+tried to insert by hand. The explicit insert used `ON CONFLICT (id)`, but the
+trigger's rows carry their own generated UUIDs, so the collision landed on
+`(zone_id, name)` instead — a different unique constraint, unhandled.
+`room_units` has three: `(id)`, `(zone_id, name)`, `(zone_id, unit_number)`.
+
+**Fix: the explicit `room_units` INSERT block is deleted.** The trigger is the
+authority and is deliberately left in place, not disabled or bypassed.
+
+**Room-unit UUIDs are generated in production** and will not match staging's.
+Acceptable: no operational row references a room unit in a fresh project, and the
+application resolves units by zone and number rather than by hard-coded id.
+
+**Revised row counts.**
+
+| | Rows |
+|---|---|
+| Explicit `INSERT` statements in `000004` | 10 |
+| Explicit rows inserted | **48** |
+| `room_units` inserted explicitly | **0** |
+| `room_units` created by trigger | **14** |
+| **Final configuration state** | **62** |
+
+### Trigger audit — every trigger on every table `000004` seeds
+
+| Source table | Trigger | Effect | Conflicts with the seed? |
+|---|---|---|---|
+| `rooms` | `rooms_sync_room_units` → `sync_room_units_for_zone` | **inserts into `room_units`** | **YES — this was the defect; explicit insert removed** |
+| `rooms` | `rooms_write_audit_log` → `write_audit_log` | inserts into `audit_log` | no — expected side effect |
+| `rooms` | `rooms_reconcile_appointment_holds` | inserts into `appointment_assignment_invalidations` | no — no appointments exist, no-op |
+| `rooms` | `rooms_set_audit_fields` | mutates audit columns | no |
+| `services` | `services_write_audit_log` | inserts into `audit_log` | no — expected |
+| `services` | `services_reconcile_appointment_holds` | `appointment_assignment_invalidations` | no — no-op |
+| `services` | `services_sync_buffer_after` | mutates `buffer_after_minutes` | no |
+| `services` | `services_set_audit_fields` | mutates audit columns | no |
+| `settings` | `settings_write_audit_log` | inserts into `audit_log` | no — expected |
+| `settings` | `settings_set_audit_fields` | mutates audit columns | no |
+| `business_hours` | `business_hours_sync_staff_insert/update` → `sync_staff_hours_from_business_hours` | inserts into `business_hours_staff_override_archive` | no — no therapists exist, no-op |
+| `business_hours` | `business_hours_queue_reconcile_insert/update` | `appointment_assignment_invalidations` | no — no-op |
+| `business_hours` | `business_hours_begin_staff_sync_insert/update` | sets a sync flag | no |
+| `business_hours` | `business_hours_touch_updated_at` | mutates `updated_at` | no |
+| `online_booking_services` | `online_booking_services_outlet_match`, `online_services_enforce_buffer` | validation only | no |
+| `online_booking_service_rooms` | `online_booking_service_rooms_outlet_match` | validation only | no |
+| `outlets`, `business_settings`, `service_categories` | — | none | no |
+
+**`room_units` is the only duplicate-population conflict.** Confirmed by
+inspecting all 20 triggers on the 11 seeded tables.
+
+**Expected `audit_log` side effects.** Applying `000004` creates **14**
+`audit_log` rows — from `rooms` (8), `services` (5) and `settings` (1), the three
+seeded tables carrying `write_audit_log`. These are a legitimate audit trail, not
+operational data, and must **not** be treated as a failed zero-rows check. The
+operational-data assertion covers `customers`, `profiles`, `appointments`,
+`appointment_groups`, `transactions`, `booking_holds`, `notifications`,
+`therapist_queue` and `therapist_queue_day` — `audit_log` is excluded by design.
+
+### Local full rehearsal (RC7) — no Supabase connection
+
+A disposable `postgres:17` container, no network to either Supabase project, no
+credentials. A minimal harness created the four platform roles
+(`anon`, `authenticated`, `service_role`, `supabase_admin`), `pgcrypto`, a minimum
+`auth` schema (`auth.users`, `auth.uid()`, `auth.role()`), a minimum `storage`
+schema (`buckets`, `objects`), a minimum `vault` surface, and the platform
+`ensure_rls` event trigger with `rls_auto_enable()`.
+
+| File | Result |
+|---|---|
+| `000001_baseline_public.sql` | **exit 0** — clean |
+| `000002_storage.sql` | **exit 0** — clean |
+| `000003_ab_internal_cron.sql` | **exit 3 — harness limitation, see below** |
+| `000004_seed_configuration.sql` | **exit 0** — clean |
+
+**Stated limitation, not hidden.** `000003_ab_internal_cron.sql` failed with
+`ERROR: extension "pg_cron" is not available`. The vanilla `postgres:17` image
+does not ship `pg_cron`, so Section A cannot be rehearsed locally. This is an
+environment gap, not a file defect — the same file applied successfully to
+production at RC5 and its two Cron jobs are live and verified there. Nothing was
+bypassed to force the rehearsal to pass.
+
+**Rehearsal verification — every value matched.**
+
+| Check | Result |
+|---|---|
+| Public base tables | 30 ✅ |
+| Application functions (excluding extension-owned) | **193** ✅ |
+| Policies / triggers / indexes / constraints / enums | 72 / 73 / 104 / 169 / 7 ✅ |
+| RLS-enabled tables | 30 ✅ |
+| outlets / settings / business_hours / business_settings | 2 / 1 / 14 / 2 ✅ |
+| service_categories / services / rooms | 1 / 5 / 8 ✅ |
+| **room_units (trigger-created)** | **14** ✅ — Upper Massage Room 8, Ground Body 3, Upper Body 3 |
+| ob outlet settings / cards / room mappings / closures | 2 / 5 / 8 / 0 ✅ |
+| therapists / therapist_working_hours | 0 / 0 ✅ |
+| `Traditional Body Massage` spelling | single correct spelling ✅ |
+| Foot Massage `room_type` | `foot_chair` only (all 3) ✅ |
+| Traditional `room_type` | `body_room` only (both) ✅ |
+| `capacity_first_enabled` | `false, false` ✅ |
+| `public_close_time` | `19:30:00, 19:30:00` ✅ |
+| Online booking enabled | `taman-wahyu=true pv128=false` ✅ |
+| `services.image_url` empty | 5 of 5 ✅ |
+| `online_booking_services.public_image_url` empty | 5 of 5 ✅ |
+| `settings.logo_url` | NULL ✅ |
+| Staging URLs anywhere | **0** ✅ |
+| Outlet address + phone | both populated ✅ |
+| customers / appointments / transactions / booking_holds | 0 / 0 / 0 / 0 ✅ |
+| `audit_log` | 14, from rooms + services + settings ✅ documented |
+| Storage buckets / objects | 1 / 0 ✅ |
+| Duplicate-key or NOT NULL violations | **none** ✅ |
+
+A raw function count of 229 was observed and explained rather than assumed: 193
+application functions plus 36 `pgcrypto` functions, which the harness installs
+into `public` whereas production keeps `pgcrypto` in `extensions`. Excluding
+extension-owned functions gives exactly 193.
+
+The disposable database and container were destroyed after collecting results.
 
 ### Connecting for a production application
 
