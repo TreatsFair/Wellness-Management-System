@@ -6451,6 +6451,7 @@ class _TabletAppointmentCardTile extends StatelessWidget {
           builder: (context, constraints) {
             final width = constraints.maxWidth;
             final height = constraints.maxHeight;
+            final textScale = MediaQuery.textScalerOf(context).scale(1);
             final serviceLabel = _appointmentServiceLabel(appointment);
             final serviceCount = _appointmentServiceCount(appointment);
             // Full-width single-lane cards span the whole row; narrower cards
@@ -6471,7 +6472,7 @@ class _TabletAppointmentCardTile extends StatelessWidget {
 
             // THICK full-row card: plenty of height -> stack every detail,
             // wrapping the service names across up to three lines.
-            if (fullRow && height >= 122) {
+            if (fullRow && height >= 122 * textScale) {
               return Padding(
                 padding: const EdgeInsets.fromLTRB(12, 11, 14, 11),
                 child: Row(
@@ -6523,7 +6524,7 @@ class _TabletAppointmentCardTile extends StatelessWidget {
                             text: serviceCount > 1
                                 ? '$serviceLabel  ($serviceCount services)'
                                 : serviceLabel,
-                            maxLines: height >= 172 ? 3 : 2,
+                            maxLines: height >= 172 * textScale ? 3 : 2,
                             emphasize: true,
                           ),
                           const SizedBox(height: 4),
@@ -6531,7 +6532,7 @@ class _TabletAppointmentCardTile extends StatelessWidget {
                             icon: Icons.person_outline,
                             text: appointment.therapistDisplayName,
                           ),
-                          if (height >= 156 &&
+                          if (height >= 156 * textScale &&
                               appointment.showRoomAssignment) ...[
                             const SizedBox(height: 4),
                             _CardDetailLine(
@@ -6629,16 +6630,46 @@ class _TabletAppointmentCardTile extends StatelessWidget {
             // then time, with the price pinned center-right. When multiple
             // services would crowd the price, show the count instead of every
             // service name.
-            final tiny = height < 48;
-            final showService = height >= 66;
+            final tiny = height < 48 * textScale;
             final smallText = width < 170 || tiny;
             final narrowServiceText = serviceCount > 1
                 ? '$serviceCount services'
                 : serviceLabel;
+
+            // The card height is fixed by the appointment's duration (a short
+            // slot can land on the timeline's readable minimum), so decide the
+            // rows and the padding from the real line heights rather than from
+            // height thresholds — otherwise a card a few pixels short of what
+            // name + time need overflows.
+            const lineFactor = 1.2;
+            const fitFactor = 1.35; // headroom so we drop a row before we spill
+            const rowGap = 3.0;
+            final nameSize = smallText ? 12.0 : 13.0;
+            const serviceSize = 11.0;
+            final timeSize = smallText ? 10.5 : 11.5;
+            final innerHeight = height - 2; // 1px border top + bottom
+            final nameFit = nameSize * textScale * fitFactor;
+            final serviceFit = serviceSize * textScale * fitFactor;
+            final timeFit = timeSize * textScale * fitFactor;
+
+            final showService =
+                nameFit + rowGap + serviceFit + rowGap + timeFit <= innerHeight;
+            final showTime =
+                showService || nameFit + rowGap + timeFit <= innerHeight;
+            final contentHeight =
+                nameSize * textScale * lineFactor +
+                (showService
+                    ? rowGap + serviceSize * textScale * lineFactor
+                    : 0) +
+                (showTime ? rowGap + timeSize * textScale * lineFactor : 0);
+            final verticalPadding = ((innerHeight - contentHeight) / 2)
+                .clamp(0.0, tiny ? 4.0 : 6.0)
+                .toDouble();
+
             return Padding(
               padding: EdgeInsets.symmetric(
                 horizontal: tiny ? 7 : 9,
-                vertical: tiny ? 4 : 6,
+                vertical: verticalPadding,
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -6655,35 +6686,40 @@ class _TabletAppointmentCardTile extends StatelessWidget {
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            fontSize: smallText ? 12 : 13,
+                            fontSize: nameSize,
+                            height: lineFactor,
                             color: const Color(0xFF0F172A),
                             fontWeight: FontWeight.w900,
                           ),
                         ),
                         if (showService) ...[
-                          const SizedBox(height: 3),
+                          const SizedBox(height: rowGap),
                           Text(
                             narrowServiceText,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: const TextStyle(
-                              fontSize: 11,
+                              fontSize: serviceSize,
+                              height: lineFactor,
                               color: Color(0xFF475569),
                               fontWeight: FontWeight.w700,
                             ),
                           ),
                         ],
-                        const SizedBox(height: 3),
-                        Text(
-                          timeText,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: smallText ? 10.5 : 11.5,
-                            color: const Color(0xFF374151),
-                            fontWeight: FontWeight.w700,
+                        if (showTime) ...[
+                          const SizedBox(height: rowGap),
+                          Text(
+                            timeText,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: timeSize,
+                              height: lineFactor,
+                              color: const Color(0xFF374151),
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
-                        ),
+                        ],
                       ],
                     ),
                   ),

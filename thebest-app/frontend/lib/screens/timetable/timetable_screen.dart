@@ -4644,7 +4644,10 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
     );
   }
 
-  double _rowHeightFor(List<_TimetableEntry> entries) {
+  double _rowHeightFor(
+    List<_TimetableEntry> entries,
+    _TimetableResource resource,
+  ) {
     final visibleEntries = entries
         .where(
           (entry) => _entryIntersectsTimeline(
@@ -4655,9 +4658,12 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
         )
         .toList();
     final lanes = _assignLanesFlat(visibleEntries);
-    final laneCount = lanes.isEmpty
+    var laneCount = lanes.isEmpty
         ? 1
         : lanes.map((l) => l.lane).reduce((a, b) => a > b ? a : b) + 1;
+    if (resource.isRoom && resource.capacity > laneCount) {
+      laneCount = resource.capacity;
+    }
     final height =
         rowTopPad +
         laneCount * laneHeight +
@@ -4698,7 +4704,10 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
       for (final resource in widget.resources)
         widget.entries.where(resource.matches).toList(),
     ];
-    final rowHeights = [for (final list in rowEntries) _rowHeightFor(list)];
+    final rowHeights = [
+      for (var i = 0; i < rowEntries.length; i++)
+        _rowHeightFor(rowEntries[i], widget.resources[i]),
+    ];
     final contentHeight =
         50.0 + rowHeights.fold<double>(0, (total, height) => total + height);
 
@@ -4746,6 +4755,7 @@ class _ResourceTimetableGridState extends State<_ResourceTimetableGrid> {
                               ),
                               for (var i = 0; i < widget.resources.length; i++)
                                 _ResourceRowTimeline(
+                                  resource: widget.resources[i],
                                   entries: rowEntries[i],
                                   selectedDate: widget.selectedDate,
                                   rowHeight: rowHeights[i],
@@ -4957,6 +4967,7 @@ class _TimelineHoursHeader extends StatelessWidget {
 }
 
 class _ResourceRowTimeline extends StatelessWidget {
+  final _TimetableResource resource;
   final List<_TimetableEntry> entries;
   final DateTime selectedDate;
   final double rowHeight;
@@ -4973,6 +4984,7 @@ class _ResourceRowTimeline extends StatelessWidget {
   final bool isLast;
 
   const _ResourceRowTimeline({
+    required this.resource,
     required this.entries,
     required this.selectedDate,
     required this.rowHeight,
@@ -5006,6 +5018,14 @@ class _ResourceRowTimeline extends StatelessWidget {
         .where((entry) => !entry.isVoided && !entry.isNoShow)
         .toList();
     final lanes = _assignLanesFlat(visibleEntries);
+    final assignedLaneCount = lanes.isEmpty
+        ? 1
+        : lanes.map((lane) => lane.lane).reduce((a, b) => a > b ? a : b) + 1;
+    final renderedLaneCount =
+        resource.isRoom && resource.capacity > assignedLaneCount
+        ? resource.capacity
+        : assignedLaneCount;
+    final availabilityLaneCount = resource.isRoom ? renderedLaneCount : 1;
     final now = DateTime.now();
     final selectedToday = _stripDate(selectedDate) == _stripDate(now);
     final selectedBeforeToday = _stripDate(
@@ -5031,21 +5051,42 @@ class _ResourceRowTimeline extends StatelessWidget {
             canvasEndMinute: canvasEndMinute,
             minuteWidth: minuteWidth,
           ),
-          for (final segment in _freeSegments(
-            blockingEntries,
-            openMinute,
-            closeMinute,
-          ))
-            _FreeAvailabilitySegment(
-              segment: segment,
-              canvasStartMinute: canvasStartMinute,
-              minuteWidth: minuteWidth,
-              top: topPad,
-              height: laneHeight,
-              selectedToday: selectedToday,
-              selectedBeforeToday: selectedBeforeToday,
-              nowMinutes: nowMinutes,
-            ),
+          for (
+            var laneIndex = 0;
+            laneIndex < availabilityLaneCount;
+            laneIndex++
+          )
+            for (final segment in _freeSegments(
+              resource.isRoom
+                  ? lanes
+                        .where(
+                          (lane) =>
+                              lane.lane == laneIndex &&
+                              blockingEntries.contains(lane.entry),
+                        )
+                        .map((lane) => lane.entry)
+                        .toList()
+                  : blockingEntries,
+              openMinute,
+              closeMinute,
+            ))
+              _FreeAvailabilitySegment(
+                segment: segment,
+                canvasStartMinute: canvasStartMinute,
+                minuteWidth: minuteWidth,
+                top: topPad + laneIndex * (laneHeight + laneGap),
+                height: laneHeight,
+                selectedToday: selectedToday,
+                selectedBeforeToday: selectedBeforeToday,
+                nowMinutes: nowMinutes,
+                labelEmptyLane:
+                    resource.isRoom &&
+                    !lanes.any(
+                      (lane) =>
+                          lane.lane == laneIndex &&
+                          blockingEntries.contains(lane.entry),
+                    ),
+              ),
           for (final lane in lanes)
             _ResourceAppointmentBlock(
               entry: lane.entry,
@@ -5482,6 +5523,7 @@ class _FreeAvailabilitySegment extends StatelessWidget {
   final bool selectedToday;
   final bool selectedBeforeToday;
   final int nowMinutes;
+  final bool labelEmptyLane;
 
   const _FreeAvailabilitySegment({
     required this.segment,
@@ -5492,6 +5534,7 @@ class _FreeAvailabilitySegment extends StatelessWidget {
     required this.selectedToday,
     required this.selectedBeforeToday,
     required this.nowMinutes,
+    this.labelEmptyLane = false,
   });
 
   @override
@@ -5501,7 +5544,10 @@ class _FreeAvailabilitySegment extends StatelessWidget {
     final left = (segment.start - canvasStartMinute) * minuteWidth;
     final width = (segment.end - segment.start) * minuteWidth;
     if (width < 8) return const SizedBox.shrink();
-    final shouldLabel = segment.isFinalAfterBusy && !isPastGap && width >= 72;
+    final shouldLabel =
+        (segment.isFinalAfterBusy || labelEmptyLane) &&
+        !isPastGap &&
+        width >= 72;
     final useCompactLabel = width < 150;
     final labelTime = _clockLabel(_minutesToTime(segment.labelStart));
     final label = segment.followsInProgress
@@ -5765,7 +5811,13 @@ List<_ScheduleSegment> _freeSegments(
   for (final segment in busy) {
     if (segment.start > cursor) {
       free.add(
-        _ScheduleSegment(cursor, segment.start, labelStart: labelCursor),
+        _ScheduleSegment(
+          cursor,
+          segment.start,
+          labelStart: labelCursor,
+          isFinalAfterBusy: trailingBusyInProgress,
+          followsInProgress: trailingBusyInProgress,
+        ),
       );
     }
     if (segment.end > cursor) {
