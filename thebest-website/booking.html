@@ -14,7 +14,7 @@
     />
     <link rel="icon" href="./pics/FB profile-180x180px-02.jpg" />
     <link rel="stylesheet" href="./styles/modern-normalise.css" />
-    <link rel="stylesheet" href="./styles/booking-page.css?v=20260729" />
+    <link rel="stylesheet" href="./styles/booking-page.css?v=20260730" />
     <link rel="stylesheet" href="./styles/booking-responsive.css?v=20260729" />
     <title>Book an Appointment | The Best Family Wellness</title>
   </head>
@@ -277,22 +277,38 @@
               <label class="field">
                 <span>Mobile number</span>
                 <input
+                  id="billing-phone"
                   name="phone"
                   autocomplete="tel"
                   inputmode="tel"
                   placeholder="+60 12 345 6789"
+                  maxlength="24"
+                  aria-describedby="billing-phone-error"
                   required
                 />
+                <small
+                  class="field-error"
+                  id="billing-phone-error"
+                  aria-live="polite"
+                ></small>
               </label>
               <label class="field">
                 <span>Email address</span>
                 <input
+                  id="billing-email"
                   name="email"
                   autocomplete="email"
                   type="email"
                   placeholder="sarah@example.com"
+                  maxlength="254"
+                  aria-describedby="billing-email-error"
                   required
                 />
+                <small
+                  class="field-error"
+                  id="billing-email-error"
+                  aria-live="polite"
+                ></small>
               </label>
               <label class="field field-wide">
                 <span>Anything we should know? <small>Optional</small></span>
@@ -429,6 +445,7 @@
           <path d="m7 12 3 3 7-7" />
         </svg>
       </div>
+      <p class="eyebrow" id="confirmation-eyebrow">Booking status</p>
       <h2 id="confirmation-title">Your booking flow is ready.</h2>
       <p id="confirmation-message">
         No payment or confirmed appointment has been created.
@@ -514,6 +531,6 @@
 
     <script src="./js/booking-config.js?v=20260729"></script>
     <script src="./js/booking-api.js?v=20260729"></script>
-    <script src="./js/booking-page.js?v=20260729"></script>
+    <script src="./js/booking-page.js?v=20260730-2"></script>
   </body>
 </html>

@@ -164,6 +164,10 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field-wide { grid-column: 1 / -1; }
 .field input, .field textarea { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem 0.9rem; color: var(--ink); background: var(--paper); outline: none; font-size: 0.8rem; }
 .field input:focus, .field textarea:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(167, 123, 45, 0.12); }
+.field input.is-invalid { border-color: #b83b2f; background: #fff9f7; }
+.field input.is-invalid:focus { border-color: #b83b2f; box-shadow: 0 0 0 3px rgba(184, 59, 47, 0.13); }
+.field .field-error { display: none; color: #9f3026; font-size: 0.68rem; font-weight: 600; line-height: 1.35; }
+.field .field-error:not(:empty) { display: block; }
 .field textarea { resize: vertical; }
 .consent { display: flex; align-items: start; gap: 0.7rem; color: var(--muted); font-size: 0.7rem; line-height: 1.5; }
 .consent input { margin-top: 0.15rem; accent-color: var(--green); }

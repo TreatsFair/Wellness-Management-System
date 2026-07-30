@@ -45,6 +45,8 @@ const steps = [...document.querySelectorAll(".step")];
 const nextButton = document.querySelector("#continue-button");
 const backButton = document.querySelector("#back-button");
 const detailsForm = document.querySelector("#details-form");
+const billingPhone = document.querySelector("#billing-phone");
+const billingEmail = document.querySelector("#billing-email");
 const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
@@ -84,6 +86,56 @@ function applyFormSnapshot(snapshot) {
   }
   const consent = document.querySelector("#booking-consent");
   if (consent) consent.checked = Boolean(snapshot.consent);
+}
+
+function normalizedMalaysianMobile(value) {
+  const input = String(value || "").trim();
+  if (!input || !/^[+\d\s()-]+$/.test(input)) return "";
+  if (input.startsWith("+") && !input.startsWith("+60")) return "";
+  const digits = input.replace(/\D/g, "");
+  if (digits.startsWith("60")) return digits;
+  if (digits.startsWith("0")) return `6${digits}`;
+  return "";
+}
+
+function billingFieldError(field) {
+  const value = field.value.trim();
+  if (!value) {
+    return field === billingPhone
+      ? "Enter your mobile number."
+      : "Enter your email address.";
+  }
+  if (field === billingPhone) {
+    const normalized = normalizedMalaysianMobile(value);
+    if (!/^601\d{8,9}$/.test(normalized)) {
+      return "Enter a valid Malaysian mobile number, e.g. +60 12 345 6789.";
+    }
+    return "";
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(value)) {
+    return "Enter a valid email address, e.g. name@example.com.";
+  }
+  return "";
+}
+
+function validateBillingField(field, { showError = false } = {}) {
+  const error = billingFieldError(field);
+  field.setCustomValidity(error);
+  field.setAttribute("aria-invalid", error ? "true" : "false");
+  field.classList.toggle("is-invalid", Boolean(error) && (showError || field.dataset.touched === "true"));
+  const errorElement = document.querySelector(`#${field.getAttribute("aria-describedby")}`);
+  if (errorElement) {
+    errorElement.textContent = showError || field.dataset.touched === "true" ? error : "";
+  }
+  return !error;
+}
+
+function validateBillingFields({ showErrors = false } = {}) {
+  let valid = true;
+  for (const field of [billingPhone, billingEmail]) {
+    if (!validateBillingField(field, { showError: showErrors })) valid = false;
+  }
+  return valid;
 }
 
 function persistBookingSession() {
@@ -588,7 +640,10 @@ function canContinue() {
   if (state.step === 2) return state.guests.length > 0 && masseurFeasibility().ok;
   if (state.step === 3) return allTreatmentsChosen() && !state.loadingServices && !state.loadingDates;
   if (state.step === 4) return Boolean(state.date && state.time) && !state.loadingTimes;
-  if (state.step === 5) return detailsForm.checkValidity();
+  if (state.step === 5) {
+    validateBillingFields();
+    return detailsForm.checkValidity();
+  }
   return false;
 }
 
@@ -666,14 +721,18 @@ function updateUi() {
 function openSummary() { summarySheet.classList.add("is-open"); summaryOverlay.classList.add("is-open"); summaryToggle.setAttribute("aria-expanded", "true"); document.body.classList.add("summary-open"); summaryClose.focus(); }
 function closeSummary() { summarySheet.classList.remove("is-open"); summaryOverlay.classList.remove("is-open"); summaryToggle.setAttribute("aria-expanded", "false"); document.body.classList.remove("summary-open"); }
 
-function showConfirmation({ preview = false, hold = null } = {}) {
+function setConfirmationEyebrow(value) {
   const eyebrow = document.querySelector("#confirmation-eyebrow");
+  if (eyebrow) eyebrow.textContent = value;
+}
+
+function showConfirmation({ preview = false, hold = null } = {}) {
   const title = document.querySelector("#confirmation-title");
   const message = document.querySelector("#confirmation-message");
   if (preview) {
-    eyebrow.textContent = "Preview mode"; title.textContent = "The group booking form is ready."; message.textContent = "Configure Supabase to create a real hold. No appointment or payment was created.";
+    setConfirmationEyebrow("Preview mode"); title.textContent = "The group booking form is ready."; message.textContent = "Configure Supabase to create a real hold. No appointment or payment was created.";
   } else if (state.appointment) {
-    eyebrow.textContent = "Booking confirmed"; title.textContent = "Your appointment is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
+    setConfirmationEyebrow("Booking confirmed"); title.textContent = "Your appointment is booked."; message.textContent = `Reference ${String(hold.token).slice(0, 8).toUpperCase()}. We look forward to seeing you.`;
   }
   document.querySelector("#confirmation-dialog").showModal();
 }
@@ -728,7 +787,7 @@ function showHoldExpired() {
   const close = document.querySelector("#close-dialog");
   dialog.dataset.paymentState = "expired";
   setDialogIcon("failed");
-  document.querySelector("#confirmation-eyebrow").textContent = "Payment deadline expired";
+  setConfirmationEyebrow("Payment deadline expired");
   document.querySelector("#confirmation-title").textContent = "Your selected time is no longer reserved.";
   document.querySelector("#confirmation-message").textContent =
     "Please choose an available time and create a new payment reservation. Your contact details have been kept for convenience.";
@@ -780,16 +839,15 @@ function setDialogIcon(kind) {
 }
 function showPaymentStatus(kind, { reference = "" } = {}) {
   const dialog = document.querySelector("#confirmation-dialog");
-  const eyebrow = document.querySelector("#confirmation-eyebrow");
   const title = document.querySelector("#confirmation-title");
   const message = document.querySelector("#confirmation-message");
   const close = document.querySelector("#close-dialog");
   dialog.dataset.paymentState = kind;
   close.style.display = kind === "checking" ? "none" : "";
-  if (kind === "checking") { setDialogIcon("pending"); eyebrow.textContent = "Confirming your payment"; title.textContent = "Just a moment..."; message.textContent = "We're confirming your booking."; }
-  else if (kind === "confirmed") { setDialogIcon("success"); eyebrow.textContent = "Booking confirmed"; title.textContent = "Your booking is confirmed."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}`; close.textContent = "Done"; close.dataset.action = "home"; }
-  else if (kind === "failed") { setDialogIcon("failed"); eyebrow.textContent = "Payment not completed"; title.textContent = "We couldn't confirm your booking."; message.textContent = "Your booking was unsuccessful. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
-  else { setDialogIcon("pending"); eyebrow.textContent = "Still confirming"; title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
+  if (kind === "checking") { setDialogIcon("pending"); setConfirmationEyebrow("Confirming your payment"); title.textContent = "Just a moment..."; message.textContent = "We're confirming your booking."; }
+  else if (kind === "confirmed") { setDialogIcon("success"); setConfirmationEyebrow("Booking confirmed"); title.textContent = "Your booking is confirmed."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}`; close.textContent = "Done"; close.dataset.action = "home"; }
+  else if (kind === "failed") { setDialogIcon("failed"); setConfirmationEyebrow("Payment not completed"); title.textContent = "We couldn't confirm your booking."; message.textContent = "Your booking was unsuccessful. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
+  else { setDialogIcon("pending"); setConfirmationEyebrow("Still confirming"); title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
 }
 function stopPaymentPoll() { if (paymentPollTimer) clearTimeout(paymentPollTimer); paymentPollTimer = null; }
@@ -844,7 +902,11 @@ async function redirectActivePayment() {
 }
 
 async function submitHold() {
-  if (!detailsForm.reportValidity() || !state.time) return;
+  const contactDetailsValid = validateBillingFields({ showErrors: true });
+  if (!contactDetailsValid || !detailsForm.reportValidity() || !state.time) {
+    detailsForm.querySelector(":invalid")?.focus();
+    return;
+  }
   if (!api.configured) { showConfirmation({ preview: true }); return; }
   const form = new FormData(detailsForm);
   const fingerprint = currentBookingFingerprint(form);
@@ -933,7 +995,19 @@ nextButton.addEventListener("click", async () => {
   if (canContinue()) showStep(state.step + 1);
 });
 backButton.addEventListener("click", () => showStep(state.step - 1));
-detailsForm.addEventListener("input", updateUi);
+detailsForm.addEventListener("input", (event) => {
+  if (event.target === billingPhone || event.target === billingEmail) {
+    validateBillingField(event.target);
+  }
+  updateUi();
+});
+[billingPhone, billingEmail].forEach((field) => {
+  field.addEventListener("blur", () => {
+    field.dataset.touched = "true";
+    validateBillingField(field, { showError: true });
+    updateUi();
+  });
+});
 summaryToggle.addEventListener("click", openSummary);
 summaryClose.addEventListener("click", closeSummary);
 summaryOverlay.addEventListener("click", closeSummary);
