@@ -4762,19 +4762,32 @@ class _CustomerBreakdownScreen extends StatelessWidget {
                         padding: const EdgeInsets.only(bottom: 12),
                         child: _CustomerBreakdownCard(
                           customerOrders: customerOrders,
-                          onTap: () => showCustomerOrdersSheet(
-                            context,
-                            customer: CustomerModel(
-                              id: customerOrders.first.customerId,
-                              name: customerOrders.first.customerName,
-                              phone: customerOrders.first.customerPhone,
-                              gender: '',
-                              dateOfBirth: '',
-                              joinDate: '',
-                              notes: '',
-                            ),
-                            groupLatestBill: true,
-                          ),
+                          onTap: () {
+                            final first = customerOrders.first;
+                            if (first.customerId.isEmpty) {
+                              _showDetailDrawer(
+                                context: context,
+                                title: '${first.customerName} Bills',
+                                child: _CustomerDetailSheet(
+                                  customerOrders: customerOrders,
+                                ),
+                              );
+                              return;
+                            }
+                            showCustomerOrdersSheet(
+                              context,
+                              customer: CustomerModel(
+                                id: first.customerId,
+                                name: first.customerName,
+                                phone: first.customerPhone,
+                                gender: '',
+                                dateOfBirth: '',
+                                joinDate: '',
+                                notes: '',
+                              ),
+                              groupLatestBill: true,
+                            );
+                          },
                         ),
                       );
                     },

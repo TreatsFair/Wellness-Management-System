@@ -16,9 +16,13 @@ class TransactionRepository {
   Future<List<Map<String, dynamic>>> getTransactionsByCustomer(
     String customerId,
   ) {
+    final normalizedCustomerId = customerId.trim();
+    if (normalizedCustomerId.isEmpty) {
+      return Future.value(const <Map<String, dynamic>>[]);
+    }
     return _table.findBy(
       'customer_id',
-      customerId,
+      normalizedCustomerId,
       orderBy: 'created_at',
       ascending: false,
     );
