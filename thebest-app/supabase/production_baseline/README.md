@@ -379,6 +379,99 @@ write `therapists.commission_overrides`.
 | `000004_seed_configuration.sql` | 39,148 | 680 | `99413d400a4468e7…` (finalised, guard removed, Stage 3D) |
 | `image_migration_manifest.md` | 6,270 | 105 | `b6ebbf57dce4c641…` |
 
+## Stage 4A — the first production apply stopped, and how to resume
+
+**No real data existed and none was lost.** Production was empty before the
+attempt and contains no customers, appointments, transactions or staff. The
+consequence is a partially-built schema, not damage.
+
+### Why it stopped
+
+```
+psql:/baseline/000001_baseline_public.sql:14322:
+ERROR: function "rls_auto_enable" already exists with same argument types
+```
+
+`public.rls_auto_enable()` is a **Supabase platform object**, created in every
+new project and backing the platform event trigger `ensure_rls`, which
+auto-enables RLS on newly created public tables. The dump carried staging's copy
+of it, and it collided with the one production already had.
+
+The apply ran **without `--single-transaction`**, so every statement before the
+failure committed individually. `ON_ERROR_STOP=1` then aborted psql, so nothing
+after the failed statement ran.
+
+### The platform object was verified identical
+
+Read-only comparison of the dumped definition against production's
+`pg_get_functiondef` output:
+
+| Property | Dump (from staging) | Production | Match |
+|---|---|---|---|
+| Body | (27 lines) | (27 lines) | **identical**, whitespace-normalised |
+| Language / volatility | `plpgsql`, `SECURITY DEFINER` | same | yes |
+| `search_path` | `pg_catalog` | `pg_catalog` | yes |
+| Owner | `postgres` | `postgres` | yes |
+| **ACL** | `postgres=X/postgres` | **default — `PUBLIC` has EXECUTE** | **no** |
+
+Only the ACL differs, and only because staging has had
+`REVOKE ALL ON FUNCTION public.rls_auto_enable() FROM PUBLIC` applied. Removing
+the `CREATE FUNCTION` from the baseline therefore loses nothing.
+
+### Partial production state (read-only verified)
+
+| Item | Value |
+|---|---|
+| Public base tables | **1** — `appointments` only |
+| Public functions | **162** = 161 application + 1 platform `rls_auto_enable` |
+| Enum types | 7 |
+| Constraints | 9 |
+| RLS-enabled tables | 1 |
+| Policies / ordinary triggers / indexes | 0 / 0 / 0 |
+
+`appointments` arrived alone because `pg_dump` pulls a table forward when a later
+function depends on its row type. The count of `CREATE FUNCTION` statements
+before the failure point in the file is **161**, which independently corroborates
+production's 162.
+
+### RC2 must NOT be reapplied from the beginning to this project
+
+Re-running the baseline against this partially-applied project would fail
+immediately on `CREATE TABLE public.appointments` and on 161 duplicate functions.
+Use `000001_recovery_continue_after_platform_function.sql` instead. For a
+genuinely empty project, use the corrected `000001_baseline_public.sql`; its own
+preflight guard enforces the distinction.
+
+### What changed in the restore-ready baseline
+
+`000001_baseline_public.raw.sql` is **untouched** — checksum re-verified as
+`c6cad4ae…f9970`.
+
+`000001_baseline_public.sql`: **39 lines removed, nothing else changed.**
+
+| Removed | Original lines | Reason |
+|---|---|---|
+| `CREATE FUNCTION public.rls_auto_enable()` + its pg_dump header comment | 14292-14324 (33 lines) | pre-existing platform object, verified identical |
+| `REVOKE ALL ON FUNCTION public.rls_auto_enable() FROM PUBLIC;` + its ACL header | 21390-21395 (6 lines) | would alter a platform-managed function's permissions |
+
+21,890 → 21,851 lines. `CREATE FUNCTION` 193 → 192. No table, enum, constraint,
+application function, policy, ordinary trigger, index, application grant or
+Migration 132 object was altered.
+
+> **Consequence to close later, deliberately not closed here.** Dropping the
+> `REVOKE` leaves production's `rls_auto_enable` executable by `anon` and
+> `authenticated` — exactly the two WARN findings the security advisor reported
+> on the empty project. Staging *is* locked down. Re-apply that one line as an
+> explicit decision during Stage 12 security hardening rather than as a side
+> effect of the baseline.
+
+### Mandatory from now on: `--single-transaction`
+
+Every baseline and companion-file application must use `--single-transaction`
+together with `ON_ERROR_STOP=1`, so a failure rolls the entire file back instead
+of leaving a half-built schema. The absence of that flag is the only reason this
+recovery file is needed.
+
 ## Stage 3D revision 2 — final amendments
 
 Six amendments were applied after the first Stage 3D pass. Every one is reflected
