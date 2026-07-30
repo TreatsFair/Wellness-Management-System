@@ -43,7 +43,7 @@
 -- rolls the whole thing back. See README.md.
 --
 
-estrict WCUTRHEX31ybwXyaFzdPzypcMqZDUe8gjt6EO0ziJzZLzwk3twuthChppv77VyU
+\restrict WCUTRHEX31ybwXyaFzdPzypcMqZDUe8gjt6EO0ziJzZLzwk3twuthChppv77VyU
 
 SET statement_timeout = 0;
 SET lock_timeout = 0;

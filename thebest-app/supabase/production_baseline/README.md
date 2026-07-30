@@ -379,7 +379,7 @@ now. Verify with `sha256sum <file>` before any production application.
 |---|---|---|---|
 | `000001_baseline_public.raw.sql` | 882,947 | 21,902 | `c6cad4aec611ae7e252fb77392decc9a335e21ea099b4d4ed0628caeecff9970` |
 | `000001_baseline_public.sql` | 880,413 | 21,851 | `afc45510a234d09777ba7cdad0690362b30bba967cdb18ddab057fea22aacac1` |
-| `000001_recovery_continue_after_platform_function.sql` | 335,348 | 7,702 | `192a88de0dd9153e42cb4ecd938c633432769ed8c1386b3986f8ea51affa3704` |
+| `000001_recovery_continue_after_platform_function.sql` | 335,238 | 7,702 | `b4beb75426f456119173e89435e217addabb0205707d3d3ab5f0d31272b550f5` |
 | `000002_storage.sql` | 6,979 | 167 | `c1d611de92088433b1141bfa9339eaeed7070610c9dfb25fa500224c2de45c01` |
 | `000003_ab_internal_cron.sql` | 7,703 | 152 | `31302509a4f6ae9ddb4f79c04ca4832d16e367ad8fa497b7337e923b12800b74` |
 | `000003_cron.sql` | 11,259 | 244 | `a67acd1d8160c3bc2184a3112fe902f178a9ecfd0ab0379bf4c2f850d6a59b37` |
@@ -413,6 +413,62 @@ omitted. Verified to contain exactly two executable `cron.schedule` calls
 `net.http_post`, `vault.decrypted_secrets`, `booking_api_url` or
 `booking_cleanup_secret`. Section C remains in `000003_cron.sql` and is applied
 separately, later, once `booking-api` is deployed and both Vault entries exist.
+
+### RC5 — the recovery file was corrupt, and how it was found
+
+The first authenticated production attempt failed on the recovery file itself:
+
+```
+psql:000001_recovery_continue_after_platform_function.sql:48:
+ERROR:  syntax error at or near "estrict"
+LINE 1: estrict WCUTRHEX31yb...
+```
+
+**Cause.** When the recovery file was generated, the opening `\restrict` line was
+written from a Python string in which the sequence was interpreted as the escape
+`\r`. A single carriage-return byte (`0x0D`) was emitted where two ASCII
+characters (`0x5C 0x72`) belonged. psql never saw a meta-command; it forwarded
+`estrict <token>` to the server as SQL. The closing `\unrestrict` was unaffected,
+and both source baselines were unaffected — pg_dump wrote those, correctly.
+
+**Why the checksum gate did not catch it.** The corrupt file hashed consistently,
+so `192a88de…a3704` matched on every verification. It was committed at rc3 and
+re-verified at rc4. Object counting also passed, because every object *was*
+present — 31 functions, 29 tables, 72 policies, 73 triggers, 30 RLS statements.
+Neither a checksum nor an object count can detect a malformed meta-command.
+
+**New requirement: byte-level meta-command validation.** Any generated or edited
+SQL script must, before application, prove:
+
+- the opening meta-command begins with bytes `0x5C 0x72`;
+- exactly one valid `\restrict` and exactly one valid `\unrestrict` exist;
+- both carry the identical token;
+- zero standalone `0x0D` bytes remain anywhere in the file;
+- no line begins with malformed `estrict` text.
+
+Beware a naive count of the substring `estrict`: the legitimate English word
+"restricts" occurs inside the `COMMENT ON COLUMN
+public.therapists.commission_overrides` statement, so the correct test is
+per-line and structural, not arithmetic.
+
+**Also required: local acceptance before production.** Every script must first run
+against a throwaway `postgres:17` container. The recovery file's expected local
+result is that psql accepts both meta-commands, executes the `SET` preamble,
+reaches the preflight guard, and the guard *refuses* with an itemised state diff.
+A refusal there is success — it proves the script parses and the guard works.
+
+**Repair applied at rc5.** The opening line was rewritten as a genuine
+`\restrict <token>` using explicit byte values, and the whole file was normalised
+to LF endings (it had been mixed: 111 CRLF from the generated header, 7,591 bare
+LF from the copied dump body). No SQL statement, object ordering, guard, function
+body, policy, trigger, table, constraint, grant or revoke was altered.
+
+| | Before | After |
+|---|---|---|
+| Bytes | 335,348 | 335,238 |
+| Lines | 7,702 | 7,702 |
+| Standalone CR bytes | 112 | **0** |
+| SHA-256 | `192a88de…a3704` (corrupt) | `b4beb75426f456119173e89435e217addabb0205707d3d3ab5f0d31272b550f5` |
 
 ### Connecting for a production application
 
