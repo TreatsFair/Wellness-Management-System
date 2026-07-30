@@ -368,16 +368,70 @@ expensive: real Auth users must exist before `profiles` rows are seeded, and
 `000004` must run on a privileged connection — after `000001`, only an admin can
 write `therapists.commission_overrides`.
 
-## File manifest (Stage 3D final state, 2026-07-30)
+## File manifest — authoritative, RC4 (2026-07-30)
+
+Every value below is a complete 64-character SHA-256 of the file as committed at
+`v1.0.0-rc4`. Earlier revisions of this table carried truncated hashes and
+pre-Stage-4A values, so "checksums match README" was not a strict gate. It is
+now. Verify with `sha256sum <file>` before any production application.
 
 | File | Bytes | Lines | SHA-256 |
 |---|---|---|---|
 | `000001_baseline_public.raw.sql` | 882,947 | 21,902 | `c6cad4aec611ae7e252fb77392decc9a335e21ea099b4d4ed0628caeecff9970` |
-| `000001_baseline_public.sql` | 881,734 | 21,890 | `9e9cb60148519f8b14eee0471b58810ac94ce9dfba35aa6418eb7a905a7f0234` |
-| `000002_storage.sql` | 6,979 | 167 | `c1d611de92088433…` (write policies tightened, Stage 3D) |
+| `000001_baseline_public.sql` | 880,413 | 21,851 | `afc45510a234d09777ba7cdad0690362b30bba967cdb18ddab057fea22aacac1` |
+| `000001_recovery_continue_after_platform_function.sql` | 335,348 | 7,702 | `192a88de0dd9153e42cb4ecd938c633432769ed8c1386b3986f8ea51affa3704` |
+| `000002_storage.sql` | 6,979 | 167 | `c1d611de92088433b1141bfa9339eaeed7070610c9dfb25fa500224c2de45c01` |
+| `000003_ab_internal_cron.sql` | 7,703 | 152 | `31302509a4f6ae9ddb4f79c04ca4832d16e367ad8fa497b7337e923b12800b74` |
 | `000003_cron.sql` | 11,259 | 244 | `a67acd1d8160c3bc2184a3112fe902f178a9ecfd0ab0379bf4c2f850d6a59b37` |
-| `000004_seed_configuration.sql` | 39,148 | 680 | `99413d400a4468e7…` (finalised, guard removed, Stage 3D) |
-| `image_migration_manifest.md` | 6,270 | 105 | `b6ebbf57dce4c641…` |
+| `000004_seed_configuration.sql` | 40,152 | 699 | `a3e862ea16b1514d828d3359c7c354a769cb63e2198461e2805ada46670daed6` |
+| `000005_controlled_smoke_test_data.sql` | 12,328 | 252 | `e1d83dcfe5cc69b0f9bcbea7b07797173230e8213b2679b0fa51b860f532f54f` |
+| `000005_cleanup_smoke_test_data.sql` | 6,622 | 162 | `98b75e8b20affbc2a86eb91290104a86b5549eddb4c9f38a456f6ed5fcd7453c` |
+| `image_migration_manifest.md` | 6,597 | 110 | `07bb76828778b4298c3082a64439ad78d10cb36ea9939ca6851e1d2e4ffb60c1` |
+
+`README.md` is excluded from its own manifest for obvious reasons.
+
+Checksums are reproducible on Windows with `core.autocrlf=true`, which is this
+repository's configuration: the working tree is CRLF, Git stores LF, and checkout
+restores CRLF, so the round trip is stable. A checkout on Linux or macOS produces
+LF files whose SHA-256 will differ. Docker reads the mounted Windows files
+directly, so execution is unaffected either way.
+
+### `000003_ab_internal_cron.sql` — why it exists
+
+`000003_cron.sql` cannot be applied whole during the baseline build. Its
+Section C is an executable `DO` block whose guard raises when the Vault entries
+`booking_api_url` and `booking_cleanup_secret` are absent — which they
+deliberately are until the Vault/Cron stage. Under `--single-transaction` that
+exception rolls back Sections A and B too, so applying the combined file installs
+nothing.
+
+`000003_ab_internal_cron.sql` is lines 1-125 of `000003_cron.sql` verbatim —
+Section A (extensions) and Section B (the two database-only jobs) — with Section C
+omitted. Verified to contain exactly two executable `cron.schedule` calls
+(`reconcile-upcoming-appointment-assignments` `*/5 * * * *`,
+`expire-stale-booking-holds` `*/10 * * * *`) and **zero** executable
+`net.http_post`, `vault.decrypted_secrets`, `booking_api_url` or
+`booking_cleanup_secret`. Section C remains in `000003_cron.sql` and is applied
+separately, later, once `booking-api` is deployed and both Vault entries exist.
+
+### Connecting for a production application
+
+Use **discrete PG environment variables, not a connection URL.** The first RC3
+attempt failed authentication because the production password contains
+URL-reserved characters; unencoded inside a URL, libpq sends the wrong
+credential. Discrete variables have no escaping hazard:
+
+```
+PGHOST=aws-0-ap-southeast-1.pooler.supabase.com
+PGPORT=5432
+PGDATABASE=postgres
+PGUSER=postgres.<production-ref>
+PGPASSWORD=<raw password, never encoded, never committed>
+PGSSLMODE=require
+```
+
+Every application must use `--single-transaction` together with
+`ON_ERROR_STOP=1`, and the baseline directory must be mounted read-only.
 
 ## Stage 4A — the first production apply stopped, and how to resume
 
