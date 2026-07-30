@@ -23,7 +23,8 @@
 -- CONTAINS NO THERAPISTS. See SECTION 9 — this is deliberate and blocking for
 -- several later smoke tests.
 --
--- CONTAINS NO STORAGE URLs. Image columns are seeded NULL and are populated
+-- CONTAINS NO STORAGE URLs. Image columns are seeded as EMPTY STRINGS ('')
+-- and are populated
 -- later from image_migration_manifest.md, after 000002_storage.sql is applied.
 --
 -- CONTAINS NO CLOSURE ROWS. online_booking_closures is intentionally empty.
@@ -38,7 +39,11 @@
 -- ============================================================================
 
 
-begin;
+-- NOTE: this file contains no BEGIN/COMMIT. The transaction boundary is
+-- supplied externally by psql --single-transaction, together with
+-- ON_ERROR_STOP=1, so any failure rolls the whole file back. An internal
+-- COMMIT would end that wrapper transaction early and silently weaken the
+-- protection.
 
 
 -- ============================================================================
@@ -92,21 +97,29 @@ begin;
 -- Both real branches retained. PV128 is NOT deleted; see SECTION 12 for its
 -- limited operational status.
 --
--- `outlets` has no address column (verified: id, code, name, is_active, plus
--- audit columns). Street addresses are therefore recorded in this file's
--- comments and in the README, and belong in the app's Business Settings screen
--- once a field exists. They are NOT invented into a column that does not exist.
+-- CORRECTION (RC6): an earlier revision of this file asserted that `outlets` has
+-- no address column. That was wrong — the table has both `address` and `phone`,
+-- each NOT NULL with default ''. They are now seeded with the confirmed values
+-- from the official site rather than left empty. Staging holds truncated
+-- addresses (no postcode or city) and empty phones; the full published values are
+-- used here instead.
 --
 --   pv128        G13-A, PV128, Jalan Genting Kelang, Setapak, 53300 Kuala Lumpur
 --                phone 012-7449 266
 --   taman-wahyu  50G, Jalan Seri Utara 1, Taman Wahyu, 68100 Kuala Lumpur
 --                phone 012-5262 551
 
-insert into public.outlets (id, code, name, is_active) values
-  ('00000000-0000-0000-0000-000000000128', 'pv128',       'PV128',       true),
-  ('00000000-0000-0000-0000-000000000002', 'taman-wahyu', 'Taman Wahyu', true)
+insert into public.outlets (id, code, name, address, phone, is_active) values
+  ('00000000-0000-0000-0000-000000000128', 'pv128',       'PV128',
+   'G13-A, PV128, Jalan Genting Kelang, Setapak, 53300 Kuala Lumpur', '012-7449 266', true),
+  ('00000000-0000-0000-0000-000000000002', 'taman-wahyu', 'Taman Wahyu',
+   '50G, Jalan Seri Utara 1, Taman Wahyu, 68100 Kuala Lumpur',       '012-5262 551', true)
 on conflict (id) do update set
-  code = excluded.code, name = excluded.name, is_active = excluded.is_active;
+  code      = excluded.code,
+  name      = excluded.name,
+  address   = excluded.address,
+  phone     = excluded.phone,
+  is_active = excluded.is_active;
 
 
 -- ============================================================================
@@ -116,7 +129,8 @@ on conflict (id) do update set
 -- name. `location` is the single generic field, so 'Kuala Lumpur' is used as
 -- instructed; per-branch addresses are in SECTION 3's comments.
 --
--- logo_url is seeded NULL on purpose. Staging's value points at the staging
+-- logo_url is seeded NULL on purpose (it is the one nullable image column).
+-- Staging's value points at the staging
 -- project. The genuine logo object is listed in image_migration_manifest.md and
 -- is copied across after 000002 is applied.
 
@@ -254,7 +268,8 @@ on conflict (id) do update set
 -- therapist_commission and counter_commission (the service-level commission
 -- configuration — see SECTION 11).
 --
--- image_url is NULL here. Real files are migrated per
+-- image_url is '' here -- the column is NOT NULL with default ''. Real files
+-- are migrated per
 -- image_migration_manifest.md and the URLs written afterwards.
 --
 -- TWO CORRECTIONS APPLIED, both approved by the product owner in Stage 3D:
@@ -286,15 +301,15 @@ insert into public.services (
   service_description, image_url
 ) values
   ('83893724-c584-4603-b208-1db6db0b2ab0', '00000000-0000-0000-0000-000000000002',
-   'Foot Massage',             'Services',  39.00,  50, 'foot_chair', 20, 4, true, 0, 0, 'Foot Massage', null),
+   'Foot Massage',             'Services',  39.00,  50, 'foot_chair', 20, 4, true, 0, 0, 'Foot Massage', ''),
   ('a5f9c703-9d80-42a6-9282-449fbdb29d65', '00000000-0000-0000-0000-000000000002',
-   'Foot Massage',             'Services',  59.00,  75, 'foot_chair', 25, 5, true, 1, 0, '',             null),
+   'Foot Massage',             'Services',  59.00,  75, 'foot_chair', 25, 5, true, 1, 0, '',             ''),
   ('edd2553e-9d98-45d2-9b89-c67a2c6444c8', '00000000-0000-0000-0000-000000000002',
-   'Foot Massage',             'Services',  78.00,  90, 'foot_chair', 30, 6, true, 2, 0, '',             null),
+   'Foot Massage',             'Services',  78.00,  90, 'foot_chair', 30, 6, true, 2, 0, '',             ''),
   ('4af490ba-064b-4fd4-85fd-9edba196a62d', '00000000-0000-0000-0000-000000000002',
-   'Traditional Body Massage', 'Services',  99.00,  60, 'body_room',  35, 7, true, 3, 0, '',             null),
+   'Traditional Body Massage', 'Services',  99.00,  60, 'body_room',  35, 7, true, 3, 0, '',             ''),
   ('c5c786c0-7a5b-4cd4-84ac-b8c7f83986dd', '00000000-0000-0000-0000-000000000002',
-   'Traditional Body Massage', 'Services', 129.00,  80, 'body_room',  40, 8, true, 4, 0, '',             null)
+   'Traditional Body Massage', 'Services', 129.00,  80, 'body_room',  40, 8, true, 4, 0, '',             '')
 on conflict (id) do update set
   outlet_id            = excluded.outlet_id,
   name                 = excluded.name,
@@ -367,21 +382,38 @@ on conflict (id) do update set
 -- capacity without individually numbered chairs — that is staging's model and
 -- is preserved.
 
-insert into public.rooms (id, outlet_id, name, room_type, total_slots, is_active) values
+-- CORRECTION (RC6): `rooms.floor` and `rooms.type` are NOT NULL with NO default,
+-- and an earlier revision omitted both — the insert would have failed. Both are
+-- now supplied from staging's confirmed values. `allocation_mode` is also carried
+-- over explicitly rather than left to its 'capacity' default, because the three
+-- zones with numbered units use 'specific_room', and that distinction drives
+-- room-unit assignment. `type` duplicates `room_type` in staging; that redundancy
+-- is reproduced rather than resolved.
+
+insert into public.rooms (
+  id, outlet_id, name, room_type, type, floor, total_slots, is_active,
+  allocation_mode, equipment
+) values
   -- Taman Wahyu
-  ('94263d9a-14aa-47a1-a868-4b704951a993', '00000000-0000-0000-0000-000000000002', 'Ground Floor',        'foot_chair', 7, true),
-  ('d7403730-f6b7-4ed7-ae42-c7f45b6045f0', '00000000-0000-0000-0000-000000000002', 'Ground Massage Room', 'body_room',  3, false),
-  ('6a48a888-7dcc-47ff-a74b-4f84a959162d', '00000000-0000-0000-0000-000000000002', 'Upper Foot',          'foot_chair', 5, true),
-  ('8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Upper Massage Room',  'body_room',  8, true),
+  ('94263d9a-14aa-47a1-a868-4b704951a993', '00000000-0000-0000-0000-000000000002', 'Ground Floor',        'foot_chair', 'foot_chair', 'Ground', 7, true,  'capacity',      ''),
+  ('d7403730-f6b7-4ed7-ae42-c7f45b6045f0', '00000000-0000-0000-0000-000000000002', 'Ground Massage Room', 'body_room',  'body_room',  'Ground', 3, false, 'capacity',      ''),
+  ('6a48a888-7dcc-47ff-a74b-4f84a959162d', '00000000-0000-0000-0000-000000000002', 'Upper Foot',          'foot_chair', 'foot_chair', 'Upper',  5, true,  'capacity',      ''),
+  ('8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Upper Massage Room',  'body_room',  'body_room',  'Upper',  8, true,  'specific_room', ''),
   -- PV128 (confirmed accurate by the product owner)
-  ('0f1503b5-1ed8-4f65-b421-55696bdb229a', '00000000-0000-0000-0000-000000000128', 'Ground Body Massage Rooms', 'body_room',  3, true),
-  ('39c75366-1205-48b2-963b-92c4b984e9c8', '00000000-0000-0000-0000-000000000128', 'Ground Floor Foot Zone',    'foot_chair', 6, true),
-  ('f01292e8-928e-4256-9c81-866fff17d566', '00000000-0000-0000-0000-000000000128', 'Upper Body Massage Rooms',  'body_room',  3, true),
-  ('3927cbdc-2540-4e0c-9873-cfc55c4c4182', '00000000-0000-0000-0000-000000000128', 'Upper Floor Foot Zone',     'foot_chair', 6, true)
+  ('0f1503b5-1ed8-4f65-b421-55696bdb229a', '00000000-0000-0000-0000-000000000128', 'Ground Body Massage Rooms', 'body_room',  'body_room',  'Ground', 3, true, 'specific_room', ''),
+  ('39c75366-1205-48b2-963b-92c4b984e9c8', '00000000-0000-0000-0000-000000000128', 'Ground Floor Foot Zone',    'foot_chair', 'foot_chair', 'Ground', 6, true, 'capacity',      ''),
+  ('f01292e8-928e-4256-9c81-866fff17d566', '00000000-0000-0000-0000-000000000128', 'Upper Body Massage Rooms',  'body_room',  'body_room',  'Upper',  3, true, 'specific_room', ''),
+  ('3927cbdc-2540-4e0c-9873-cfc55c4c4182', '00000000-0000-0000-0000-000000000128', 'Upper Floor Foot Zone',     'foot_chair', 'foot_chair', 'Upper',  6, true, 'capacity',      '')
 on conflict (id) do update set
-  outlet_id = excluded.outlet_id, name = excluded.name,
-  room_type = excluded.room_type, total_slots = excluded.total_slots,
-  is_active = excluded.is_active;
+  outlet_id       = excluded.outlet_id,
+  name            = excluded.name,
+  room_type       = excluded.room_type,
+  type            = excluded.type,
+  floor           = excluded.floor,
+  total_slots     = excluded.total_slots,
+  is_active       = excluded.is_active,
+  allocation_mode = excluded.allocation_mode,
+  equipment       = excluded.equipment;
 
 insert into public.room_units (id, zone_id, outlet_id, name, unit_number, is_active) values
   ('7e69cd81-b306-4e3f-a4d6-b1bcce7363e7', '8df942f1-bf39-4372-8bfe-e578a703a5b2', '00000000-0000-0000-0000-000000000002', 'Room 1', 1, true),
@@ -535,13 +567,13 @@ on conflict (outlet_id) do update set
 -- has no duration column — verified). enabled = true for all five: Taman Wahyu
 -- online booking is going live with exactly this catalogue.
 --
--- public_image_url is NULL. It is populated after migration and deliberately
+-- public_image_url is ''. It is populated after migration and deliberately
 -- points at the SAME migrated object as the service image rather than a second
 -- copy — staging's nine online-booking PNGs are 1.7-1.9 MB duplicates belonging
 -- to excluded services and are not migrated.
 --
 -- short_description: taken from the service where staging had one, otherwise
--- left NULL rather than invented.
+-- left as '' rather than invented ('' is the column default; it is NOT NULL).
 
 insert into public.online_booking_services (
   id, outlet_id, service_id, enabled, public_name, short_description,
@@ -551,19 +583,19 @@ insert into public.online_booking_services (
 ) values
   ('83893724-c584-4603-b208-1db6db0b2ab0', '00000000-0000-0000-0000-000000000002',
    '83893724-c584-4603-b208-1db6db0b2ab0', true, 'Foot Massage (50 min)',
-   'Foot Massage', null,  39.00, 0, true, 0, 0, 0, 6, false),
+   'Foot Massage', '',  39.00, 0, true, 0, 0, 0, 6, false),
   ('a5f9c703-9d80-42a6-9282-449fbdb29d65', '00000000-0000-0000-0000-000000000002',
    'a5f9c703-9d80-42a6-9282-449fbdb29d65', true, 'Foot Massage (75 min)',
-   null, null,  59.00, 0, true, 1, 0, 0, 6, false),
+   '', '',  59.00, 0, true, 1, 0, 0, 6, false),
   ('edd2553e-9d98-45d2-9b89-c67a2c6444c8', '00000000-0000-0000-0000-000000000002',
    'edd2553e-9d98-45d2-9b89-c67a2c6444c8', true, 'Foot Massage (90 min)',
-   null, null,  78.00, 0, true, 2, 0, 0, 6, false),
+   '', '',  78.00, 0, true, 2, 0, 0, 6, false),
   ('4af490ba-064b-4fd4-85fd-9edba196a62d', '00000000-0000-0000-0000-000000000002',
    '4af490ba-064b-4fd4-85fd-9edba196a62d', true, 'Traditional Body Massage (60 min)',
-   null, null,  99.00, 0, true, 3, 0, 0, 6, false),
+   '', '',  99.00, 0, true, 3, 0, 0, 6, false),
   ('c5c786c0-7a5b-4cd4-84ac-b8c7f83986dd', '00000000-0000-0000-0000-000000000002',
    'c5c786c0-7a5b-4cd4-84ac-b8c7f83986dd', true, 'Traditional Body Massage (80 min)',
-   null, null, 129.00, 0, true, 4, 0, 0, 6, false)
+   '', '', 129.00, 0, true, 4, 0, 0, 6, false)
 on conflict (id) do update set
   outlet_id                   = excluded.outlet_id,
   service_id                  = excluded.service_id,
@@ -630,7 +662,6 @@ on conflict (online_booking_service_id, room_id) do nothing;
 -- replacement dates are added, per decision 9.
 
 
-commit;
 
 
 -- ============================================================================
@@ -684,9 +715,9 @@ commit;
 --   order by ob.display_order;                      -- 5 rows, prices equal
 --
 --  -- no image URL points anywhere yet (populated after migration)
---  select count(*) from public.services where image_url is not null;            -- 0
+--  select count(*) from public.services where image_url <> '';                  -- 0
 --  select count(*) from public.online_booking_services
---   where public_image_url is not null;                                         -- 0
+--   where public_image_url <> '';                                               -- 0
 --
 --  -- deprecated column untouched, no therapist overrides
 --  select count(*) from public.therapists

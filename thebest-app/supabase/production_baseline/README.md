@@ -375,18 +375,20 @@ Every value below is a complete 64-character SHA-256 of the file as committed at
 pre-Stage-4A values, so "checksums match README" was not a strict gate. It is
 now. Verify with `sha256sum <file>` before any production application.
 
-| File | Bytes | Lines | SHA-256 |
-|---|---|---|---|
-| `000001_baseline_public.raw.sql` | 882,947 | 21,902 | `c6cad4aec611ae7e252fb77392decc9a335e21ea099b4d4ed0628caeecff9970` |
-| `000001_baseline_public.sql` | 880,413 | 21,851 | `afc45510a234d09777ba7cdad0690362b30bba967cdb18ddab057fea22aacac1` |
-| `000001_recovery_continue_after_platform_function.sql` | 335,238 | 7,702 | `b4beb75426f456119173e89435e217addabb0205707d3d3ab5f0d31272b550f5` |
-| `000002_storage.sql` | 6,979 | 167 | `c1d611de92088433b1141bfa9339eaeed7070610c9dfb25fa500224c2de45c01` |
-| `000003_ab_internal_cron.sql` | 7,703 | 152 | `31302509a4f6ae9ddb4f79c04ca4832d16e367ad8fa497b7337e923b12800b74` |
-| `000003_cron.sql` | 11,259 | 244 | `a67acd1d8160c3bc2184a3112fe902f178a9ecfd0ab0379bf4c2f850d6a59b37` |
-| `000004_seed_configuration.sql` | 40,152 | 699 | `a3e862ea16b1514d828d3359c7c354a769cb63e2198461e2805ada46670daed6` |
-| `000005_controlled_smoke_test_data.sql` | 12,328 | 252 | `e1d83dcfe5cc69b0f9bcbea7b07797173230e8213b2679b0fa51b860f532f54f` |
-| `000005_cleanup_smoke_test_data.sql` | 6,622 | 162 | `98b75e8b20affbc2a86eb91290104a86b5549eddb4c9f38a456f6ed5fcd7453c` |
-| `image_migration_manifest.md` | 6,597 | 110 | `07bb76828778b4298c3082a64439ad78d10cb36ea9939ca6851e1d2e4ffb60c1` |
+Current as of **v1.0.0-rc6**.
+
+| File | SHA-256 | Applied to production? |
+|---|---|---|
+| `000001_baseline_public.raw.sql` | `c6cad4aec611ae7e252fb77392decc9a335e21ea099b4d4ed0628caeecff9970` | no — immutable audit copy |
+| `000001_baseline_public.sql` | `afc45510a234d09777ba7cdad0690362b30bba967cdb18ddab057fea22aacac1` | no — for a clean rebuild |
+| `000001_recovery_continue_after_platform_function.sql` | `b4beb75426f456119173e89435e217addabb0205707d3d3ab5f0d31272b550f5` | **yes, RC5** |
+| `000002_storage.sql` | `840de7e73e45cba37fc4e01c12d492055597d23bf7f01374eabeb965b85d7a5b` | **yes, RC5** (at its previous checksum; the RC6 change removes only the internal `begin`/`commit` and is **not** reapplied) |
+| `000003_ab_internal_cron.sql` | `31302509a4f6ae9ddb4f79c04ca4832d16e367ad8fa497b7337e923b12800b74` | **yes, RC5** |
+| `000003_cron.sql` | `a67acd1d8160c3bc2184a3112fe902f178a9ecfd0ab0379bf4c2f850d6a59b37` | no — Section C only, later stage |
+| `000004_seed_configuration.sql` | `792a110f15385f5c93e8a7c5e01b0a21068dc783bc5bc747c77ac45628a6f297` | RC6 |
+| `000005_controlled_smoke_test_data.sql` | `9367b2726839946899d608e64fd8de8d4f5115070719c5bb4e690f389c43284e` | no — separate approval |
+| `000005_cleanup_smoke_test_data.sql` | `6905aaee079af486578698775947fde40cbf2a880b0888845fd3ea2a8ef6d742` | no — before go-live |
+| `image_migration_manifest.md` | `07bb76828778b4298c3082a64439ad78d10cb36ea9939ca6851e1d2e4ffb60c1` | n/a |
 
 `README.md` is excluded from its own manifest for obvious reasons.
 
@@ -469,6 +471,84 @@ body, policy, trigger, table, constraint, grant or revoke was altered.
 | Lines | 7,702 | 7,702 |
 | Standalone CR bytes | 112 | **0** |
 | SHA-256 | `192a88de…a3704` (corrupt) | `b4beb75426f456119173e89435e217addabb0205707d3d3ab5f0d31272b550f5` |
+
+### RC6 — the configuration seed failed, and what it exposed
+
+RC5 applied the schema, Storage and internal Cron successfully. `000004` then
+failed:
+
+```
+psql:000004_seed_configuration.sql:310: ERROR:  null value in column "image_url"
+of relation "services" violates not-null constraint
+```
+
+**Full rollback confirmed.** All nine configuration tables were re-checked
+read-only afterwards and every one was at zero. `--single-transaction` discarded
+the intermediate `INSERT 0 2` / `INSERT 0 14` / `INSERT 0 1` results. The schema,
+Storage bucket and two Cron jobs applied earlier were unaffected, because each
+was its own separate application.
+
+**Cause: NULL versus empty string.** Three columns are `NOT NULL` with a default
+of `''`, and the seed supplied `NULL`:
+
+| Column | Nullable | Default | Was | Now |
+|---|---|---|---|---|
+| `services.image_url` | NO | `''` | `null` | `''` |
+| `online_booking_services.public_image_url` | NO | `''` | `null` | `''` |
+| `online_booking_services.short_description` | NO | `''` | `null` (4 of 5) | `''` |
+| `settings.logo_url` | **YES** | — | `null` | `null` (correct as-is) |
+
+Image fields therefore remain **empty strings**, not NULL, until the image
+migration runs. `settings.logo_url` is the single genuinely nullable image column
+and stays NULL.
+
+**A second, latent failure was caught before connecting.** The new nullability
+validation compared every seeded column against the live schema and found two
+`NOT NULL` columns with **no default** that the seed omitted entirely:
+
+- `rooms.floor`
+- `rooms.type`
+
+The rooms insert would have failed next. Both are now supplied from staging's
+confirmed values (`Ground`/`Upper`; `type` duplicates `room_type`), along with
+`allocation_mode`, which matters because the three zones holding numbered units
+use `specific_room` rather than the `capacity` default.
+
+**A third error in earlier analysis was corrected.** An earlier revision of
+`000004` asserted that `outlets` has no address column. It has both `address` and
+`phone`, each `NOT NULL DEFAULT ''`. Both are now seeded with the confirmed
+published values rather than left empty — staging holds truncated addresses with
+no postcode and empty phones.
+
+**Transaction-wrapper correction.** `000002` produced "there is already a
+transaction in progress" followed by "there is no transaction in progress",
+because the file carried its own `begin;`/`commit;` inside psql's
+`--single-transaction` wrapper. The inner `COMMIT` ends the wrapper transaction
+early, so the rollback guarantee is weaker than it looks. The internal
+`begin;`/`commit;` has been removed from `000002`, `000004`,
+`000005_controlled_smoke_test_data.sql` and
+`000005_cleanup_smoke_test_data.sql`; psql is now the sole transaction boundary in
+every case. `begin`/`end` inside plpgsql `DO` blocks is untouched — that is
+procedural syntax, not a transaction. **`000002` is not reapplied to the existing
+production database**; the change is for future clean rebuilds.
+
+**New requirement: nullability validation before application.** Every seed file
+must, before it is applied, have each explicitly seeded column compared against
+the live `information_schema`. Every `NOT NULL` column must satisfy one of:
+
+- an explicit non-null value is supplied, or
+- the column is omitted **and** has a default.
+
+A companion check must confirm no `NULL` literal is supplied to a `NOT NULL`
+column. Both `000004` and `000005` now pass. This is what a checksum and an object
+count cannot do, and it caught `rooms.floor`/`rooms.type` without touching
+production.
+
+**A note on verification tooling.** Three separate false failures arose from
+naive text parsing during this stage — a substring count of `estrict`, a
+comment-filter regex missing its anchor, and a comma-split row counter defeated by
+commas inside a quoted address. Each was investigated and disproved rather than
+accepted. Seed verification now uses quote-aware parsing.
 
 ### Connecting for a production application
 

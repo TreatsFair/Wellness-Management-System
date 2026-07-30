@@ -64,7 +64,11 @@
 -- ============================================================================
 
 
-begin;
+-- NOTE: this file contains no BEGIN/COMMIT. The transaction boundary is
+-- supplied externally by psql --single-transaction, together with
+-- ON_ERROR_STOP=1, so any failure rolls the whole file back. An internal
+-- COMMIT would end that wrapper transaction early and silently weaken the
+-- protection.
 
 -- ---------------------------------------------------------------------------
 -- Guards
@@ -179,7 +183,6 @@ cross join (values
 on conflict (therapist_id, day_of_week, start_time) do nothing;
 
 
-commit;
 
 
 -- ============================================================================

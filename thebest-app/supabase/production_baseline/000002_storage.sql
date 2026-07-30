@@ -15,7 +15,11 @@
 -- Idempotent: safe to re-run.
 -- ============================================================================
 
-begin;
+-- NOTE: this file contains no BEGIN/COMMIT. The transaction boundary is
+-- supplied externally by psql --single-transaction, together with
+-- ON_ERROR_STOP=1, so any failure rolls the whole file back. An internal
+-- COMMIT would end that wrapper transaction early and silently weaken the
+-- protection.
 
 -- ---------------------------------------------------------------------------
 -- 1. app-images bucket
@@ -145,7 +149,6 @@ using (
 --    (TABLES arwdDxtm, SEQUENCES rwU, FUNCTIONS X, granted by postgres).
 -- ---------------------------------------------------------------------------
 
-commit;
 
 -- ============================================================================
 -- Verification after applying (expect exactly these):

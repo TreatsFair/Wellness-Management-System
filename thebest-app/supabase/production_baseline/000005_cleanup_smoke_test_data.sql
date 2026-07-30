@@ -26,7 +26,11 @@
 -- ============================================================================
 
 
-begin;
+-- NOTE: this file contains no BEGIN/COMMIT. The transaction boundary is
+-- supplied externally by psql --single-transaction, together with
+-- ON_ERROR_STOP=1, so any failure rolls the whole file back. An internal
+-- COMMIT would end that wrapper transaction early and silently weaken the
+-- protection.
 
 -- ---------------------------------------------------------------------------
 -- 1. Refuse if operational rows still reference the test therapists
@@ -137,7 +141,6 @@ begin
 end
 $$;
 
-commit;
 
 
 -- ============================================================================
