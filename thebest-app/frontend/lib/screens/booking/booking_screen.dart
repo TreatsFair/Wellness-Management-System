@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/services/service_category_order.dart';
 import '../../core/utils/error_message.dart';
 import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/business_settings_repository.dart';
@@ -683,7 +684,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
 
   // Data
   List<_Service> _services = [];
-  List<String> _serviceCategories = const ['Services', 'Add-ons', 'Packages'];
+  List<String> _serviceCategories = List<String>.of(
+    supportedServiceCategories,
+  );
   List<_Therapist> _therapists = [];
   List<_RoomZone> _rooms = [];
   List<RoomUnitAvailability> _roomUnitAvailability = const [];
@@ -702,14 +705,28 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   @override
   void initState() {
     super.initState();
+    ServiceCategoryOrderController.instance.addListener(
+      _applyServiceCategoryOrder,
+    );
     _loadData();
     _customerSearchController.addListener(_filterCustomers);
   }
 
   @override
   void dispose() {
+    ServiceCategoryOrderController.instance.removeListener(
+      _applyServiceCategoryOrder,
+    );
     _customerSearchController.dispose();
     super.dispose();
+  }
+
+  void _applyServiceCategoryOrder() {
+    if (!mounted) return;
+    setState(() {
+      _serviceCategories = ServiceCategoryOrderController.instance
+          .orderAvailable(_serviceCategories);
+    });
   }
 
   // ── Data Loading ───────────────────────────────────────────────
@@ -919,9 +936,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       } catch (_) {
         // Existing service records still provide a safe category fallback.
       }
-      const coreCategories = ['Services', 'Add-ons', 'Packages'];
       final categorySet = <String>{
-        ...coreCategories,
+        ...supportedServiceCategories,
         ...categoryRows
             .where(_isActiveDoc)
             .map((row) => row['name']?.toString().trim() ?? ''),
@@ -929,10 +945,13 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       }..removeWhere((category) => category.isEmpty);
       final customCategories =
           categorySet
-              .where((category) => !coreCategories.contains(category))
+              .where(
+                (category) => !supportedServiceCategories.contains(category),
+              )
               .toList()
             ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-      final categories = [...coreCategories, ...customCategories];
+      final categories = ServiceCategoryOrderController.instance
+          .orderAvailable([...supportedServiceCategories, ...customCategories]);
 
       setState(() {
         _services = services;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 
+import '../../core/services/service_category_order.dart';
 import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/service_repository.dart';
@@ -1908,7 +1909,7 @@ class _StaffServiceCommission {
     return _StaffServiceCommission(
       id: data['id']?.toString() ?? '',
       name: data['name']?.toString() ?? 'Service',
-      category: _normalizeServiceCategory(data['category']?.toString() ?? ''),
+      category: data['category']?.toString().trim() ?? 'Services',
       duration: _intValue(data['duration'], 60),
       price: _doubleValue(data['price']),
       therapistCommission: _doubleValue(data['therapistCommission']),
@@ -1936,13 +1937,6 @@ double _doubleValue(Object? value, [double fallback = 0]) {
   return fallback;
 }
 
-String _normalizeServiceCategory(String value) {
-  final normalized = value.trim().toLowerCase();
-  if (normalized.contains('package')) return 'Packages';
-  if (normalized.contains('add')) return 'Add-ons';
-  return 'Services';
-}
-
 class _StaffCommissionSection extends StatefulWidget {
   final TherapistModel staff;
   final bool editable;
@@ -1957,7 +1951,7 @@ class _StaffCommissionSection extends StatefulWidget {
 class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
   final _serviceRepository = ServiceRepository();
   final _therapistRepository = TherapistRepository();
-  final _tabs = const ['Services', 'Packages', 'Add-ons'];
+  var _tabs = List<String>.of(supportedServiceCategories);
   var _selectedTab = 'Services';
   var _services = <_StaffServiceCommission>[];
   late Map<String, double> _overrides;
@@ -1967,8 +1961,27 @@ class _StaffCommissionSectionState extends State<_StaffCommissionSection> {
   @override
   void initState() {
     super.initState();
+    ServiceCategoryOrderController.instance.addListener(
+      _applyServiceCategoryOrder,
+    );
+    _applyServiceCategoryOrder();
     _overrides = {...widget.staff.commissionOverrides};
     _loadServices();
+  }
+
+  void _applyServiceCategoryOrder() {
+    _tabs = ServiceCategoryOrderController.instance.orderAvailable(
+      supportedServiceCategories,
+    );
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    ServiceCategoryOrderController.instance.removeListener(
+      _applyServiceCategoryOrder,
+    );
+    super.dispose();
   }
 
   @override

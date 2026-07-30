@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
+import '../../core/services/service_category_order.dart';
 import '../../core/utils/error_message.dart';
 import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/commission_repository.dart';
@@ -382,7 +383,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   // Data
   List<_WalkInService> _services = [];
-  List<String> _serviceCategories = const ['Services', 'Add-ons', 'Packages'];
+  List<String> _serviceCategories = List<String>.of(
+    supportedServiceCategories,
+  );
   List<_WalkInTherapist> _therapists = [];
   List<_WalkInZone> _zones = [];
   List<RoomUnitAvailability> _roomUnits = [];
@@ -406,6 +409,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   @override
   void initState() {
     super.initState();
+    ServiceCategoryOrderController.instance.addListener(
+      _applyServiceCategoryOrder,
+    );
     _draftSessionId =
         'staff-${DateTime.now().microsecondsSinceEpoch}-${identityHashCode(this)}';
     _receiptNumber = _generateReceiptNumber();
@@ -415,6 +421,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   @override
   void dispose() {
+    ServiceCategoryOrderController.instance.removeListener(
+      _applyServiceCategoryOrder,
+    );
     unawaited(
       CspService.releaseStaffWalkInDraft(
         draftSessionId: _draftSessionId,
@@ -423,6 +432,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     _searchController.dispose();
     _transactionNotesController.dispose();
     super.dispose();
+  }
+
+  void _applyServiceCategoryOrder() {
+    if (!mounted) return;
+    setState(() {
+      _serviceCategories = ServiceCategoryOrderController.instance
+          .orderAvailable(_serviceCategories);
+    });
   }
 
   String _generateReceiptNumber() {
@@ -478,9 +495,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       } catch (_) {
         // Existing service records still provide a safe category fallback.
       }
-      const coreCategories = ['Services', 'Add-ons', 'Packages'];
       final categorySet = <String>{
-        ...coreCategories,
+        ...supportedServiceCategories,
         ...categoryRows
             .where(_isActiveDoc)
             .map((row) => row['name']?.toString().trim() ?? ''),
@@ -488,10 +504,13 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       }..removeWhere((category) => category.isEmpty);
       final customCategories =
           categorySet
-              .where((category) => !coreCategories.contains(category))
+              .where(
+                (category) => !supportedServiceCategories.contains(category),
+              )
               .toList()
             ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-      final categories = [...coreCategories, ...customCategories];
+      final categories = ServiceCategoryOrderController.instance
+          .orderAvailable([...supportedServiceCategories, ...customCategories]);
 
       setState(() {
         _services = services;

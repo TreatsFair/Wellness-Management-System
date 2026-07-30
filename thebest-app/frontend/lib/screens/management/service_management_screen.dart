@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 
+import '../../core/services/service_category_order.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/repository_utils.dart';
@@ -15,25 +18,6 @@ enum ServiceStatusFilter { all, active, inactive }
 enum ServiceSort { manual, newest, name, priceLow, priceHigh, duration }
 
 enum ServiceEditorResult { saved, deleted }
-
-const _preferredServiceCategories = ['Services', 'Add-ons', 'Packages'];
-
-int _compareServiceCategories(String left, String right) {
-  final normalizedLeft = left.trim().toLowerCase();
-  final normalizedRight = right.trim().toLowerCase();
-  final leftPriority = _preferredServiceCategories.indexWhere(
-    (category) => category.toLowerCase() == normalizedLeft,
-  );
-  final rightPriority = _preferredServiceCategories.indexWhere(
-    (category) => category.toLowerCase() == normalizedRight,
-  );
-  if (leftPriority != -1 || rightPriority != -1) {
-    if (leftPriority == -1) return 1;
-    if (rightPriority == -1) return -1;
-    return leftPriority.compareTo(rightPriority);
-  }
-  return normalizedLeft.compareTo(normalizedRight);
-}
 
 class ServiceManagementScreen extends StatefulWidget {
   const ServiceManagementScreen({super.key, this.userRole = 'staff'});
@@ -100,6 +84,7 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
       }
       final services = rows.map(ServiceCatalogueItem.new).toList();
       final categories = <String>{
+        ...supportedServiceCategories,
         ...categoryRows
             .where((row) => asBool(row['isActive'], true))
             .map((row) => asString(row['name']).trim()),
@@ -108,7 +93,9 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
       if (!mounted) return;
       setState(() {
         _services = services;
-        _categories = categories.toList()..sort(_compareServiceCategories);
+        _categories = ServiceCategoryOrderController.instance.orderAvailable(
+          categories,
+        );
         _categoryIdsByName = {
           for (final row in categoryRows)
             if (asString(row['name']).trim().isNotEmpty &&
@@ -132,6 +119,27 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
       _statusFilter = ServiceStatusFilter.all;
       _searchController.clear();
     });
+  }
+
+  void _reorderCategory(int oldIndex, int newIndex) {
+    if (!_isAdmin || oldIndex == newIndex) return;
+    final reordered = [..._categories];
+    final category = reordered.removeAt(oldIndex);
+    reordered.insert(newIndex, category);
+    setState(() => _categories = reordered);
+    unawaited(
+      ServiceCategoryOrderController.instance.saveOrder(reordered).catchError(
+        (error) {
+          if (mounted) {
+            AppToast.error(
+              context,
+              error.toString(),
+              title: 'Unable to save category order',
+            );
+          }
+        },
+      ),
+    );
   }
 
   List<ServiceCatalogueItem> get _visibleServices {
@@ -423,70 +431,42 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
   }
 
   Widget _buildCategorySidebar() {
-    return Column(
-      children: [
-        Expanded(
-          child: ListView(
+    final allServicesTile = CatalogueSidebarTile(
+      title: 'All Services',
+      subtitle: 'Complete service catalogue',
+      count: _services.length,
+      icon: Icons.spa_outlined,
+      color: AppColors.primary,
+      selected: _selectedCategory == null,
+      onTap: () => _openCatalogue(),
+    );
+    final categoryList = _isAdmin
+        ? ReorderableListView.builder(
+            padding: const EdgeInsets.fromLTRB(14, 18, 14, 12),
+            header: allServicesTile,
+            buildDefaultDragHandles: false,
+            itemCount: _categories.length,
+            onReorderItem: _reorderCategory,
+            itemBuilder: (context, index) {
+              final category = _categories[index];
+              return ReorderableDelayedDragStartListener(
+                key: ValueKey('service-category-order-$category'),
+                index: index,
+                child: _buildCategorySidebarEntry(category),
+              );
+            },
+          )
+        : ListView(
             padding: const EdgeInsets.fromLTRB(14, 18, 14, 12),
             children: [
-              CatalogueSidebarTile(
-                title: 'All Services',
-                subtitle: 'Complete service catalogue',
-                count: _services.length,
-                icon: Icons.spa_outlined,
-                color: AppColors.primary,
-                selected: _selectedCategory == null,
-                onTap: () => _openCatalogue(),
-              ),
-              ..._categories.map((category) {
-                final count = _services
-                    .where((service) => service.category == category)
-                    .length;
-                final tile = CatalogueSidebarTile(
-                  title: category,
-                  subtitle: _categorySubtitle(category),
-                  count: count,
-                  icon: _categoryIcon(category),
-                  color: _categoryColor(category),
-                  selected: _selectedCategory == category,
-                  onTap: () => _openCatalogue(category),
-                );
-                final categoryId = _categoryIdsByName[category];
-                if (!_isAdmin || count != 0 || categoryId == null) return tile;
-                return Dismissible(
-                  key: ValueKey('service-category-$categoryId'),
-                  direction: DismissDirection.endToStart,
-                  confirmDismiss: (_) =>
-                      _confirmDeleteEmptyCategory(category, categoryId),
-                  background: Container(
-                    margin: const EdgeInsets.only(bottom: 6),
-                    padding: const EdgeInsets.symmetric(horizontal: 18),
-                    alignment: Alignment.centerRight,
-                    decoration: BoxDecoration(
-                      color: AppColors.danger,
-                      borderRadius: BorderRadius.circular(9),
-                    ),
-                    child: const Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
-                      children: [
-                        Icon(Icons.delete_outline, color: Colors.white),
-                        SizedBox(width: 7),
-                        Text(
-                          'Delete',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w800,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  child: tile,
-                );
-              }),
+              allServicesTile,
+              ..._categories.map(_buildCategorySidebarEntry),
             ],
-          ),
-        ),
+          );
+
+    return Column(
+      children: [
+        Expanded(child: categoryList),
         if (_isAdmin)
           Container(
             width: double.infinity,
@@ -510,6 +490,57 @@ class _ServiceManagementScreenState extends State<ServiceManagementScreen> {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _buildCategorySidebarEntry(String category) {
+    final count = _services
+        .where((service) => service.category == category)
+        .length;
+    final tile = CatalogueSidebarTile(
+      title: category,
+      subtitle: _categorySubtitle(category),
+      count: count,
+      icon: _categoryIcon(category),
+      color: _categoryColor(category),
+      selected: _selectedCategory == category,
+      onTap: () => _openCatalogue(category),
+    );
+    final categoryId = _categoryIdsByName[category];
+    if (!_isAdmin ||
+        count != 0 ||
+        categoryId == null ||
+        supportedServiceCategories.contains(category)) {
+      return tile;
+    }
+    return Dismissible(
+      key: ValueKey('service-category-$categoryId'),
+      direction: DismissDirection.endToStart,
+      confirmDismiss: (_) => _confirmDeleteEmptyCategory(category, categoryId),
+      background: Container(
+        margin: const EdgeInsets.only(bottom: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 18),
+        alignment: Alignment.centerRight,
+        decoration: BoxDecoration(
+          color: AppColors.danger,
+          borderRadius: BorderRadius.circular(9),
+        ),
+        child: const Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            Icon(Icons.delete_outline, color: Colors.white),
+            SizedBox(width: 7),
+            Text(
+              'Delete',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ],
+        ),
+      ),
+      child: tile,
     );
   }
 
@@ -1594,11 +1625,13 @@ class _ServiceEditorSurfaceState extends State<ServiceEditorSurface> {
     );
     _categories =
         <String>{
-            ..._preferredServiceCategories,
+            ...supportedServiceCategories,
             ...widget.categories,
             service?.category ?? widget.initialCategory,
-          }.where((item) => item.trim().isNotEmpty).toList()
-          ..sort(_compareServiceCategories);
+          }.where((item) => item.trim().isNotEmpty).toList();
+    _categories = ServiceCategoryOrderController.instance.orderAvailable(
+      _categories,
+    );
     _category = service?.category ?? widget.initialCategory;
     if (!_categories.contains(_category)) _categories.add(_category);
     _roomType = _normalizeRoomType(service?.roomType ?? 'body_room');
