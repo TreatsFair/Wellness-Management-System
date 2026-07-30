@@ -23,7 +23,18 @@ const supabase = createClient(supabaseUrl, secretKey(), { auth: { persistSession
 const AUTO_CONFIRM = false;
 
 // Billplz (sandbox or production, selected entirely by which base URL/keys are set).
-const BILLPLZ_BASE_URL = (Deno.env.get("BILLPLZ_BASE_URL") ?? "").trim().replace(/\/$/, "");
+// The configuration contract is the site origin; API paths are appended below.
+function normalizeBillplzBaseUrl(value: string): string {
+  return value
+    .trim()
+    .replace(/^=+\s*/, "")
+    .replace(/\/+$/, "")
+    .replace(/\/api$/i, "");
+}
+
+const BILLPLZ_BASE_URL = normalizeBillplzBaseUrl(
+  Deno.env.get("BILLPLZ_BASE_URL") ?? "",
+);
 const BILLPLZ_API_KEY = (Deno.env.get("BILLPLZ_API_KEY") ?? "").trim();
 const BILLPLZ_COLLECTION_ID = (Deno.env.get("BILLPLZ_COLLECTION_ID") ?? "").trim();
 const BILLPLZ_X_SIGNATURE_KEY = (Deno.env.get("BILLPLZ_X_SIGNATURE_KEY") ?? "").trim();
@@ -31,6 +42,10 @@ const BOOKING_CLEANUP_SECRET = (Deno.env.get("BOOKING_CLEANUP_SECRET") ?? "").tr
 const BILLPLZ_CONFIGURED = Boolean(
   BILLPLZ_BASE_URL && BILLPLZ_API_KEY && BILLPLZ_COLLECTION_ID && BILLPLZ_X_SIGNATURE_KEY,
 );
+
+function billplzUrl(path: string): string {
+  return `${BILLPLZ_BASE_URL}/${path.replace(/^\/+/, "")}`;
+}
 // Where to send the customer's browser back to after paying. Falls back to the
 // first configured site origin (used for CORS) so a dedicated var isn't required.
 const BOOKING_REDIRECT_BASE = (
@@ -66,7 +81,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 async function billplzRequest(path: string, body: Record<string, string>) {
-  const response = await fetch(`${BILLPLZ_BASE_URL}${path}`, {
+  const response = await fetch(billplzUrl(path), {
     method: "POST",
     headers: {
       Authorization: `Basic ${btoa(`${BILLPLZ_API_KEY}:`)}`,
@@ -84,13 +99,13 @@ async function billplzRequest(path: string, body: Record<string, string>) {
 }
 
 function billplzBillUrl(billId: string): string {
-  return `${BILLPLZ_BASE_URL}/bills/${encodeURIComponent(billId)}`;
+  return billplzUrl(`/bills/${encodeURIComponent(billId)}`);
 }
 
 async function deleteBillplzBill(billId: string): Promise<void> {
   if (!billId) return;
   const response = await fetch(
-    `${BILLPLZ_BASE_URL}/api/v3/bills/${encodeURIComponent(billId)}`,
+    billplzUrl(`/api/v3/bills/${encodeURIComponent(billId)}`),
     {
       method: "DELETE",
       headers: { Authorization: `Basic ${btoa(`${BILLPLZ_API_KEY}:`)}` },
