@@ -6,7 +6,14 @@ const fallbackOutlets = {
 const api = window.BookingApi;
 const outlets = JSON.parse(JSON.stringify(fallbackOutlets));
 const MAX_GUESTS = 6;
-const BOOKING_SESSION_KEY = "thebest-booking-session-v2";
+const BOOKING_ROUTE_OUTLETS = {
+  "/booking-taman-wahyu": "taman-wahyu",
+  "/booking-pv128": "pv128",
+};
+const normalizedBookingPath = window.location.pathname.replace(/\/+$/, "") || "/";
+const LOCKED_OUTLET_CODE = BOOKING_ROUTE_OUTLETS[normalizedBookingPath] || null;
+const BOOKING_RETURN_PATH = LOCKED_OUTLET_CODE ? normalizedBookingPath : "/booking";
+const BOOKING_SESSION_KEY = `thebest-booking-session-v3:${LOCKED_OUTLET_CODE || "all"}`;
 let services = [];
 let serviceLoadError = "";
 let availabilityLoadError = "";
@@ -23,7 +30,7 @@ const sameForAll = { treatment: false };
 
 const state = {
   step: 1,
-  outlet: null,
+  outlet: LOCKED_OUTLET_CODE,
   guests: [newGuest(0)],
   treatmentGuest: 0,
   date: null,
@@ -160,7 +167,9 @@ function persistBookingSession() {
 function restoreBookingSession() {
   const saved = readBookingSession();
   if (!saved) return false;
-  if (typeof saved.outlet === "string" && outlets[saved.outlet]) state.outlet = saved.outlet;
+  if (typeof saved.outlet === "string" && outlets[saved.outlet]) {
+    state.outlet = LOCKED_OUTLET_CODE || saved.outlet;
+  }
   if (Array.isArray(saved.guests) && saved.guests.length >= 1 && saved.guests.length <= MAX_GUESTS) {
     state.guests = saved.guests.map((guest, index) => ({
       ...newGuest(index),
@@ -262,7 +271,9 @@ function clearNotice() { document.querySelector(".booking-mode-notice")?.remove(
 async function loadOutlets() {
   const loading = document.querySelector("#outlet-loading");
   if (!api.configured) {
-    document.querySelectorAll("[data-outlet]").forEach((button) => { button.hidden = false; });
+    document.querySelectorAll("[data-outlet]").forEach((button) => {
+      button.hidden = Boolean(LOCKED_OUTLET_CODE && button.dataset.outlet !== LOCKED_OUTLET_CODE);
+    });
     if (loading) loading.hidden = true;
     showNotice("Preview mode: configure Supabase to use live availability.");
     return;
@@ -276,12 +287,22 @@ async function loadOutlets() {
       outlets[outlet.code] = { ...outlets[outlet.code], ...outlet, name: outlets[outlet.code].name };
     }
     document.querySelectorAll("[data-outlet]").forEach((button) => {
-      button.hidden = !availableCodes.has(button.dataset.outlet);
+      const matchesRoute = !LOCKED_OUTLET_CODE || button.dataset.outlet === LOCKED_OUTLET_CODE;
+      button.hidden = !matchesRoute || !availableCodes.has(button.dataset.outlet);
       renderOutletHours(button, outlets[button.dataset.outlet]);
     });
-    if (state.outlet && !availableCodes.has(state.outlet)) state.outlet = null;
-    if (!availableCodes.size) showNotice("Online booking is not currently enabled for any outlet.", true);
-    else clearNotice();
+    if (LOCKED_OUTLET_CODE) {
+      state.outlet = availableCodes.has(LOCKED_OUTLET_CODE) ? LOCKED_OUTLET_CODE : null;
+      if (!state.outlet) {
+        showNotice(`Online booking for ${outlets[LOCKED_OUTLET_CODE].name} is not currently available.`, true);
+      } else {
+        clearNotice();
+      }
+    } else {
+      if (state.outlet && !availableCodes.has(state.outlet)) state.outlet = null;
+      if (!availableCodes.size) showNotice("Online booking is not currently enabled for any outlet.", true);
+      else clearNotice();
+    }
   } catch (error) {
     document.querySelectorAll("[data-outlet]").forEach((button) => { button.hidden = true; });
     showNotice(error.message || "Unable to connect to the booking service.", true);
@@ -885,7 +906,7 @@ async function redirectActivePayment() {
   nextButton.textContent = "Opening secure payment...";
   try {
     if (!state.paymentUrl) {
-      const pay = await api.payHold(state.hold.token);
+      const pay = await api.payHold(state.hold.token, BOOKING_RETURN_PATH);
       state.paymentUrl = pay.url;
     }
     persistBookingSession();
@@ -947,7 +968,7 @@ async function submitHold() {
     let holdNoticeMessage = null;
     try {
       nextButton.textContent = "Preparing secure payment...";
-      const pay = await api.payHold(payload.hold.token);
+      const pay = await api.payHold(payload.hold.token, BOOKING_RETURN_PATH);
       state.paymentUrl = pay.url;
     } catch (payError) {
       if (window.BOOKING_CONFIG?.testAutoConfirm) {
@@ -970,6 +991,7 @@ async function submitHold() {
 }
 
 document.querySelectorAll("[data-outlet]").forEach((button) => button.addEventListener("click", async () => {
+  if (LOCKED_OUTLET_CODE && button.dataset.outlet !== LOCKED_OUTLET_CODE) return;
   state.outlet = button.dataset.outlet;
   if (!therapistSelectionAllowed()) state.guests.forEach((guest) => { guest.therapist = "No preference"; });
   document.querySelectorAll("[data-outlet]").forEach((option) => option.classList.toggle("is-selected", option === button));
@@ -1026,8 +1048,8 @@ document.querySelector("#close-dialog").addEventListener("click", () => {
     loadAvailability();
     return;
   }
-  if (close.dataset.action === "retry") { window.location.href = "./booking.html"; return; }
-  if (close.dataset.action === "home") { window.location.href = "./index.html"; return; }
+  if (close.dataset.action === "retry") { window.location.href = BOOKING_RETURN_PATH; return; }
+  if (close.dataset.action === "home") { window.location.href = "https://thebestwellness.my"; return; }
   if (close.dataset.action === "recheck") { const token = new URLSearchParams(window.location.search).get("bp_token"); if (token) { paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); } return; }
   document.querySelector("#confirmation-dialog").close();
 });

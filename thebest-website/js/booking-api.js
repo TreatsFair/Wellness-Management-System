@@ -69,9 +69,9 @@
       method: "POST",
       body: JSON.stringify({ token }),
     }),
-    payHold: (token) => request("/booking-holds/pay", {
+    payHold: (token, returnPath) => request("/booking-holds/pay", {
       method: "POST",
-      body: JSON.stringify({ token }),
+      body: JSON.stringify({ token, return_path: returnPath }),
     }),
     cancelHold: (token) => request("/booking-holds/cancel", {
       method: "POST",

@@ -8,3 +8,17 @@ window.BOOKING_CONFIG = {
   // sandbox is wired up, leave this false — sandbox payments are the real test path.
   testAutoConfirm: false,
 };
+
+// The public domain and production preview use Production. The staging
+// hostname and local development retain the configuration above unchanged.
+if (new Set([
+  "thebestwellness.my",
+  "www.thebestwellness.my",
+  "tbwlive.netlify.app",
+]).has(window.location.hostname.toLowerCase())) {
+  window.BOOKING_CONFIG = {
+    supabaseUrl: "https://erjttzhownsxohpvzjbs.supabase.co",
+    publishableKey: "sb_publishable_1z21AP6inEGHlsinvDQeKQ_FVc_K4zE",
+    testAutoConfirm: false,
+  };
+}
