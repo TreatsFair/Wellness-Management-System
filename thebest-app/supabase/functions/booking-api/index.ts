@@ -53,6 +53,24 @@ const BOOKING_REDIRECT_BASE = (
   (Deno.env.get("BOOKING_SITE_ORIGINS") ?? "").split(",")[0] ??
   ""
 ).trim().replace(/\/$/, "");
+const BOOKING_RETURN_PATHS = new Set([
+  "/booking",
+  "/booking-taman-wahyu",
+  "/booking-pv128",
+]);
+
+function bookingRedirectUrl(token: string, requestedPath: unknown): string | null {
+  if (!BOOKING_REDIRECT_BASE) return null;
+  const base = new URL(BOOKING_REDIRECT_BASE);
+  const path = typeof requestedPath === "string" && BOOKING_RETURN_PATHS.has(requestedPath)
+    ? requestedPath
+    : null;
+  // A configured non-root URL is already a complete destination. An explicit
+  // allowlisted outlet path may replace it, but no suffix is ever appended.
+  const redirect = path ? new URL(path, `${base.origin}/`) : new URL(base.toString());
+  redirect.searchParams.set("bp_token", token);
+  return redirect.toString();
+}
 
 // Exact key order Billplz's own signature examples use for webhook callbacks.
 // Signature = HMAC-SHA256("amount<v>|collection_id<v>|due_at<v>|email<v>|id<v>|mobile<v>|name<v>|paid_amount<v>|paid_at<v>|paid<v>|state<v>|url<v>", X_SIGNATURE_KEY)
@@ -155,18 +173,27 @@ function origin(request: Request): string {
   return configured[0] ?? value;
 }
 
-function responseHeaders(request: Request): HeadersInit {
+function responseHeaders(request: Request): Record<string, string> {
   return {
     "Access-Control-Allow-Origin": origin(request),
     "Access-Control-Allow-Headers": "apikey, authorization, content-type, x-client-info, x-booking-cleanup-secret",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Expose-Headers": "Retry-After",
     "Content-Type": "application/json; charset=utf-8",
     Vary: "Origin",
   };
 }
 
-function json(request: Request, body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), { status, headers: responseHeaders(request) });
+function json(
+  request: Request,
+  body: unknown,
+  status = 200,
+  extraHeaders: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...responseHeaders(request), ...extraHeaders },
+  });
 }
 function fail(request: Request, message: string, status = 400): Response { return json(request, { error: message }, status); }
 
@@ -295,11 +322,103 @@ function billDescription(hold: Record<string, unknown>): string {
   return [...before, `Notes: ${notesLine}`].join(" | ");
 }
 
-async function fingerprint(request: Request): Promise<string> {
-  const address = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || request.headers.get("x-real-ip") || "unknown";
+async function hashedRateLimitSubject(value: string): Promise<string> {
   const salt = Deno.env.get("BOOKING_RATE_LIMIT_SALT") || supabaseUrl;
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}|${address}`));
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${salt}|${value}`));
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function fingerprint(request: Request): Promise<string> {
+  // Supabase's public function endpoint is fronted by Cloudflare. Cloudflare
+  // writes CF-Connecting-IP from the client connection; do not trust a caller's
+  // left-most X-Forwarded-For value for either abuse controls or hold quotas.
+  const address = request.headers.get("cf-connecting-ip")?.trim();
+  if (!address || address.length > 64 || !/^[0-9a-f:.]+$/i.test(address)) {
+    throw new Error("Trusted client address is unavailable");
+  }
+  return hashedRateLimitSubject(`ip:${address}`);
+}
+
+type RateLimitRow = {
+  allowed: boolean;
+  retry_after_seconds: number;
+  remaining: number;
+};
+
+async function consumeRateLimit(
+  subjectHash: string,
+  routeKey: string,
+  limit: number,
+  windowSeconds: number,
+): Promise<RateLimitRow> {
+  const rows = await rpc("consume_booking_rate_limit", {
+    p_subject_hash: subjectHash,
+    p_route_key: routeKey,
+    p_limit: limit,
+    p_window_seconds: windowSeconds,
+  }) as RateLimitRow[];
+  if (!rows[0]) throw new Error("Rate limiter did not return a result");
+  return rows[0];
+}
+
+function rateLimited(request: Request, retryAfter: number): Response {
+  return json(
+    request,
+    { error: "Too many requests. Please try again later." },
+    429,
+    { "Retry-After": String(Math.max(1, Math.ceil(retryAfter))) },
+  );
+}
+
+async function enforceIpRateLimit(
+  request: Request,
+  path: string,
+): Promise<Response | null> {
+  let rule: [string, number, number] | null = null;
+  if (request.method === "GET" && (path === "/outlets" || path === "/catalogue")) {
+    rule = ["catalogue", 60, 60];
+  } else if (path.startsWith("/availability/")) {
+    rule = ["availability", 120, 60];
+  } else if (
+    request.method === "POST" &&
+    (path === "/booking-holds" || path === "/booking-groups")
+  ) {
+    rule = ["hold", 12, 3600];
+  } else if (request.method === "POST" && path === "/booking-holds/pay") {
+    rule = ["payment", 10, 600];
+  } else if (request.method === "GET" && path === "/booking-holds/status") {
+    rule = ["status", 60, 60];
+  }
+  if (!rule) return null;
+
+  let subjectHash: string;
+  try {
+    subjectHash = await fingerprint(request);
+  } catch (error) {
+    console.error("Rate limiting rejected an untrusted client address", error);
+    return fail(request, "Unable to verify the client address", 503);
+  }
+
+  const result = await consumeRateLimit(subjectHash, rule[0], rule[1], rule[2]);
+  if (!result.allowed) return rateLimited(request, result.retry_after_seconds);
+
+  if (rule[0] === "hold") {
+    const burst = await consumeRateLimit(subjectHash, "hold_burst", 4, 120);
+    if (!burst.allowed) return rateLimited(request, burst.retry_after_seconds);
+  }
+  return null;
+}
+
+async function enforceTokenRateLimit(
+  request: Request,
+  token: string,
+  routeKey: string,
+  limit: number,
+  windowSeconds: number,
+): Promise<Response | null> {
+  const subjectHash = await hashedRateLimitSubject(`booking:${token}`);
+  const result = await consumeRateLimit(subjectHash, routeKey, limit, windowSeconds);
+  return result.allowed ? null : rateLimited(request, result.retry_after_seconds);
 }
 
 async function rpc(name: string, args: Record<string, unknown> = {}) {
@@ -539,6 +658,8 @@ async function route(request: Request): Promise<Response> {
     }
     return json(request, { ok: true, ...(await cleanupExpiredPaymentHolds()) });
   }
+  const rateLimitResponse = await enforceIpRateLimit(request, path);
+  if (rateLimitResponse) return rateLimitResponse;
   if (request.method === "GET" && path === "/outlets") {
     return json(request, { outlets: await publicBookingOutlets() });
   }
@@ -676,6 +797,14 @@ async function route(request: Request): Promise<Response> {
     const body = await request.json().catch(() => null) as Record<string, unknown> | null;
     const token = uuid(body?.token);
     if (!token) return fail(request, "A valid booking reference is required");
+    const tokenRateLimit = await enforceTokenRateLimit(
+      request,
+      token,
+      "payment_per_hold",
+      3,
+      600,
+    );
+    if (tokenRateLimit) return tokenRateLimit;
     try {
       const binding = await bookingBillBinding(token);
       if (!binding) return fail(request, "Booking reference not found", 404);
@@ -711,9 +840,8 @@ async function route(request: Request): Promise<Response> {
         callback_url: callbackUrl,
         description: billDescription(hold),
       };
-      if (BOOKING_REDIRECT_BASE) {
-        billParams.redirect_url = `${BOOKING_REDIRECT_BASE}/booking.html?bp_token=${token}`;
-      }
+      const redirectUrl = bookingRedirectUrl(token, body?.return_path);
+      if (redirectUrl) billParams.redirect_url = redirectUrl;
 
       const bill = await billplzRequest("/api/v3/bills", billParams);
       const billId = String(bill.id ?? "");
@@ -826,6 +954,14 @@ async function route(request: Request): Promise<Response> {
   if (request.method === "GET" && path === "/booking-holds/status") {
     const token = uuid(url.searchParams.get("token"));
     if (!token) return fail(request, "A valid booking reference is required");
+    const tokenRateLimit = await enforceTokenRateLimit(
+      request,
+      token,
+      "status_per_hold",
+      30,
+      60,
+    );
+    if (tokenRateLimit) return tokenRateLimit;
     const binding = await bookingBillBinding(token);
     if (!binding) return fail(request, "Booking reference not found", 404);
     if (
