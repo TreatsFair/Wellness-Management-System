@@ -75,17 +75,19 @@ replay_pid*.log
 # Supabase
 # =========================================================
 thebest-app/supabase/.temp/
+/supabase/.temp/
 
 # =========================================================
 # Claude Code / Codex local tool state
-# Ignore personal/session files, but keep shared project config
-# (.mcp.json, skills-lock.json) tracked
+# Personal/session files stay local. skills-lock.json remains tracked
+# as shared project config; .mcp.json is per-developer and is not.
 # =========================================================
 .claude/settings.local.json
 .claude/skills/
 .codex/
 claude.md
 agents.md
+/.mcp.json
 # =========================================================
 # Ad-hoc local dev/preview scratch files
 # =========================================================
@@ -100,6 +102,9 @@ flutter_web_*.err.log
 
 project_guide
 docs/
+# Keep the delivered architecture documentation tracked
+!thebest-app/docs/
+!thebest-app/docs/WEBSITE_SUPABASE_BOOKING.md
 # Playwright MCP browser snapshots
 .playwright-mcp/
 

@@ -31,7 +31,7 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # HTTP calls to FastAPI
+  # HTTP client for API requests
   http: ^1.2.0
   
   # State management (pick one)
