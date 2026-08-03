@@ -1,4 +1,4 @@
-# The Best Family Wellness Management System
+# Treats Wellness Management System
 
 A wellness centre management system developed for Capstone Project 2.
 
