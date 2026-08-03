@@ -79,8 +79,9 @@ thebest-app/supabase/.temp/
 
 # =========================================================
 # Claude Code / Codex local tool state
-# Personal/session files stay local. skills-lock.json remains tracked
-# as shared project config; .mcp.json is per-developer and is not.
+# AI-assistant tooling and session state. Kept on disk for local use,
+# never tracked: not required by Flutter, the website, Supabase,
+# deployment, testing or CI.
 # =========================================================
 .claude/settings.local.json
 .claude/skills/
@@ -111,3 +112,5 @@ docs/
 # Local report/package artifacts (keep on disk, never commit)
 Capstone2_Report_Context.md
 phase6b1_corrected_package.zip
+
+/skills-lock.json
