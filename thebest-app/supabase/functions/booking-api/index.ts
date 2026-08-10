@@ -36,11 +36,91 @@ const BILLPLZ_BASE_URL = normalizeBillplzBaseUrl(
   Deno.env.get("BILLPLZ_BASE_URL") ?? "",
 );
 const BILLPLZ_API_KEY = (Deno.env.get("BILLPLZ_API_KEY") ?? "").trim();
+const BILLPLZ_API_KEY_TAMAN_WAHYU = (
+  Deno.env.get("BILLPLZ_API_KEY_TAMAN_WAHYU") ?? ""
+).trim();
 const BILLPLZ_COLLECTION_ID = (Deno.env.get("BILLPLZ_COLLECTION_ID") ?? "").trim();
+const BILLPLZ_COLLECTION_ID_TAMAN_WAHYU = (
+  Deno.env.get("BILLPLZ_COLLECTION_ID_TAMAN_WAHYU") ?? ""
+).trim();
+const BILLPLZ_COLLECTION_ID_PV128 = (
+  Deno.env.get("BILLPLZ_COLLECTION_ID_PV128") ?? ""
+).trim();
 const BILLPLZ_X_SIGNATURE_KEY = (Deno.env.get("BILLPLZ_X_SIGNATURE_KEY") ?? "").trim();
+const BILLPLZ_X_SIGNATURE_KEY_TAMAN_WAHYU = (
+  Deno.env.get("BILLPLZ_X_SIGNATURE_KEY_TAMAN_WAHYU") ?? ""
+).trim();
 const BOOKING_CLEANUP_SECRET = (Deno.env.get("BOOKING_CLEANUP_SECRET") ?? "").trim();
+const BILLPLZ_OUTLET_COLLECTION_MODE = Boolean(
+  BILLPLZ_COLLECTION_ID_TAMAN_WAHYU || BILLPLZ_COLLECTION_ID_PV128,
+);
+
+type BillplzCredentials = {
+  apiKey: string;
+  collectionId: string;
+  xSignatureKey: string;
+};
+
+function billplzCredentials(outletCode: string): BillplzCredentials {
+  if (!BILLPLZ_OUTLET_COLLECTION_MODE) {
+    if (BILLPLZ_API_KEY && BILLPLZ_COLLECTION_ID && BILLPLZ_X_SIGNATURE_KEY) {
+      return {
+        apiKey: BILLPLZ_API_KEY,
+        collectionId: BILLPLZ_COLLECTION_ID,
+        xSignatureKey: BILLPLZ_X_SIGNATURE_KEY,
+      };
+    }
+    throw new Error("Payment credentials are not configured");
+  }
+  const credentials = outletCode === "taman-wahyu"
+    ? {
+      apiKey: BILLPLZ_API_KEY_TAMAN_WAHYU,
+      collectionId: BILLPLZ_COLLECTION_ID_TAMAN_WAHYU,
+      xSignatureKey: BILLPLZ_X_SIGNATURE_KEY_TAMAN_WAHYU,
+    }
+    : outletCode === "pv128"
+    ? {
+      apiKey: BILLPLZ_API_KEY,
+      collectionId: BILLPLZ_COLLECTION_ID_PV128,
+      xSignatureKey: BILLPLZ_X_SIGNATURE_KEY,
+    }
+    : null;
+  if (
+    !credentials?.apiKey || !credentials.collectionId ||
+    !credentials.xSignatureKey
+  ) {
+    throw new Error("Payment credentials are not configured for this outlet");
+  }
+  return credentials;
+}
+
+function billplzCredentialsForCollection(collectionId: string): BillplzCredentials {
+  if (!BILLPLZ_OUTLET_COLLECTION_MODE) {
+    const credentials = billplzCredentials("");
+    if (collectionId === credentials.collectionId) return credentials;
+  } else if (collectionId === BILLPLZ_COLLECTION_ID_TAMAN_WAHYU) {
+    return billplzCredentials("taman-wahyu");
+  } else if (collectionId === BILLPLZ_COLLECTION_ID_PV128) {
+    return billplzCredentials("pv128");
+  }
+  throw new Error("Payment callback collection is not configured");
+}
+
+function billplzOutletConfigured(outletCode: string): boolean {
+  try {
+    billplzCredentials(outletCode);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 const BILLPLZ_CONFIGURED = Boolean(
-  BILLPLZ_BASE_URL && BILLPLZ_API_KEY && BILLPLZ_COLLECTION_ID && BILLPLZ_X_SIGNATURE_KEY,
+  BILLPLZ_BASE_URL && (
+    BILLPLZ_OUTLET_COLLECTION_MODE
+      ? billplzOutletConfigured("taman-wahyu") && billplzOutletConfigured("pv128")
+      : billplzOutletConfigured("")
+  ),
 );
 
 function billplzUrl(path: string): string {
@@ -98,11 +178,15 @@ function timingSafeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-async function billplzRequest(path: string, body: Record<string, string>) {
+async function billplzRequest(
+  path: string,
+  body: Record<string, string>,
+  credentials: BillplzCredentials,
+) {
   const response = await fetch(billplzUrl(path), {
     method: "POST",
     headers: {
-      Authorization: `Basic ${btoa(`${BILLPLZ_API_KEY}:`)}`,
+      Authorization: `Basic ${btoa(`${credentials.apiKey}:`)}`,
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams(body),
@@ -120,13 +204,16 @@ function billplzBillUrl(billId: string): string {
   return billplzUrl(`/bills/${encodeURIComponent(billId)}`);
 }
 
-async function deleteBillplzBill(billId: string): Promise<void> {
+async function deleteBillplzBill(
+  billId: string,
+  credentials: BillplzCredentials,
+): Promise<void> {
   if (!billId) return;
   const response = await fetch(
     billplzUrl(`/api/v3/bills/${encodeURIComponent(billId)}`),
     {
       method: "DELETE",
-      headers: { Authorization: `Basic ${btoa(`${BILLPLZ_API_KEY}:`)}` },
+      headers: { Authorization: `Basic ${btoa(`${credentials.apiKey}:`)}` },
     },
   );
   if (response.ok || response.status === 404) return;
@@ -468,6 +555,7 @@ type BookingBillBinding = {
   public_token: string;
   booking_group_token: string | null;
   guest_index: number | null;
+  outlet_id: string;
   billplz_bill_id: string | null;
   status: string;
   expires_at: string;
@@ -483,7 +571,7 @@ type BillCancellationClaim = {
 };
 
 const BILL_BINDING_COLUMNS =
-  "public_token,booking_group_token,guest_index,billplz_bill_id,status,expires_at";
+  "public_token,booking_group_token,guest_index,outlet_id,billplz_bill_id,status,expires_at";
 
 async function bookingBillBinding(token: string): Promise<BookingBillBinding | null> {
   const groupResult = await supabase
@@ -502,6 +590,36 @@ async function bookingBillBinding(token: string): Promise<BookingBillBinding | n
     .limit(1);
   if (singleResult.error) throw singleResult.error;
   return (singleResult.data?.[0] as BookingBillBinding | undefined) ?? null;
+}
+
+async function outletCodeForId(outletId: string): Promise<string> {
+  const result = await supabase
+    .from("outlets")
+    .select("code")
+    .eq("id", outletId)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  const code = String(result.data?.code ?? "").trim().toLowerCase();
+  if (!code) throw new Error("Booking outlet was not found");
+  return code;
+}
+
+function bookingOutletCode(binding: BookingBillBinding): Promise<string> {
+  return outletCodeForId(binding.outlet_id);
+}
+
+async function billplzCredentialsForHoldId(
+  holdId: string,
+): Promise<BillplzCredentials> {
+  const result = await supabase
+    .from("booking_holds")
+    .select("outlet_id")
+    .eq("id", holdId)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  const outletId = String(result.data?.outlet_id ?? "");
+  if (!outletId) throw new Error("Booking hold outlet was not found");
+  return billplzCredentials(await outletCodeForId(outletId));
 }
 
 function bindingIsExpired(binding: BookingBillBinding): boolean {
@@ -530,7 +648,8 @@ async function closeBookingHold(
   }
 
   try {
-    await deleteBillplzBill(claim.bill_id);
+    const credentials = await billplzCredentialsForHoldId(claim.hold_id);
+    await deleteBillplzBill(claim.bill_id, credentials);
     const completed = await rpcScalar<boolean>("complete_billplz_cancellation", {
       p_hold_id: claim.hold_id,
       p_claim_token: claim.cancellation_claim_token,
@@ -557,6 +676,7 @@ async function closeBookingHold(
 async function claimBillplzBill(
   binding: BookingBillBinding,
   billId: string,
+  credentials: BillplzCredentials,
 ): Promise<string> {
   let winner: string | null;
   try {
@@ -565,7 +685,7 @@ async function claimBillplzBill(
       p_bill_id: billId,
     });
   } catch (error) {
-    await deleteBillplzBill(billId).catch((deleteError) => {
+    await deleteBillplzBill(billId, credentials).catch((deleteError) => {
       console.error(
         "Unable to delete unclaimed Billplz bill",
         billId,
@@ -575,10 +695,10 @@ async function claimBillplzBill(
     throw error;
   }
   if (!winner) {
-    await deleteBillplzBill(billId);
+    await deleteBillplzBill(billId, credentials);
     throw new Error("This booking hold can no longer accept payment");
   }
-  if (winner !== billId) await deleteBillplzBill(billId);
+  if (winner !== billId) await deleteBillplzBill(billId, credentials);
   return winner;
 }
 
@@ -600,7 +720,8 @@ async function cleanupExpiredPaymentHolds(): Promise<{
       !claim.cancellation_claim_token
     ) continue;
     try {
-      await deleteBillplzBill(claim.bill_id);
+      const credentials = await billplzCredentialsForHoldId(claim.hold_id);
+      await deleteBillplzBill(claim.bill_id, credentials);
       const completed = await rpcScalar<boolean>("complete_billplz_cancellation", {
         p_hold_id: claim.hold_id,
         p_claim_token: claim.cancellation_claim_token,
@@ -644,6 +765,15 @@ async function route(request: Request): Promise<Response> {
     return json(request, {
       ok: true,
       payment_enabled: BILLPLZ_CONFIGURED,
+      payment_collection_mode: BILLPLZ_OUTLET_COLLECTION_MODE
+        ? "per_organization"
+        : "legacy_single",
+      payment_outlets_configured: BILLPLZ_OUTLET_COLLECTION_MODE
+        ? [
+          ...(billplzOutletConfigured("taman-wahyu") ? ["taman-wahyu"] : []),
+          ...(billplzOutletConfigured("pv128") ? ["pv128"] : []),
+        ]
+        : [],
       payment_cleanup_enabled: Boolean(BOOKING_CLEANUP_SECRET),
       auto_confirm: AUTO_CONFIRM,
     });
@@ -830,9 +960,11 @@ async function route(request: Request): Promise<Response> {
       }
 
       const amountCents = Math.round(Number(hold.total_amount) * 100);
+      const outletCode = await bookingOutletCode(binding);
+      const credentials = billplzCredentials(outletCode);
       const callbackUrl = `${supabaseUrl}/functions/v1/booking-api/billplz/callback`;
       const billParams: Record<string, string> = {
-        collection_id: BILLPLZ_COLLECTION_ID,
+        collection_id: credentials.collectionId,
         email: String(hold.customer_email ?? ""),
         mobile: normalizeMyPhone(String(hold.customer_phone ?? "")),
         name: String(hold.customer_name ?? ""),
@@ -843,11 +975,11 @@ async function route(request: Request): Promise<Response> {
       const redirectUrl = bookingRedirectUrl(token, body?.return_path);
       if (redirectUrl) billParams.redirect_url = redirectUrl;
 
-      const bill = await billplzRequest("/api/v3/bills", billParams);
+      const bill = await billplzRequest("/api/v3/bills", billParams, credentials);
       const billId = String(bill.id ?? "");
       const billUrl = String(bill.url ?? "");
       if (!billId || !billUrl) return fail(request, "Unable to start payment. Please try again.", 502);
-      const claimedBillId = await claimBillplzBill(binding, billId);
+      const claimedBillId = await claimBillplzBill(binding, billId, credentials);
       return json(request, {
         url: claimedBillId === billId ? billUrl : billplzBillUrl(claimedBillId),
         reused: claimedBillId !== billId,
@@ -901,12 +1033,26 @@ async function route(request: Request): Promise<Response> {
     const get = (key: string) => String(form.get(key) ?? "");
     const signature = get("x_signature");
     const billId = get("id");
-    if (!signature || !billId) return fail(request, "Invalid callback payload", 400);
+    const collectionId = get("collection_id");
+    if (!signature || !billId || !collectionId) {
+      return fail(request, "Invalid callback payload", 400);
+    }
+
+    let credentials: BillplzCredentials;
+    try {
+      credentials = billplzCredentialsForCollection(collectionId);
+    } catch (error) {
+      console.error("Billplz callback used an unknown collection", collectionId, error);
+      return fail(request, "Invalid callback collection", 400);
+    }
 
     const signedString = BILLPLZ_CALLBACK_SIGNED_KEYS
       .map((key) => `${key}${get(key)}`)
       .join("|");
-    const expectedSignature = await hmacSha256Hex(signedString, BILLPLZ_X_SIGNATURE_KEY);
+    const expectedSignature = await hmacSha256Hex(
+      signedString,
+      credentials.xSignatureKey,
+    );
     if (!timingSafeEqual(expectedSignature, signature)) {
       console.error("Billplz callback signature mismatch", billId);
       return fail(request, "Invalid signature", 400);
