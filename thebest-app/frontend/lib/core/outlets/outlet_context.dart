@@ -61,4 +61,6 @@ class OutletContext {
     final normalized = outletById(outletId).id;
     if (activeOutletId.value != normalized) activeOutletId.value = normalized;
   }
+
+  static void reset() => select(pv128.id);
 }

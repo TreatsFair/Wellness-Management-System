@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/accessibility/accessibility_settings.dart';
+import 'core/outlets/outlet_context.dart';
 import 'core/services/service_category_order.dart';
 import 'core/theme/app_theme.dart';
 import 'data/repositories/auth_repository.dart';
@@ -51,14 +52,21 @@ class TreatsApp extends StatefulWidget {
 
 class _TreatsAppState extends State<TreatsApp> {
   StreamSubscription<AuthState>? _authSubscription;
+  String? _authenticatedUserId;
 
   @override
   void initState() {
     super.initState();
+    _authenticatedUserId = Supabase.instance.client.auth.currentUser?.id;
     _authSubscription = Supabase.instance.client.auth.onAuthStateChange.listen(
-      (state) => unawaited(
-        AccessibilityController.instance.useUser(state.session?.user.id),
-      ),
+      (state) {
+        final nextUserId = state.session?.user.id;
+        if (nextUserId != _authenticatedUserId) {
+          OutletContext.reset();
+          _authenticatedUserId = nextUserId;
+        }
+        unawaited(AccessibilityController.instance.useUser(nextUserId));
+      },
     );
   }
 
