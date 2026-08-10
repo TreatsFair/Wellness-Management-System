@@ -10862,7 +10862,6 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
   late final TextEditingController _start;
   late final TextEditingController _end;
   late final TextEditingController _notes;
-  late final TextEditingController _price;
   bool _saving = false;
 
   @override
@@ -10871,9 +10870,6 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
     _start = TextEditingController(text: widget.appointment.startTime);
     _end = TextEditingController(text: widget.appointment.endTime);
     _notes = TextEditingController(text: widget.appointment.notes);
-    _price = TextEditingController(
-      text: widget.appointment.price.toStringAsFixed(0),
-    );
   }
 
   @override
@@ -10881,15 +10877,12 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
     _start.dispose();
     _end.dispose();
     _notes.dispose();
-    _price.dispose();
     super.dispose();
   }
 
   Future<void> _save() async {
     final startTime = _normalizeEditTime(_start.text);
     final endTime = _normalizeEditTime(_end.text);
-    final price =
-        double.tryParse(_price.text.trim()) ?? widget.appointment.price;
 
     if (startTime == null || endTime == null) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -10939,7 +10932,6 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
 
       await _appointmentRepository.updateAppointment(widget.appointment.id, {
         'notes': _notes.text.trim(),
-        'totalPrice': price,
       });
       if (mounted) Navigator.pop(context, true);
     } catch (e) {
@@ -11019,12 +11011,6 @@ class _AppointmentEditSheetState extends State<_AppointmentEditSheet> {
               ],
             ),
             const SizedBox(height: 12),
-            _EditField(
-              label: 'Price',
-              controller: _price,
-              keyboardType: TextInputType.number,
-            ),
-            const SizedBox(height: 12),
             _EditField(label: 'Notes', controller: _notes, maxLines: 3),
             const SizedBox(height: 18),
             SizedBox(
@@ -11052,13 +11038,11 @@ class _EditField extends StatelessWidget {
   final String label;
   final TextEditingController controller;
   final int maxLines;
-  final TextInputType? keyboardType;
 
   const _EditField({
     required this.label,
     required this.controller,
     this.maxLines = 1,
-    this.keyboardType,
   });
 
   @override
@@ -11066,7 +11050,6 @@ class _EditField extends StatelessWidget {
     return TextField(
       controller: controller,
       maxLines: maxLines,
-      keyboardType: keyboardType,
       decoration: InputDecoration(
         labelText: label,
         filled: true,

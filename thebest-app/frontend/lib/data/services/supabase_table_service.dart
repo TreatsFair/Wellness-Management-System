@@ -282,9 +282,15 @@ class SupabaseTableService {
     String id,
     Map<String, dynamic> values,
   ) async {
-    final scopedValues = _isOutletScoped
-        ? {...values, 'outletId': _activeOutletId}
-        : values;
+    final scopedValues = Map<String, dynamic>.from(values);
+    if (_isOutletScoped) {
+      // Outlet identity scopes the target row; it is not part of an ordinary
+      // update. Including it in the payload requires UPDATE privilege on the
+      // protected outlet_id column and makes otherwise permitted column-level
+      // updates (for example appointment notes) fail before RLS is evaluated.
+      scopedValues.remove('outletId');
+      scopedValues.remove('outlet_id');
+    }
     dynamic query = _client
         .from(tableName)
         .update(toSupabaseValues(scopedValues))
