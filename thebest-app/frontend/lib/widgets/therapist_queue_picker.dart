@@ -86,6 +86,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   QueueScheduleStatus? _scheduleStatus;
   Timer? _refreshTimer;
   Map<String, String> _profileImages = const {};
+  int _loadGeneration = 0;
 
   @override
   void initState() {
@@ -154,6 +155,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   }
 
   Future<void> _load({bool showLoading = true}) async {
+    final loadGeneration = ++_loadGeneration;
     if (showLoading) {
       setState(() {
         _loading = true;
@@ -198,7 +200,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
       } catch (_) {
         // Queue selection remains usable if profile media cannot be loaded.
       }
-      if (!mounted) return;
+      if (!mounted || loadGeneration != _loadGeneration) return;
       setState(() {
         _entries = entries;
         _profileImages = profileImages;
@@ -207,7 +209,7 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
         _loading = false;
       });
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || loadGeneration != _loadGeneration) return;
       if (showLoading || _entries.isEmpty) {
         setState(() {
           _error = e.toString();

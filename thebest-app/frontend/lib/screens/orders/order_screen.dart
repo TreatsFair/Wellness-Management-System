@@ -397,6 +397,8 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   bool _loadingData = true;
   String? _serviceLoadError;
   BusinessRuleSettings _businessSettings = BusinessRuleSettings.defaults();
+  int _therapistLoadGeneration = 0;
+  int _zoneLoadGeneration = 0;
 
   final _searchController = TextEditingController();
   final _transactionNotesController = TextEditingController();
@@ -567,6 +569,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   };
 
   Future<void> _loadTherapistsLive() async {
+    final loadGeneration = ++_therapistLoadGeneration;
+    final requestedDuration = _selectedDurationMinutes;
+    final requestedOutletId = OutletContext.activeOutletId.value;
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
     final therapistRows = await _therapistRepository.getActiveTherapists();
@@ -578,7 +583,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     final availability = await CspService.getWalkinTherapistAvailability(
       today: today,
       nowTime: DateFormat('HH:mm:ss').format(now),
-      duration: _selectedDurationMinutes,
+      duration: requestedDuration,
     );
     final availabilityById = {for (final a in availability) a.therapistId: a};
 
@@ -606,6 +611,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       return a.freeInMinutes.compareTo(b.freeInMinutes);
     });
 
+    if (!mounted ||
+        loadGeneration != _therapistLoadGeneration ||
+        requestedDuration != _selectedDurationMinutes ||
+        requestedOutletId != OutletContext.activeOutletId.value) {
+      return;
+    }
     setState(() => _therapists = therapists);
   }
 
@@ -617,10 +628,13 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   }
 
   Future<void> _loadZonesLive() async {
+    final loadGeneration = ++_zoneLoadGeneration;
+    final requestedDuration = _selectedRoomBlockMinutes;
+    final requestedOutletId = OutletContext.activeOutletId.value;
     final now = DateTime.now();
     final today = DateFormat('yyyy-MM-dd').format(now);
     final nowTime = DateFormat('HH:mm:ss').format(now);
-    final duration = _selectedRoomBlockMinutes;
+    final duration = requestedDuration;
 
     final roomRows = await _roomRepository.getActiveRooms();
 
@@ -651,6 +665,12 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
       }),
     );
 
+    if (!mounted ||
+        loadGeneration != _zoneLoadGeneration ||
+        requestedDuration != _selectedRoomBlockMinutes ||
+        requestedOutletId != OutletContext.activeOutletId.value) {
+      return;
+    }
     setState(() => _zones = zones);
   }
 
@@ -879,8 +899,7 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     });
     // Therapist/room availability depends on the total selected duration, not
     // just "who's busy right now" -- recompute against the new window.
-    _loadTherapistsLive();
-    _loadZonesLive();
+    unawaited(_refreshAuthoritativeAvailability());
   }
 
   Future<void> _onTherapistSelected(_WalkInTherapist t) async {
