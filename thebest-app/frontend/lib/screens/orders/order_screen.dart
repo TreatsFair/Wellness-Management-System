@@ -7,6 +7,7 @@ import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
 import '../../core/services/service_category_order.dart';
+import '../../core/services/therapist_availability_refresh.dart';
 import '../../core/utils/error_message.dart';
 import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/commission_repository.dart';
@@ -409,6 +410,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
   @override
   void initState() {
     super.initState();
+    TherapistAvailabilityRefresh.revision.addListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     ServiceCategoryOrderController.instance.addListener(
       _applyServiceCategoryOrder,
     );
@@ -421,6 +425,9 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
 
   @override
   void dispose() {
+    TherapistAvailabilityRefresh.revision.removeListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     ServiceCategoryOrderController.instance.removeListener(
       _applyServiceCategoryOrder,
     );
@@ -432,6 +439,14 @@ class _WalkInPosScreenState extends State<WalkInPosScreen> {
     _searchController.dispose();
     _transactionNotesController.dispose();
     super.dispose();
+  }
+
+  void _onTherapistAvailabilityInvalidated() {
+    unawaited(_refreshAuthoritativeAvailability());
+  }
+
+  Future<void> _refreshAuthoritativeAvailability() async {
+    await Future.wait([_loadTherapistsLive(), _loadZonesLive()]);
   }
 
   void _applyServiceCategoryOrder() {

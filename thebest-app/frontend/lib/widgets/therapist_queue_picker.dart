@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 import '../core/services/csp_service.dart';
+import '../core/services/therapist_availability_refresh.dart';
 import '../core/utils/staff_initials.dart';
 import '../data/services/supabase_table_service.dart';
 
@@ -89,6 +90,9 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   @override
   void initState() {
     super.initState();
+    TherapistAvailabilityRefresh.revision.addListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     _assignmentSource = widget.initialAssignmentSource;
     _genderFilter = _normalizedGender(widget.initialRequestedGender);
     _load();
@@ -101,7 +105,14 @@ class TherapistQueuePickerState extends State<TherapistQueuePicker> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    TherapistAvailabilityRefresh.revision.removeListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     super.dispose();
+  }
+
+  void _onTherapistAvailabilityInvalidated() {
+    unawaited(_load());
   }
 
   @override

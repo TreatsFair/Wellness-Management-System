@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/services/therapist_availability_refresh.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
 import '../../core/utils/staff_initials.dart';
@@ -603,6 +604,7 @@ class _TimetableScreenState extends State<TimetableScreen> {
         reason: selection.reason,
         assignmentSource: 'manual_override',
       );
+      TherapistAvailabilityRefresh.notifyChanged();
       if (!mounted) return false;
       await _loadTimetable();
       if (!mounted) return false;

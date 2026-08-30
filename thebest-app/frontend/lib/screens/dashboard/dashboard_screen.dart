@@ -9,6 +9,7 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
+import '../../core/services/therapist_availability_refresh.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/staff_initials.dart';
 import '../../data/repositories/appointment_repository.dart';
@@ -413,10 +414,14 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Timer? _startingSoonTimer;
   Timer? _therapistQueueTimer;
   bool _isRefreshingTherapistQueue = false;
+  int _dashboardLoadGeneration = 0;
 
   @override
   void initState() {
     super.initState();
+    TherapistAvailabilityRefresh.revision.addListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     _loadBusinessSettings();
     _loadDashboardData();
     unawaited(_loadDashboardOrders());
@@ -437,6 +442,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _startingSoonTimer?.cancel();
     _therapistQueueTimer?.cancel();
+    TherapistAvailabilityRefresh.revision.removeListener(
+      _onTherapistAvailabilityInvalidated,
+    );
     OutletContext.activeOutletId.removeListener(
       _onOutletChangedForNotifications,
     );
@@ -446,6 +454,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
       unawaited(_notificationRepository.unsubscribe(channel));
     }
     super.dispose();
+  }
+
+  void _onTherapistAvailabilityInvalidated() {
+    unawaited(_loadDashboardData());
   }
 
   // ── Notifications ────────────────────────────────────────────────
@@ -726,6 +738,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<void> _loadDashboardData({bool showSpinner = true}) async {
+    final loadGeneration = ++_dashboardLoadGeneration;
     if (mounted && showSpinner) {
       setState(() {
         _isLoadingDashboardData = true;
@@ -992,7 +1005,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
             : weekRevenue / weekTransactionCount,
       );
 
-      if (!mounted) return;
+      if (!mounted || loadGeneration != _dashboardLoadGeneration) return;
       setState(() {
         _therapistStatusSource = therapistStatuses;
         _dashboardData = _DashboardData(
@@ -1005,7 +1018,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       });
       _refreshStartingSoon();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || loadGeneration != _dashboardLoadGeneration) return;
       setState(() {
         _dashboardError = e.toString();
         _isLoadingDashboardData = false;
@@ -1483,10 +1496,13 @@ class _TabletLayout extends StatelessWidget {
         label: 'Timetable',
         iconBg: const Color(0xFFFFF7ED),
         iconColor: const Color(0xFFEA580C),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
-        ),
+        onTap: () async {
+          await Navigator.push<void>(
+            context,
+            MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
+          );
+          await onRefreshDashboard();
+        },
       ),
     };
     return _ReorderableDashboardCard(
@@ -2260,10 +2276,13 @@ class _PhoneLayout extends StatelessWidget {
         label: 'Timetable',
         iconBg: const Color(0xFFFFF7ED),
         iconColor: const Color(0xFFEA580C),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
-        ),
+        onTap: () async {
+          await Navigator.push<void>(
+            context,
+            MaterialPageRoute(builder: (_) => TimetableScreen(userRole: role)),
+          );
+          await onRefreshDashboard();
+        },
       ),
     };
     return _ReorderableDashboardCard(

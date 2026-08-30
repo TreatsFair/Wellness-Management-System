@@ -5,6 +5,7 @@ import '../../core/accessibility/accessibility_settings.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/services/csp_service.dart';
 import '../../core/services/payment_service.dart';
+import '../../core/services/therapist_availability_refresh.dart';
 import '../../core/theme/app_theme.dart';
 import '../../core/utils/error_message.dart';
 import '../../core/utils/staff_initials.dart';
@@ -2479,6 +2480,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
         reason: reasonController.text.trim(),
         assignmentSource: 'manual_override',
       );
+      TherapistAvailabilityRefresh.notifyChanged();
       if (!mounted) return;
       await _loadAppointments();
       if (!mounted) return;
