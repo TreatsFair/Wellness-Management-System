@@ -215,17 +215,19 @@ class ManagementScreen extends StatelessWidget {
                       ),
                     ),
                   ),
-                  if (userRole == 'admin')
+                  if (userRole.trim().toLowerCase() == 'admin')
                     _ManagementOption(
                       icon: Icons.language_outlined,
                       color: const Color(0xFFB7790B),
                       title: 'Online Booking',
                       subtitle:
-                          'Control public services, schedules, rooms, and closures',
+                          'Control public services, schedules, rooms, closures, and promotions',
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
-                          builder: (_) => const OnlineBookingScreen(),
+                          builder: (_) => OnlineBookingScreen(
+                            userRole: userRole,
+                          ),
                         ),
                       ),
                     ),

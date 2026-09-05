@@ -5,14 +5,17 @@ import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/repositories/image_upload_repository.dart';
 import '../../data/repositories/online_booking_repository.dart';
+import 'promotion_management_screen.dart';
 import '../../widgets/adaptive_detail_surface.dart';
 import '../../widgets/app_toast.dart';
 import '../../widgets/management_catalogue_shell.dart';
 
-enum _OnlineBookingSection { rules, services, closures }
+enum _OnlineBookingSection { rules, services, closures, promotions }
 
 class OnlineBookingScreen extends StatefulWidget {
-  const OnlineBookingScreen({super.key});
+  const OnlineBookingScreen({super.key, this.userRole = 'staff'});
+
+  final String userRole;
 
   @override
   State<OnlineBookingScreen> createState() => _OnlineBookingScreenState();
@@ -21,6 +24,7 @@ class OnlineBookingScreen extends StatefulWidget {
 class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   final _repository = OnlineBookingRepository();
   final _settingsKey = GlobalKey<_SettingsPaneState>();
+  final _promotionsKey = GlobalKey<PromotionManagementPaneState>();
   late final String _outletId;
   Map<String, dynamic>? _data;
   bool _loading = true;
@@ -28,6 +32,9 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   final _serviceSearchController = TextEditingController();
   bool _servicesGridView = true;
   String? _serviceCategoryFilter;
+
+  bool get _isAdmin => widget.userRole.trim().toLowerCase() == 'admin';
+  bool get _canManagePromotions => _isAdmin;
 
   @override
   void dispose() {
@@ -40,7 +47,11 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
     super.initState();
     _outletId = OutletContext.activeOutletId.value;
     _serviceSearchController.addListener(() => setState(() {}));
-    _load();
+    if (_isAdmin) {
+      _load();
+    } else {
+      _loading = false;
+    }
   }
 
   Future<void> _load() async {
@@ -81,6 +92,15 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
 
   @override
   Widget build(BuildContext context) {
+    if (!_isAdmin) {
+      return const Scaffold(
+        body: SafeArea(
+          child: Center(
+            child: Text('Online Booking is available to administrators only.'),
+          ),
+        ),
+      );
+    }
     final outlet = OutletContext.outletById(_outletId);
     final catalogue = _list('catalogue');
     final closures = _list('closures');
@@ -90,6 +110,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
       _OnlineBookingSection.rules => 'Outlet rules',
       _OnlineBookingSection.services => 'Public services',
       _OnlineBookingSection.closures => 'Closures',
+      _OnlineBookingSection.promotions => 'Promotions',
     };
     final countLabel = switch (_section) {
       _OnlineBookingSection.rules => '${outlet.name} public booking controls',
@@ -97,22 +118,30 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
         '${catalogue.where((item) => item['enabled'] == true).length} live · ${catalogue.length} configured',
       _OnlineBookingSection.closures =>
         '${closures.length} blackout ${closures.length == 1 ? 'period' : 'periods'}',
+      _OnlineBookingSection.promotions => 'Server-validated online booking codes',
     };
     final primaryAction = switch (_section) {
       _OnlineBookingSection.rules => CataloguePrimaryButton(
         icon: Icons.save_outlined,
         label: 'Save Rules',
-        onPressed: _loading ? null : () => _settingsKey.currentState?._save(),
+        onPressed: !_isAdmin || _loading ? null : () => _settingsKey.currentState?._save(),
       ),
       _OnlineBookingSection.services => CataloguePrimaryButton(
         icon: Icons.add,
         label: 'Add Public Service',
-        onPressed: () => _editService(null),
+        onPressed: _isAdmin ? () => _editService(null) : null,
       ),
       _OnlineBookingSection.closures => CataloguePrimaryButton(
         icon: Icons.add,
         label: 'Add Closure',
-        onPressed: _addClosure,
+        onPressed: _isAdmin ? _addClosure : null,
+      ),
+      _OnlineBookingSection.promotions => CataloguePrimaryButton(
+        icon: Icons.add,
+        label: 'Add Promotion',
+        onPressed: _canManagePromotions
+            ? () => _promotionsKey.currentState?.openCreate()
+            : null,
       ),
     };
 
@@ -170,6 +199,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
                 businessSettings: Map<String, dynamic>.from(
                   _data!['businessSettings'] as Map,
                 ),
+                canEdit: _isAdmin,
                 onSave: (values) async {
                   await _repository.saveSettings(_outletId, values);
                   await _load();
@@ -189,6 +219,11 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
               _OnlineBookingSection.closures => _ClosuresPane(
                 closures: closures,
                 onView: _viewClosure,
+              ),
+              _OnlineBookingSection.promotions => PromotionManagementPane(
+                key: _promotionsKey,
+                outletId: _outletId,
+                canEdit: _canManagePromotions,
               ),
             },
     );
@@ -217,6 +252,12 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
         subtitle: 'Blackout dates and times',
         count: closureCount,
       ),
+      _navigationTile(
+        section: _OnlineBookingSection.promotions,
+        icon: Icons.local_offer_outlined,
+        title: 'Promotions',
+        subtitle: 'Voucher codes and redemption limits',
+      ),
     ],
   );
 
@@ -243,6 +284,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
             _OnlineBookingSection.rules => 'Outlet rules',
             _OnlineBookingSection.services => 'Public services',
             _OnlineBookingSection.closures => 'Closures',
+            _OnlineBookingSection.promotions => 'Promotions',
           },
           selected: _section == section,
           onTap: () => setState(() => _section = section),
@@ -251,6 +293,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   );
 
   Future<void> _editService(Map<String, dynamic>? item) async {
+    if (!_isAdmin) return;
     final result = await showAdaptiveDetailSurface<_ServiceDraft>(
       context: context,
       builder: (drawerContext, isFullScreen) => _OnlineServiceDialog(
@@ -305,10 +348,12 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
                 : 'Draft public service',
             subtitle: item['enabled'] == true ? 'Live online' : 'Not published',
             isFullScreen: isFullScreen,
-            footer: CatalogueDetailEditButton(
-              label: 'Edit Public Service',
-              onPressed: () => Navigator.pop(drawerContext, true),
-            ),
+            footer: _isAdmin
+                ? CatalogueDetailEditButton(
+                    label: 'Edit Public Service',
+                    onPressed: () => Navigator.pop(drawerContext, true),
+                  )
+                : null,
             child: _PublicServiceDetails(item: item, internal: internal),
           ),
     );
@@ -316,6 +361,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   }
 
   Future<void> _addClosure() async {
+    if (!_isAdmin) return;
     final date = await showDatePicker(
       context: context,
       firstDate: DateTime.now(),
@@ -392,10 +438,12 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
                 ? 'Full-day closure'
                 : 'Partial closure',
             isFullScreen: isFullScreen,
-            footer: CatalogueDetailEditButton(
-              label: 'Manage Closure',
-              onPressed: () => Navigator.pop(drawerContext, true),
-            ),
+            footer: _isAdmin
+                ? CatalogueDetailEditButton(
+                    label: 'Manage Closure',
+                    onPressed: () => Navigator.pop(drawerContext, true),
+                  )
+                : null,
             child: _ClosureDetails(closure: closure),
           ),
     );
@@ -403,6 +451,7 @@ class _OnlineBookingScreenState extends State<OnlineBookingScreen> {
   }
 
   Future<void> _manageClosure(Map<String, dynamic> closure) async {
+    if (!_isAdmin) return;
     await showAdaptiveDetailSurface<void>(
       context: context,
       builder: (drawerContext, isFullScreen) => ManagementCatalogueDetailSurface(
@@ -467,11 +516,13 @@ class _SettingsPane extends StatefulWidget {
     required this.outletName,
     required this.initial,
     required this.businessSettings,
+    required this.canEdit,
     required this.onSave,
   });
   final String outletName;
   final Map<String, dynamic> initial;
   final Map<String, dynamic> businessSettings;
+  final bool canEdit;
   final Future<void> Function(Map<String, dynamic>) onSave;
   @override
   State<_SettingsPane> createState() => _SettingsPaneState();
@@ -559,8 +610,10 @@ class _SettingsPaneState extends State<_SettingsPane> {
     required IconData icon,
     required int minimum,
     required int maximum,
+    bool enabled = true,
   }) => TextFormField(
     controller: controller,
+    enabled: enabled,
     keyboardType: TextInputType.number,
     autovalidateMode: AutovalidateMode.onUserInteraction,
     decoration: InputDecoration(
@@ -635,7 +688,7 @@ class _SettingsPaneState extends State<_SettingsPane> {
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Online booking enabled'),
                 value: enabled,
-                onChanged: (v) => setState(() => enabled = v),
+                onChanged: widget.canEdit ? (v) => setState(() => enabled = v) : null,
               ),
             ],
           ),
@@ -669,12 +722,14 @@ class _SettingsPaneState extends State<_SettingsPane> {
                     open,
                     'Public opening',
                     '11:00',
+                    enabled: widget.canEdit,
                     validator: _timeValidator,
                   );
                   final closing = _field(
                     close,
                     'Public closing',
                     '22:00',
+                    enabled: widget.canEdit,
                     validator: _timeValidator,
                   );
                   if (constraints.maxWidth < 460) {
@@ -696,6 +751,7 @@ class _SettingsPaneState extends State<_SettingsPane> {
                 notice,
                 'Minimum advance notice (minutes)',
                 '60',
+                enabled: widget.canEdit,
                 number: true,
                 validator: (value) =>
                     _numberValidator(value, minimum: 0, maximum: 10080),
@@ -718,6 +774,7 @@ class _SettingsPaneState extends State<_SettingsPane> {
                     icon: Icons.schedule_outlined,
                     minimum: 5,
                     maximum: 120,
+                    enabled: widget.canEdit,
                   );
                   final horizon = _numberField(
                     controller: bookingWindow,
@@ -726,6 +783,7 @@ class _SettingsPaneState extends State<_SettingsPane> {
                     icon: Icons.date_range_outlined,
                     minimum: 1,
                     maximum: 90,
+                    enabled: widget.canEdit,
                   );
                   if (constraints.maxWidth < 460) {
                     return Column(
@@ -752,14 +810,14 @@ class _SettingsPaneState extends State<_SettingsPane> {
                 title: const Text('Allow same-day bookings'),
                 subtitle: const Text('Minimum advance notice still applies'),
                 value: sameDayBooking,
-                onChanged: (value) => setState(() => sameDayBooking = value),
+                onChanged: widget.canEdit ? (value) => setState(() => sameDayBooking = value) : null,
               ),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('Allow therapist gender preference'),
                 subtitle: const Text('Names are never shown publicly'),
                 value: therapistSelection,
-                onChanged: (v) => setState(() => therapistSelection = v),
+                onChanged: widget.canEdit ? (v) => setState(() => therapistSelection = v) : null,
               ),
             ],
           ),
@@ -2021,11 +2079,13 @@ Widget _field(
   String hint, {
   bool number = false,
   bool required = false,
+  bool enabled = true,
   int lines = 1,
   String? helper,
   String? Function(String?)? validator,
 }) => TextFormField(
   controller: controller,
+  enabled: enabled,
   maxLines: lines,
   keyboardType: number ? TextInputType.number : null,
   decoration: InputDecoration(
