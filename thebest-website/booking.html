@@ -15,8 +15,8 @@
     />
     <link rel="icon" href="./pics/FB profile-180x180px-02.jpg" />
     <link rel="stylesheet" href="./styles/modern-normalise.css" />
-    <link rel="stylesheet" href="./styles/booking-page.css?v=20260730" />
-    <link rel="stylesheet" href="./styles/booking-responsive.css?v=20260729" />
+    <link rel="stylesheet" href="./styles/booking-page.css?v=20260904-4" />
+    <link rel="stylesheet" href="./styles/booking-responsive.css?v=20260905-1" />
     <title>Book an Appointment | The Best Family Wellness</title>
   </head>
   <body>
@@ -350,6 +350,43 @@
               type="button"
               disabled
             >
+
+            <div class="promotion-slot billing-promotion-slot" id="billing-promotion-slot">
+              <button
+                class="promotion-disclosure"
+                id="promotion-disclosure"
+                type="button"
+                aria-expanded="false"
+                aria-controls="promotion-box"
+              >
+                <span id="promotion-disclosure-label">Have a promo code?</span>
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="m6 9 6 6 6-6" />
+                </svg>
+              </button>
+              <div class="promotion-box promotion-card" id="promotion-box" role="group" aria-labelledby="promotion-label" hidden>
+                <div class="promotion-label" id="promotion-label">PROMO CODE <small>Optional</small></div>
+                <div class="promotion-controls">
+                  <input
+                    id="promotion-code"
+                    name="promotion_code"
+                    type="text"
+                    inputmode="text"
+                    autocomplete="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    maxlength="80"
+                    placeholder="Enter your promo code "
+                    aria-describedby="promotion-status"
+                  />
+                  <button class="secondary-button" id="promotion-apply" type="button">Apply</button>
+                </div>
+                <div class="promotion-status-row" id="promotion-status-row" hidden>
+                  <p class="promotion-status" id="promotion-status" aria-live="polite"></p>
+                  <button class="text-button promotion-remove" id="promotion-remove" type="button" hidden>Remove</button>
+                </div>
+              </div>
+            </div>
               Continue
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m9 18 6-6-6-6" />
@@ -421,6 +458,17 @@
         </aside>
       </div>
 
+            <div class="promotion-slot summary-promotion-slot" id="summary-promotion-slot"></div>
+            <div class="review-pricing" aria-label="Price breakdown">
+              <div>
+                <span>Subtotal</span>
+                <strong id="review-subtotal">RM 0</strong>
+              </div>
+              <div class="review-promotion-row" id="review-promotion-row" hidden>
+                <span>Promo discount</span>
+                <strong id="review-promotion">−RM 0</strong>
+              </div>
+            </div>
       <div class="summary-overlay" id="summary-overlay"></div>
       <button
         class="mobile-summary-bar"
@@ -531,7 +579,16 @@
     </dialog>
 
     <script src="./js/booking-config.js?v=20260802"></script>
-    <script src="./js/booking-api.js?v=20260802"></script>
-    <script src="./js/booking-page.js?v=20260802"></script>
+    <script src="./js/booking-api.js?v=20260903-5"></script>
+        <h3>Promotions & Voucher Codes</h3>
+        <p>
+          Promotional and voucher codes are subject to their stated validity period, participating outlet(s), eligible services, minimum spend, usage limits and other applicable conditions. Unless otherwise stated, codes cannot be combined with other promotions and have no cash value.
+
+          A voucher is considered redeemed only upon successful completion of the eligible booking/payment. A voucher temporarily reserved during checkout may become available again if the booking is not completed or expires.
+
+          The Best Family Wellness reserves the right to reject, cancel or reverse a promotional benefit where a code has been obtained or used fraudulently, duplicated, altered, used contrary to its stated eligibility conditions, or applied as a result of an obvious technical or pricing error.
+        </p>
+
+    <script src="./js/booking-page.js?v=20260904-3"></script>
   </body>
 </html>

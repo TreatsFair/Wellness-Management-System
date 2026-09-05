@@ -43,6 +43,11 @@ const state = {
   loadingTimes: false,
   hold: null,
   holdFingerprint: "",
+  promotion: null,
+  promotionMessage: "",
+  promotionMessageIsError: false,
+  promotionBusy: false,
+  promotionExpanded: false,
   paymentUrl: "",
   appointment: null,
 };
@@ -54,6 +59,20 @@ const backButton = document.querySelector("#back-button");
 const detailsForm = document.querySelector("#details-form");
 const billingPhone = document.querySelector("#billing-phone");
 const billingEmail = document.querySelector("#billing-email");
+const promotionCodeField = document.querySelector("#promotion-code");
+const promotionApplyButton = document.querySelector("#promotion-apply");
+const promotionRemoveButton = document.querySelector("#promotion-remove");
+const promotionStatus = document.querySelector("#promotion-status");
+const promotionStatusRow = document.querySelector("#promotion-status-row");
+const promotionBox = document.querySelector("#promotion-box");
+const promotionDisclosure = document.querySelector("#promotion-disclosure");
+const promotionDisclosureLabel = document.querySelector("#promotion-disclosure-label");
+const billingPromotionSlot = document.querySelector("#billing-promotion-slot");
+const summaryPromotionSlot = document.querySelector("#summary-promotion-slot");
+const notesToggle = document.querySelector("#notes-toggle");
+const notesToggleState = document.querySelector("#notes-toggle-state");
+const notesFieldBody = document.querySelector("#notes-field-body");
+const notesField = document.querySelector("#booking-notes");
 const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
@@ -81,8 +100,21 @@ function formSnapshot() {
     phone: String(form.get("phone") || ""),
     email: String(form.get("email") || ""),
     notes: String(form.get("notes") || ""),
+    promotion_code: String(promotionCodeField?.value || ""),
     consent: Boolean(document.querySelector("#booking-consent")?.checked),
   };
+}
+
+function setNotesExpanded(expanded) {
+  if (!notesToggle || !notesFieldBody) return;
+  notesToggle.setAttribute("aria-expanded", String(Boolean(expanded)));
+  notesFieldBody.hidden = !expanded;
+  if (notesToggleState) notesToggleState.textContent = expanded ? "Hide" : "Add details";
+}
+
+function setPromotionExpanded(expanded) {
+  state.promotionExpanded = Boolean(expanded);
+  syncPromotionPlacement();
 }
 
 function applyFormSnapshot(snapshot) {
@@ -91,6 +123,9 @@ function applyFormSnapshot(snapshot) {
     const field = detailsForm.elements.namedItem(name);
     if (field) field.value = String(snapshot[name] || "");
   }
+  if (promotionCodeField) promotionCodeField.value = String(snapshot.promotion_code || "");
+  state.promotionExpanded = Boolean(String(snapshot.promotion_code || "").trim());
+  setNotesExpanded(Boolean(String(snapshot.notes || "").trim()));
   const consent = document.querySelector("#booking-consent");
   if (consent) consent.checked = Boolean(snapshot.consent);
 }
@@ -182,9 +217,16 @@ function restoreBookingSession() {
   state.time = saved.time?.startAt ? saved.time : null;
   state.hold = saved.hold?.token ? saved.hold : null;
   state.holdFingerprint = typeof saved.holdFingerprint === "string" ? saved.holdFingerprint : "";
+  state.promotion = saved.hold?.promotion || null;
   state.paymentUrl = typeof saved.paymentUrl === "string" ? saved.paymentUrl : "";
   state.step = Math.min(5, Math.max(1, Number(saved.step) || 1));
   applyFormSnapshot(saved.form);
+  if (state.hold?.token) {
+    // Promotion changes do not define a new appointment hold. Rebuild older
+    // saved fingerprints that included the code so Remove -> Apply keeps the
+    // original expiry instead of replacing the hold.
+    state.holdFingerprint = currentBookingFingerprint();
+  }
   return true;
 }
 
@@ -203,6 +245,7 @@ function currentBookingFingerprint(form = new FormData(detailsForm)) {
 function clearActiveHold() {
   state.hold = null;
   state.holdFingerprint = "";
+  state.promotion = null;
   state.paymentUrl = "";
   holdExpiryInProgress = false;
   if (holdCountdownTimer) clearInterval(holdCountdownTimer);
@@ -217,7 +260,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#039;");
 }
 
-function money(value) { return `RM ${Number(value || 0).toFixed(0)}`; }
+function money(value) {
+  const amount = Number(value || 0);
+  return `RM ${amount.toFixed(Number.isInteger(amount) ? 0 : 2)}`;
+}
 function clockTime(value) {
   const [hourText, minuteText] = String(value || "").split(":");
   const hour = Number(hourText);
@@ -237,6 +283,110 @@ function selectedOutlet() { return state.outlet ? outlets[state.outlet] : null; 
 function serviceById(id) { return services.find((service) => service.id === id) || null; }
 function selectedServices() { return state.guests.map((guest) => serviceById(guest.serviceId)).filter(Boolean); }
 function totalPrice() { return selectedServices().reduce((sum, service) => sum + Number(service.price || 0), 0); }
+function promotionCodeValue() { return String(promotionCodeField?.value || "").trim().toUpperCase(); }
+function clientPricing() {
+  const subtotal = totalPrice();
+  return { subtotal_amount: subtotal, discount_amount: 0, final_amount: subtotal };
+}
+function currentPricing() {
+  const holdPricing = state.hold?.pricing;
+  if (holdPricing && state.holdFingerprint && state.holdFingerprint === currentBookingFingerprint()) {
+    return {
+      subtotal_amount: Number(holdPricing.subtotal_amount || 0),
+      discount_amount: Number(holdPricing.discount_amount || 0),
+      final_amount: Number(holdPricing.final_amount || 0),
+    };
+  }
+  return clientPricing();
+}
+function promotionAppliedForCurrentBooking() {
+  const code = promotionCodeValue();
+  const appliedCode = String(state.hold?.pricing?.promotion_code || "").trim().toUpperCase();
+  return Boolean(
+    code && appliedCode && code === appliedCode && state.hold?.token &&
+      state.holdFingerprint === currentBookingFingerprint(),
+  );
+}
+
+function promotionBenefitLabel(promotion, pricing) {
+  const type = String(promotion?.benefit_type || pricing?.benefit_type || "");
+  const value = Number(promotion?.benefit_value ?? pricing?.benefit_value ?? 0);
+  if (type === "percentage_discount") {
+    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}% off`;
+  }
+  if (type === "fixed_discount") return `${money(value)} off`;
+  const addon = promotion?.free_addon_service_name || pricing?.free_addon_service_name;
+  return addon ? `${addon} is free` : "Free add-on";
+}
+function promotionErrorMessage(error) {
+  const code = String(error?.code || "");
+  const messages = {
+    PROMOTION_CODE_REQUIRED: "Enter a promotion code first.",
+    PROMOTION_NOT_FOUND: "We could not find that promotion code.",
+    PROMOTION_INACTIVE: "This promotion code is inactive.",
+    PROMOTION_EXPIRED: "This promotion code is expired or not active yet.",
+    PROMOTION_NOT_ONLINE: "This promotion is not available for online bookings.",
+    PROMOTION_OUTLET: "This code is not valid for the selected outlet.",
+    PROMOTION_SERVICE: "This code is not valid for the selected treatment.",
+    PROMOTION_MINIMUM_SPEND: error?.message || "Your booking does not meet the minimum spend for this promotion.",
+    PROMOTION_FULLY_REDEEMED: "This promotion has been fully redeemed.",
+    PROMOTION_ALREADY_REDEEMED: "This promotion has already been used for this booking.",
+    PROMOTION_CUSTOMER_LIMIT: "This promotion has reached its limit for this customer.",
+    PROMOTION_ADDON_NOT_FOUND: "The free add-on service is no longer available.",
+    PROMOTION_ADDON_REQUIRES_SCHEDULED_ADDON: "This free add-on needs a separate scheduled slot and cannot be added to this booking yet.",
+    HOLD_EXPIRED: "This booking hold has expired. Please choose the time again.",
+    HOLD_NOT_ACTIVE: "This booking hold can no longer accept a promotion.",
+  };
+  return messages[code] || error?.message || "We could not apply that promotion code. Please try again.";
+}
+function renderPromotion() {
+  if (!promotionCodeField || !promotionApplyButton || !promotionStatus) return;
+  const applied = promotionAppliedForCurrentBooking();
+  const code = promotionCodeValue();
+  promotionCodeField.disabled = state.promotionBusy || applied;
+  promotionApplyButton.disabled = state.promotionBusy || !code || applied;
+  promotionRemoveButton.hidden = !applied || state.promotionBusy;
+  promotionRemoveButton.disabled = state.promotionBusy;
+  promotionStatus.className = "promotion-status";
+  if (state.promotionBusy) {
+    promotionStatus.textContent = "Checking your promotion code…";
+    promotionStatus.classList.add("is-loading");
+  } else if (state.promotionMessage) {
+    promotionStatus.textContent = state.promotionMessage;
+    promotionStatus.classList.toggle("is-error", state.promotionMessageIsError);
+    promotionStatus.classList.toggle("is-success", !state.promotionMessageIsError);
+  } else if (applied) {
+    const pricing = state.hold?.pricing || {};
+    const appliedCode = String(pricing.promotion_code || state.promotion?.code || code).trim();
+    const benefit = promotionBenefitLabel(state.promotion, pricing);
+    promotionStatus.textContent = `✓ ${appliedCode} applied${benefit ? ` — ${benefit}` : ""}`;
+    promotionStatus.classList.add("is-success");
+  } else {
+    promotionStatus.textContent = "";
+  }
+  if (promotionStatusRow) {
+    promotionStatusRow.hidden = !(state.promotionBusy || state.promotionMessage || applied);
+  }
+  if (promotionDisclosureLabel) {
+    promotionDisclosureLabel.textContent = applied ? "Promo code applied" : "Have a promo code?";
+  }
+  promotionDisclosure?.classList.toggle("is-applied", applied);
+}
+function syncPromotionPlacement() {
+  if (!promotionBox) return;
+  const desktop = window.matchMedia("(min-width: 901px)").matches;
+  const target = desktop
+    ? summaryPromotionSlot
+    : billingPromotionSlot;
+  if (target && promotionBox.parentElement !== target) target.appendChild(promotionBox);
+  promotionBox.hidden = state.step !== 5 || (!desktop && !state.promotionExpanded);
+  if (promotionDisclosure) {
+    promotionDisclosure.hidden = desktop || state.step !== 5;
+    promotionDisclosure.setAttribute("aria-expanded", String(!desktop && state.promotionExpanded));
+  }
+  if (billingPromotionSlot) billingPromotionSlot.hidden = desktop || state.step !== 5;
+  if (summaryPromotionSlot) summaryPromotionSlot.hidden = !desktop || state.step !== 5;
+}
 function visitDuration() { return Math.max(0, ...selectedServices().map((service) => Number(service.duration || 0))); }
 function allTreatmentsChosen() { return state.guests.every((guest) => Boolean(guest.serviceId)); }
 function preferenceCode(value) {
@@ -663,7 +813,8 @@ function canContinue() {
   if (state.step === 4) return Boolean(state.date && state.time) && !state.loadingTimes;
   if (state.step === 5) {
     validateBillingFields();
-    return detailsForm.checkValidity();
+    const promotionReady = !api.configured || !promotionCodeValue() || promotionAppliedForCurrentBooking();
+    return detailsForm.checkValidity() && promotionReady;
   }
   return false;
 }
@@ -717,10 +868,26 @@ function updateReview() {
   }).join("");
   document.querySelector("#review-duration").textContent = `${visitDuration()} minutes`;
   const hasHiddenPrice = selectedServices().some((service) => !service.showPrice);
-  document.querySelector("#review-total").textContent = hasHiddenPrice ? "Price on request" : money(totalPrice());
-  const configured = state.guests.filter((guest) => guest.serviceId).length;
-  document.querySelector("#mobile-summary-caption").textContent = !state.outlet ? "Choose an outlet" : `${configured}/${state.guests.length} guests ready`;
-  document.querySelector("#mobile-summary-total").textContent = hasHiddenPrice ? "Ask outlet" : money(totalPrice());
+  const pricing = currentPricing();
+  const pricingIsApplied = promotionAppliedForCurrentBooking();
+  document.querySelector("#review-subtotal").textContent = hasHiddenPrice ? "Price on request" : money(pricing.subtotal_amount);
+  const promotionRow = document.querySelector("#review-promotion-row");
+  promotionRow.hidden = hasHiddenPrice || !pricingIsApplied;
+  const discountAmount = Number(pricing.discount_amount || 0);
+  document.querySelector("#review-promotion").textContent = discountAmount > 0
+    ? `−${money(pricing.discount_amount)}`
+    : "Applied";
+  document.querySelector("#review-total").textContent = hasHiddenPrice ? "Price on request" : money(pricing.final_amount);
+  const duration = visitDuration();
+  const guestCount = state.guests.length;
+  const summaryGuestLabel = `${guestCount} Guest${guestCount === 1 ? "" : "s"}`;
+  const summaryCaption = !state.outlet
+    ? "Choose an outlet"
+    : `${summaryGuestLabel} • ${duration > 0 ? `${duration} minutes` : "Choose a treatment"}`;
+  document.querySelector("#mobile-summary-caption").textContent = summaryCaption;
+  document.querySelector("#mobile-summary-total").textContent = hasHiddenPrice ? "Ask outlet" : money(pricing.final_amount);
+  summaryToggle.setAttribute("aria-label", `Open booking summary. ${summaryCaption}. Total ${hasHiddenPrice ? "on request" : money(pricing.final_amount)}`);
+  renderPromotion();
 }
 
 function updateProgress() {
@@ -732,6 +899,7 @@ function updateProgress() {
   });
 }
 function updateUi() {
+  syncPromotionPlacement();
   nextButton.disabled = !canContinue();
   setContinueLabel();
   updateReview();
@@ -780,9 +948,11 @@ function renderHoldCountdown() {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   document.querySelector("#payment-deadline-title").textContent =
-    `Complete payment by ${deadlineTimeLabel()}`;
+    `Reserved until ${deadlineTimeLabel()}`;
   document.querySelector("#payment-deadline-copy").textContent =
-    "Your booking will be cancelled if payment is not completed before this deadline.";
+    promotionAppliedForCurrentBooking()
+      ? "Your selected time and promo code are held until this deadline. Complete payment to confirm your booking."
+      : "Your selected time is held until this deadline. Complete payment to confirm your booking.";
   paymentCountdown.textContent = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   paymentDeadline.hidden = false;
   paymentDeadline.classList.toggle("is-urgent", remaining <= 120000);
@@ -896,6 +1066,135 @@ function initializePaymentReturn() {
   paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); return true;
 }
 
+function setPromotionMessage(message, isError = false) {
+  state.promotionMessage = message;
+  state.promotionMessageIsError = isError;
+}
+
+function promotionContactPayload(form) {
+  return {
+    allocations: allocationsPayload(),
+    start_at: state.time?.startAt,
+    customer_name: form.get("name"),
+    customer_phone: form.get("phone"),
+    customer_email: form.get("email"),
+    notes: form.get("notes"),
+    website: form.get("website"),
+  };
+}
+
+async function applyPromotionCode() {
+  const code = promotionCodeValue();
+  if (!code || state.promotionBusy) {
+    if (!code) setPromotionMessage("Enter a promotion code first.", true);
+    updateUi();
+    return;
+  }
+  if (!api.configured) {
+    setPromotionMessage("Configure online booking before applying a promotion code.", true);
+    updateUi();
+    return;
+  }
+  const contactDetailsValid = validateBillingFields({ showErrors: true });
+  if (!contactDetailsValid || !detailsForm.reportValidity() || !state.time) {
+    detailsForm.querySelector(":invalid")?.focus();
+    return;
+  }
+  const form = new FormData(detailsForm);
+  const fingerprint = currentBookingFingerprint(form);
+  state.promotionBusy = true;
+  setPromotionMessage("");
+  updateUi();
+  try {
+    if (state.hold?.token) {
+      const current = await api.getHoldStatus(state.hold.token);
+      const status = current?.hold?.status;
+      if (current?.hold) state.hold = { ...state.hold, ...current.hold };
+      const stillPending = status === "pending_payment" && holdRemainingMs() > 0;
+      if (stillPending && state.holdFingerprint === fingerprint) {
+        const applied = await api.applyPromotion(state.hold.token, code);
+        state.hold = {
+          ...state.hold,
+          total_price: Number(applied.pricing?.final_amount ?? state.hold.total_price),
+          pricing: applied.pricing,
+          promotion: applied.promotion,
+        };
+        state.promotion = applied.promotion;
+        state.paymentUrl = "";
+        setPromotionMessage("");
+        persistBookingSession();
+        return;
+      }
+      if (stillPending) {
+        await api.cancelHold(state.hold.token);
+      } else if (status === "expired" || holdRemainingMs() <= 0) {
+        await api.expireHold(state.hold.token);
+      }
+      if (!stillPending || status === "pending_payment" || status === "expired") clearActiveHold();
+    }
+
+    const payload = await api.createGroupHold({
+      ...promotionContactPayload(form),
+      promotion_code: code,
+    });
+    state.hold = payload.hold;
+    state.holdFingerprint = fingerprint;
+    state.promotion = payload.hold?.promotion || null;
+    state.paymentUrl = "";
+    state.appointment = null;
+    setPromotionMessage("");
+    persistBookingSession();
+    startHoldCountdown();
+  } catch (error) {
+    setPromotionMessage(promotionErrorMessage(error), true);
+    if (error.status === 409) {
+      state.time = null;
+      await loadAvailability();
+      showStep(4);
+    }
+  } finally {
+    state.promotionBusy = false;
+    updateUi();
+  }
+}
+
+async function removePromotionCode() {
+  if (state.promotionBusy) return;
+  const code = promotionCodeValue();
+  if (!code) return;
+  state.promotionBusy = true;
+  setPromotionMessage("");
+  updateUi();
+  try {
+    if (promotionAppliedForCurrentBooking() && state.hold?.token) {
+      const current = await api.getHoldStatus(state.hold.token);
+      const status = current?.hold?.status;
+      if (status === "pending_payment" && holdRemainingMs() > 0) {
+        const removed = await api.removePromotion(state.hold.token);
+        state.hold = {
+          ...state.hold,
+          total_price: Number(removed.pricing?.final_amount ?? state.hold.total_price),
+          pricing: removed.pricing,
+          promotion: null,
+        };
+        state.paymentUrl = "";
+      } else {
+        clearActiveHold();
+      }
+    }
+    promotionCodeField.value = "";
+    state.promotion = null;
+    state.holdFingerprint = state.hold?.token ? currentBookingFingerprint() : "";
+    setPromotionMessage("Promotion removed.");
+    persistBookingSession();
+  } catch (error) {
+    setPromotionMessage(promotionErrorMessage(error), true);
+  } finally {
+    state.promotionBusy = false;
+    updateUi();
+  }
+}
+
 async function redirectActivePayment() {
   if (!state.hold?.token) return;
   if (holdRemainingMs() <= 0) {
@@ -930,12 +1229,24 @@ async function submitHold() {
   }
   if (!api.configured) { showConfirmation({ preview: true }); return; }
   const form = new FormData(detailsForm);
+  const requestedPromotionCode = promotionCodeValue();
+  if (requestedPromotionCode && !promotionAppliedForCurrentBooking()) {
+    setPromotionMessage("Apply the promo code before continuing to payment.", true);
+    setPromotionExpanded(true);
+    promotionCodeField?.focus();
+    updateUi();
+    return;
+  }
   const fingerprint = currentBookingFingerprint(form);
   nextButton.disabled = true;
   nextButton.textContent = "Reserving your group...";
   try {
     if (state.hold?.token) {
       const payload = await api.getHoldStatus(state.hold.token);
+      if (payload?.hold) {
+        state.hold = { ...state.hold, ...payload.hold };
+        state.promotion = payload.hold.promotion || null;
+      }
       const status = payload?.hold?.status;
       const stillPending = status === "pending_payment" && holdRemainingMs() > 0;
       if (stillPending && fingerprint === state.holdFingerprint) {
@@ -959,10 +1270,11 @@ async function submitHold() {
     const payload = await api.createGroupHold({
       allocations: allocationsPayload(), start_at: state.time.startAt,
       customer_name: form.get("name"), customer_phone: form.get("phone"), customer_email: form.get("email"),
-      notes: form.get("notes"), website: form.get("website"),
+      notes: form.get("notes"), website: form.get("website"), promotion_code: requestedPromotionCode || null,
     });
     state.hold = payload.hold;
     state.holdFingerprint = fingerprint;
+    state.promotion = payload.hold?.promotion || null;
     state.paymentUrl = "";
     state.appointment = null;
     let holdNoticeMessage = null;
@@ -1023,6 +1335,22 @@ detailsForm.addEventListener("input", (event) => {
   }
   updateUi();
 });
+promotionCodeField?.addEventListener("input", () => {
+  setPromotionMessage("");
+  if (!promotionAppliedForCurrentBooking()) state.promotion = null;
+  updateUi();
+});
+notesToggle?.addEventListener("click", () => {
+  const expanded = notesToggle.getAttribute("aria-expanded") !== "true";
+  setNotesExpanded(expanded);
+  updateUi();
+  if (expanded) notesField?.focus();
+});
+promotionDisclosure?.addEventListener("click", () => {
+  const expanded = !state.promotionExpanded;
+  setPromotionExpanded(expanded);
+  if (expanded) requestAnimationFrame(() => promotionCodeField?.focus());
+});
 [billingPhone, billingEmail].forEach((field) => {
   field.addEventListener("blur", () => {
     field.dataset.touched = "true";
@@ -1030,6 +1358,34 @@ detailsForm.addEventListener("input", (event) => {
     updateUi();
   });
 });
+promotionApplyButton?.addEventListener("click", applyPromotionCode);
+promotionRemoveButton?.addEventListener("click", removePromotionCode);
+
+function updateKeyboardInset() {
+  if (!window.visualViewport) return;
+  const inset = Math.max(0, window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop);
+  document.documentElement.style.setProperty("--keyboard-inset", `${Math.round(inset)}px`);
+}
+
+window.visualViewport?.addEventListener("resize", updateKeyboardInset);
+window.visualViewport?.addEventListener("scroll", updateKeyboardInset);
+window.addEventListener("resize", updateKeyboardInset);
+window.addEventListener("resize", syncPromotionPlacement);
+document.addEventListener("focusin", (event) => {
+  const field = event.target instanceof HTMLElement
+    ? event.target.closest(".details-form input, .details-form textarea, .details-form select, #promotion-box input, #promotion-box textarea, #promotion-box select")
+    : null;
+  if (!field) return;
+  window.setTimeout(() => {
+    updateKeyboardInset();
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    const rect = field.getBoundingClientRect();
+    if (rect.bottom > viewportHeight - 24 || rect.top < 12) {
+      field.scrollIntoView({ behavior: "smooth", block: "center", inline: "nearest" });
+    }
+  }, 250);
+});
+updateKeyboardInset();
 summaryToggle.addEventListener("click", openSummary);
 summaryClose.addEventListener("click", closeSummary);
 summaryOverlay.addEventListener("click", closeSummary);
@@ -1090,6 +1446,10 @@ async function initializeBooking() {
   if (state.hold?.token) {
     try {
       const payload = await api.getHoldStatus(state.hold.token);
+      if (payload?.hold) {
+        state.hold = { ...state.hold, ...payload.hold };
+        state.promotion = payload.hold.promotion || null;
+      }
       if (payload?.hold?.status === "pending_payment" && holdRemainingMs() > 0) {
         startHoldCountdown();
       } else if (payload?.hold?.status === "confirmed") {

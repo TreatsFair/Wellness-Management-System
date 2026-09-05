@@ -191,7 +191,66 @@ body {
 .field,
 .field-wide { grid-column: 1 / -1; min-width: 0; }
 .field input,
-.field textarea { min-height: 48px; padding: 0.8rem; font-size: 0.84rem; }
+.field textarea,
+.field select,
+.promotion-controls input { min-height: 48px; padding: 0.8rem; font-size: 1rem; }
+.guest-field input { font-size: 1rem; }
+.promotion-slot[hidden] { display: none; }
+.billing-promotion-slot {
+  margin-top: 1rem;
+  padding: 0;
+  border: 1px solid rgba(143, 95, 0, 0.18);
+  border-radius: 18px;
+  background: rgba(255, 253, 248, 0.98);
+  box-shadow: 0 9px 24px rgba(92, 63, 19, 0.07);
+  overflow: hidden;
+}
+.promotion-disclosure {
+  width: 100%;
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.95rem 1rem;
+  border: 0;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-align: left;
+  cursor: pointer;
+}
+.promotion-disclosure svg {
+  width: 19px;
+  height: 19px;
+  flex: 0 0 19px;
+  fill: none;
+  stroke: var(--gold-dark);
+  stroke-width: 1.9;
+  transition: transform 160ms ease;
+}
+.promotion-disclosure[aria-expanded="true"] svg { transform: rotate(180deg); }
+.promotion-disclosure.is-applied { color: #277344; }
+.promotion-disclosure:focus-visible { outline: 2px solid var(--gold-dark); outline-offset: -4px; }
+.promotion-disclosure[hidden] { display: none; }
+.billing-promotion-slot .promotion-box {
+  padding: 0 1rem 1rem;
+  border-top: 1px solid rgba(143, 95, 0, 0.12);
+}
+.billing-promotion-slot .promotion-card {
+  margin-top: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.summary-promotion-slot { padding: 0; }
+.promotion-box { padding: 0.85rem; }
+.promotion-controls { grid-template-columns: minmax(0, 1fr) 76px; gap: 0.65rem; }
+.promotion-controls .secondary-button { width: 76px; padding-inline: 0.5rem; }
+.promotion-controls .promotion-remove { grid-column: 1 / -1; justify-self: start; }
 .consent { font-size: 0.68rem; }
 .terms-dialog { max-height: min(88vh, 720px); }
 .terms-dialog-head { padding: 1.25rem 1.25rem 0.85rem; }
@@ -277,6 +336,7 @@ body {
 @media (min-width: 681px) {
   body { padding-bottom: 96px; }
   .booking-header { min-height: 74px; padding: 0.6rem 1.5rem; }
+.review-pricing { padding-inline: 1rem; }
   .brand img { height: 48px; max-width: 190px; }
   .exit-booking { font-size: 0.76rem; }
   .booking-shell { width: min(100% - 2rem, 860px); margin: 0 auto; padding: 0 0 2rem; }
@@ -331,6 +391,7 @@ body {
   .review-heading h3 { font-size: 1.55rem; }
   .review-secure { display: flex; }
   .review-details { padding: 0.5rem 1.4rem; }
+  .promotion-disclosure { display: none; }
   .review-details div { grid-template-columns: 96px minmax(0, 1fr); padding: 1rem 0; }
   .review-details dt { font-size: 0.76rem; }
   .review-details dd { font-size: 0.82rem; }
@@ -338,7 +399,11 @@ body {
   .review-total small { font-size: 0.68rem; }
   .review-total b { font-size: 0.84rem; }
   .review-total strong { font-size: 1.65rem; }
-  .review-note { padding: 0.9rem 1.4rem; font-size: 0.7rem; }
+}
+
+@media (max-width: 359px) {
+  .promotion-controls { grid-template-columns: 1fr; }
+  .promotion-controls .secondary-button { width: 100%; }
 }
 
 /* Desktops */
@@ -355,5 +420,32 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .booking-summary,
+  .summary-promotion-slot {
+    padding: 1rem 1.4rem 1.1rem;
+    border-top: 1px dashed rgba(143, 95, 0, 0.22);
+  }
+  .summary-promotion-slot .promotion-card {
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+  .summary-promotion-slot .promotion-label { margin-bottom: 0.65rem; }
+  .summary-promotion-slot .promotion-controls {
+    grid-template-columns: minmax(0, 1fr) 68px;
+    gap: 0.55rem;
+  }
+  .summary-promotion-slot .promotion-controls input {
+    min-height: 42px;
+    padding: 0.65rem 0.75rem;
+    font-size: 0.82rem;
+  }
+  .summary-promotion-slot .promotion-controls .secondary-button {
+    width: 68px;
+    min-height: 42px;
+    padding-inline: 0.4rem;
+  }
   .mobile-progress-dots i { transition: none; }
 }
