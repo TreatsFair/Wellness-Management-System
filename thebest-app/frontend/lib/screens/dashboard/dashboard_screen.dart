@@ -1431,10 +1431,10 @@ class _TabletLayout extends StatelessWidget {
         onRefreshDashboard: onRefreshDashboard,
       ),
       _DashboardMainCard.members => _TabletOtherCard(
-        icon: Icons.people_outline,
+        icon: Icons.people_alt_rounded,
         label: 'Members',
-        iconBg: const Color(0xFFE3F2FD),
-        iconColor: const Color(0xFF1B6B72),
+        iconBg: AppColors.infoSoft,
+        iconColor: AppColors.info,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => const CustomerScreen()),
@@ -1452,50 +1452,50 @@ class _TabletLayout extends StatelessWidget {
   Widget _buildOtherCard(BuildContext context, _DashboardOtherCard card) {
     final child = switch (card) {
       _DashboardOtherCard.history => _TabletOtherCard(
-        icon: Icons.history_outlined,
+        icon: Icons.history_rounded,
         label: 'History',
-        iconBg: const Color(0xFFE8F4F8),
-        iconColor: const Color(0xFF5BA4B5),
+        iconBg: AppColors.infoSoft,
+        iconColor: AppColors.info,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => SalesHistoryScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.members => _TabletOtherCard(
-        icon: Icons.people_outline,
+        icon: Icons.people_alt_rounded,
         label: 'Members',
-        iconBg: const Color(0xFFE3F2FD),
-        iconColor: const Color(0xFF1B6B72),
+        iconBg: AppColors.infoSoft,
+        iconColor: AppColors.info,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => const CustomerScreen()),
         ),
       ),
       _DashboardOtherCard.management => _TabletOtherCard(
-        icon: Icons.tune_outlined,
+        icon: Icons.manage_accounts_rounded,
         label: 'Management',
-        iconBg: const Color(0xFFE8F5E9),
-        iconColor: const Color(0xFF4CAF50),
+        iconBg: AppColors.successSoft,
+        iconColor: AppColors.success,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => ManagementScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.reports => _TabletOtherCard(
-        icon: Icons.bar_chart_outlined,
+        icon: Icons.insights_rounded,
         label: 'Reports',
-        iconBg: const Color(0xFFEDE7F6),
-        iconColor: const Color(0xFF7C3AED),
+        iconBg: AppColors.primarySoft,
+        iconColor: AppColors.primary,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => ReportsScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.timetable => _TabletOtherCard(
-        icon: Icons.view_timeline_outlined,
+        icon: Icons.calendar_view_week_rounded,
         label: 'Timetable',
-        iconBg: const Color(0xFFFFF7ED),
-        iconColor: const Color(0xFFEA580C),
+        iconBg: AppColors.accentSoft,
+        iconColor: AppColors.accent,
         onTap: () async {
           await Navigator.push<void>(
             context,
@@ -1773,7 +1773,7 @@ class _DashboardTopBar extends StatelessWidget {
             icon: Badge(
               isLabelVisible: notificationCount > 0,
               label: Text('$notificationCount'),
-              child: const Icon(Icons.notifications_none_outlined),
+              child: const Icon(Icons.notifications_rounded),
             ),
           ),
           const SizedBox(width: AppSpacing.sm),
@@ -1787,7 +1787,7 @@ class _DashboardTopBar extends StatelessWidget {
                 borderRadius: BorderRadius.circular(AppRadius.control),
               ),
             ),
-            icon: const Icon(Icons.settings_outlined),
+            icon: const Icon(Icons.settings_rounded),
           ),
         ],
       ),
@@ -1819,7 +1819,7 @@ class _TabletQuickBookCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(24),
         decoration: BoxDecoration(
-          color: const Color(0xFF23848A),
+          color: AppColors.primary,
           borderRadius: BorderRadius.circular(16),
           boxShadow: const [
             BoxShadow(
@@ -1842,8 +1842,8 @@ class _TabletQuickBookCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(12),
                   ),
                   child: const Icon(
-                    Icons.add,
-                    color: Color(0xFF23848A),
+                    Icons.add_rounded,
+                    color: AppColors.primary,
                     size: 26,
                   ),
                 ),
@@ -1852,7 +1852,7 @@ class _TabletQuickBookCard extends StatelessWidget {
                   'Quick Book',
                   style: TextStyle(
                     fontSize: 18,
-                    fontWeight: FontWeight.w700,
+                    fontWeight: FontWeight.w800,
                     color: Colors.white,
                   ),
                 ),
@@ -1911,16 +1911,16 @@ class _TabletOrdersCard extends StatelessWidget {
             Row(
               children: [
                 _IconBox(
-                  icon: Icons.point_of_sale_outlined,
-                  bg: const Color(0xFFFFF3E0),
-                  color: const Color(0xFFF59E0B),
+                  icon: Icons.point_of_sale_rounded,
+                  bg: AppColors.accentSoft,
+                  color: AppColors.accent,
                 ),
                 const SizedBox(width: 12),
                 Text(
                   'Order',
                   style: TextStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w800,
                     color: context.appText,
                   ),
                 ),
@@ -1928,7 +1928,7 @@ class _TabletOrdersCard extends StatelessWidget {
             ),
             const SizedBox(height: 16),
             Text(
-              'Today Sales',
+              'Sales Collected',
               style: TextStyle(fontSize: 12, color: context.appMuted),
             ),
             const SizedBox(height: 6),
@@ -1984,16 +1984,16 @@ class _TabletAppointmentCard extends StatelessWidget {
             Row(
               children: [
                 _IconBox(
-                  icon: Icons.calendar_today_outlined,
-                  bg: const Color(0xFFE8F5E9),
-                  color: const Color(0xFF1B6B72),
+                  icon: Icons.event_available_rounded,
+                  bg: AppColors.primarySoft,
+                  color: AppColors.primary,
                 ),
                 const SizedBox(width: 12),
                 Text(
                   'Appointment',
                   style: TextStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w800,
                     color: context.appText,
                   ),
                 ),
@@ -2044,16 +2044,16 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
               Row(
                 children: [
                   _IconBox(
-                    icon: Icons.people_outline,
-                    bg: const Color(0xFFF3E8FF),
-                    color: const Color(0xFF7C3AED),
+                    icon: Icons.groups_rounded,
+                    bg: AppColors.primarySoft,
+                    color: AppColors.primary,
                   ),
                   const SizedBox(width: 12),
                   Text(
                     'Staff Availability',
                     style: TextStyle(
                       fontSize: 16,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w800,
                       color: context.appText,
                     ),
                   ),
@@ -2144,7 +2144,7 @@ class _TabletOtherCard extends StatelessWidget {
                 label,
                 style: TextStyle(
                   fontSize: 15,
-                  fontWeight: FontWeight.w500,
+                  fontWeight: FontWeight.w700,
                   color: context.appText,
                 ),
               ),
@@ -2232,50 +2232,50 @@ class _PhoneLayout extends StatelessWidget {
   Widget _buildOtherCard(BuildContext context, _DashboardOtherCard card) {
     final child = switch (card) {
       _DashboardOtherCard.history => _PhoneOtherCard(
-        icon: Icons.history_outlined,
+        icon: Icons.history_rounded,
         label: 'History',
-        iconBg: const Color(0xFFE8F4F8),
-        iconColor: const Color(0xFF5BA4B5),
+        iconBg: AppColors.infoSoft,
+        iconColor: AppColors.info,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => SalesHistoryScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.members => _PhoneOtherCard(
-        icon: Icons.people_outline,
+        icon: Icons.people_alt_rounded,
         label: 'Members',
-        iconBg: const Color(0xFFE3F2FD),
-        iconColor: const Color(0xFF1B6B72),
+        iconBg: AppColors.infoSoft,
+        iconColor: AppColors.info,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => const CustomerScreen()),
         ),
       ),
       _DashboardOtherCard.management => _PhoneOtherCard(
-        icon: Icons.tune_outlined,
+        icon: Icons.manage_accounts_rounded,
         label: 'Management',
-        iconBg: const Color(0xFFE8F5E9),
-        iconColor: const Color(0xFF4CAF50),
+        iconBg: AppColors.successSoft,
+        iconColor: AppColors.success,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => ManagementScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.reports => _PhoneOtherCard(
-        icon: Icons.bar_chart_outlined,
+        icon: Icons.insights_rounded,
         label: 'Reports',
-        iconBg: const Color(0xFFEDE7F6),
-        iconColor: const Color(0xFF7C3AED),
+        iconBg: AppColors.primarySoft,
+        iconColor: AppColors.primary,
         onTap: () => Navigator.push(
           context,
           MaterialPageRoute(builder: (_) => ReportsScreen(userRole: role)),
         ),
       ),
       _DashboardOtherCard.timetable => _PhoneOtherCard(
-        icon: Icons.view_timeline_outlined,
+        icon: Icons.calendar_view_week_rounded,
         label: 'Timetable',
-        iconBg: const Color(0xFFFFF7ED),
-        iconColor: const Color(0xFFEA580C),
+        iconBg: AppColors.accentSoft,
+        iconColor: AppColors.accent,
         onTap: () async {
           await Navigator.push<void>(
             context,
@@ -2537,9 +2537,9 @@ class _PhoneAppointmentCard extends StatelessWidget {
             Row(
               children: [
                 _IconBox(
-                  icon: Icons.calendar_today_outlined,
-                  bg: const Color(0xFFE8F5E9),
-                  color: const Color(0xFF1B6B72),
+                  icon: Icons.event_available_rounded,
+                  bg: AppColors.primarySoft,
+                  color: AppColors.primary,
                   size: 32,
                 ),
                 const SizedBox(width: 8),
@@ -2547,7 +2547,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
                   'Appointments',
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w800,
                     color: context.appText,
                   ),
                 ),
@@ -2621,7 +2621,7 @@ class _PhoneQuickBookCard extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.all(16),
         decoration: BoxDecoration(
-          color: const Color(0xFF1B6B72),
+          color: AppColors.primary,
           borderRadius: BorderRadius.circular(16),
         ),
         child: Column(
@@ -2634,14 +2634,18 @@ class _PhoneQuickBookCard extends StatelessWidget {
                 color: Colors.white.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(10),
               ),
-              child: const Icon(Icons.add, color: Colors.white, size: 20),
+              child: const Icon(
+                Icons.add_rounded,
+                color: Colors.white,
+                size: 20,
+              ),
             ),
             const SizedBox(height: 12),
             const Text(
               'Quick Book',
               style: TextStyle(
                 fontSize: 15,
-                fontWeight: FontWeight.bold,
+                fontWeight: FontWeight.w800,
                 color: Colors.white,
               ),
             ),
@@ -2688,9 +2692,9 @@ class _PhonePosCard extends StatelessWidget {
             Row(
               children: [
                 _IconBox(
-                  icon: Icons.point_of_sale_outlined,
-                  bg: const Color(0xFFFFF3E0),
-                  color: const Color(0xFFF59E0B),
+                  icon: Icons.point_of_sale_rounded,
+                  bg: AppColors.accentSoft,
+                  color: AppColors.accent,
                   size: 32,
                 ),
                 const SizedBox(width: 8),
@@ -2698,7 +2702,7 @@ class _PhonePosCard extends StatelessWidget {
                   'Order',
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w800,
                     color: context.appText,
                   ),
                 ),
@@ -2706,7 +2710,7 @@ class _PhonePosCard extends StatelessWidget {
             ),
             const SizedBox(height: 10),
             Text(
-              'Today Sales',
+              'Sales Collected',
               style: TextStyle(fontSize: 11, color: context.appMuted),
             ),
             const SizedBox(height: 4),
@@ -2758,9 +2762,9 @@ class _PhoneCustomersCard extends StatelessWidget {
             Row(
               children: [
                 _IconBox(
-                  icon: Icons.people_outline,
-                  bg: const Color(0xFFE3F2FD),
-                  color: const Color(0xFF1B6B72),
+                  icon: Icons.people_alt_rounded,
+                  bg: AppColors.infoSoft,
+                  color: AppColors.info,
                   size: 32,
                 ),
                 const SizedBox(width: 8),
@@ -2768,7 +2772,7 @@ class _PhoneCustomersCard extends StatelessWidget {
                   'Members',
                   style: TextStyle(
                     fontSize: 13,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: FontWeight.w800,
                     color: context.appText,
                   ),
                 ),
@@ -2821,9 +2825,9 @@ class _PhoneAnalyticsCard extends StatelessWidget {
           Row(
             children: [
               _IconBox(
-                icon: Icons.attach_money,
-                bg: const Color(0xFFE8F5E9),
-                color: const Color(0xFF1B6B72),
+                icon: Icons.analytics_rounded,
+                bg: AppColors.primarySoft,
+                color: AppColors.primary,
                 size: 32,
               ),
               const SizedBox(width: 10),
@@ -2831,7 +2835,7 @@ class _PhoneAnalyticsCard extends StatelessWidget {
                 'Revenue Summary',
                 style: TextStyle(
                   fontSize: 14,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w800,
                   color: context.appText,
                 ),
               ),
@@ -2886,11 +2890,18 @@ class _PhoneStaffStatusCard extends StatelessWidget {
         children: [
           Row(
             children: [
+              _IconBox(
+                icon: Icons.groups_rounded,
+                bg: AppColors.primarySoft,
+                color: AppColors.primary,
+                size: 32,
+              ),
+              const SizedBox(width: 8),
               Text(
                 'Staff Today',
                 style: TextStyle(
                   fontSize: 14,
-                  fontWeight: FontWeight.w600,
+                  fontWeight: FontWeight.w800,
                   color: context.appText,
                 ),
               ),
@@ -3860,7 +3871,7 @@ class _PhoneOtherCard extends StatelessWidget {
                 label,
                 style: TextStyle(
                   fontSize: 13,
-                  fontWeight: FontWeight.w500,
+                  fontWeight: FontWeight.w700,
                   color: context.appText,
                 ),
               ),
@@ -5634,13 +5645,27 @@ class _SectionLabel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Text(
-      text,
-      style: TextStyle(
-        fontSize: 16,
-        fontWeight: FontWeight.w600,
-        color: context.appText,
-      ),
+    return Row(
+      children: [
+        Container(
+          width: 4,
+          height: 19,
+          decoration: BoxDecoration(
+            color: AppColors.primary,
+            borderRadius: BorderRadius.circular(999),
+          ),
+        ),
+        const SizedBox(width: 8),
+        Text(
+          text,
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.w800,
+            letterSpacing: 0.15,
+            color: context.appText,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -5719,8 +5744,9 @@ class _IconBox extends StatelessWidget {
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.12)),
       ),
-      child: Icon(icon, color: color, size: size * 0.55),
+      child: Icon(icon, color: color, size: size * 0.58),
     );
   }
 }

@@ -148,8 +148,8 @@ class ManagementScreen extends StatelessWidget {
                 padding: const EdgeInsets.fromLTRB(16, 24, 16, 24),
                 children: [
                   _ManagementOption(
-                    icon: Icons.content_cut,
-                    color: _teal,
+                    icon: Icons.content_cut_rounded,
+                    color: AppColors.primary,
                     title: 'Services',
                     subtitle: userRole.trim().toLowerCase() == 'admin'
                         ? 'Manage service offerings and pricing'
@@ -163,8 +163,8 @@ class ManagementScreen extends StatelessWidget {
                     ),
                   ),
                   _ManagementOption(
-                    icon: Icons.group_outlined,
-                    color: const Color(0xFFD19A33),
+                    icon: Icons.groups_rounded,
+                    color: AppColors.accent,
                     title: 'Staff',
                     subtitle: 'Manage staff roles, schedules, and availability',
                     onTap: () => Navigator.push(
@@ -175,8 +175,8 @@ class ManagementScreen extends StatelessWidget {
                     ),
                   ),
                   _ManagementOption(
-                    icon: Icons.meeting_room_outlined,
-                    color: const Color(0xFF8B5CF6),
+                    icon: Icons.meeting_room_rounded,
+                    color: AppColors.info,
                     title: 'Rooms',
                     subtitle: 'Manage room availability and equipment',
                     onTap: () => Navigator.push(
@@ -191,8 +191,8 @@ class ManagementScreen extends StatelessWidget {
                   ),
                   if (userRole == 'admin')
                     _ManagementOption(
-                      icon: Icons.tune_outlined,
-                      color: const Color(0xFF2563EB),
+                      icon: Icons.tune_rounded,
+                      color: AppColors.info,
                       title: 'Business Settings',
                       subtitle:
                           'Outlet SST, rounding, late arrival, and no-show rules',
@@ -204,8 +204,8 @@ class ManagementScreen extends StatelessWidget {
                       ),
                     ),
                   _ManagementOption(
-                    icon: Icons.accessibility_new_outlined,
-                    color: const Color(0xFF0F766E),
+                    icon: Icons.accessibility_new_rounded,
+                    color: AppColors.primary,
                     title: 'Accessibility',
                     subtitle: 'Adjust text, controls, cards, and display size',
                     onTap: () => Navigator.push(
@@ -217,8 +217,8 @@ class ManagementScreen extends StatelessWidget {
                   ),
                   if (userRole.trim().toLowerCase() == 'admin')
                     _ManagementOption(
-                      icon: Icons.language_outlined,
-                      color: const Color(0xFFB7790B),
+                      icon: Icons.language_rounded,
+                      color: AppColors.accent,
                       title: 'Online Booking',
                       subtitle:
                           'Control public services, schedules, rooms, closures, and promotions',
@@ -274,7 +274,7 @@ class _ManagementHeader extends StatelessWidget {
                   style: TextStyle(
                     color: context.appText,
                     fontSize: isCompact ? 18 : 22,
-                    fontWeight: FontWeight.w800,
+                    fontWeight: FontWeight.w900,
                   ),
                 ),
                 if (!isCompact) ...[
@@ -316,11 +316,14 @@ class _ManagementOption extends StatelessWidget {
       padding: const EdgeInsets.only(bottom: 14),
       child: Material(
         color: context.appSurface,
-        borderRadius: BorderRadius.circular(8),
-        elevation: 1,
-        shadowColor: Colors.black.withValues(alpha: 0.12),
+        elevation: 0,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(12),
+          side: BorderSide(color: context.appBorder),
+        ),
+        clipBehavior: Clip.antiAlias,
         child: InkWell(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(12),
           onTap: onTap,
           child: Padding(
             padding: EdgeInsets.symmetric(
@@ -333,10 +336,11 @@ class _ManagementOption extends StatelessWidget {
                   width: 52,
                   height: 52,
                   decoration: BoxDecoration(
-                    color: color,
-                    borderRadius: BorderRadius.circular(8),
+                    color: color.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: color.withValues(alpha: 0.14)),
                   ),
-                  child: Icon(icon, color: Colors.white, size: 27),
+                  child: Icon(icon, color: color, size: 29),
                 ),
                 const SizedBox(width: 18),
                 Expanded(
@@ -348,7 +352,7 @@ class _ManagementOption extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 16,
                           color: context.appText,
-                          fontWeight: FontWeight.w800,
+                          fontWeight: FontWeight.w900,
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -357,13 +361,13 @@ class _ManagementOption extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 14,
                           color: context.appMuted,
-                          fontWeight: FontWeight.w600,
+                          fontWeight: FontWeight.w700,
                         ),
                       ),
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right, color: context.appMuted),
+                Icon(Icons.chevron_right_rounded, color: context.appMuted),
               ],
             ),
           ),
