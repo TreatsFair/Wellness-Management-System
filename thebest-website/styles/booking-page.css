@@ -10,6 +10,7 @@
   --green: #b77912;
   --shadow: 0 20px 60px rgba(52, 43, 27, 0.09);
   --font-display: 'Sentient', Georgia, serif;
+  --keyboard-inset: 0px;
 }
 
 * { box-sizing: border-box; }
@@ -27,7 +28,7 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-button, input, textarea { font: inherit; }
+button, input, textarea, select { font: inherit; }
 button { color: inherit; }
 
 .booking-header {
@@ -162,14 +163,13 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .field > span { font-size: 0.72rem; font-weight: 700; }
 .field small { color: var(--muted); font-weight: 400; }
 .field-wide { grid-column: 1 / -1; }
-.field input, .field textarea { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem 0.9rem; color: var(--ink); background: var(--paper); outline: none; font-size: 0.8rem; }
-.field input:focus, .field textarea:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(167, 123, 45, 0.12); }
+.field input, .field textarea, .field select { width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 0.85rem 0.9rem; color: var(--ink); background: var(--paper); outline: none; font-size: 0.8rem; }
+.field input:focus, .field textarea:focus, .field select:focus { border-color: var(--gold); box-shadow: 0 0 0 3px rgba(167, 123, 45, 0.12); }
 .field input.is-invalid { border-color: #b83b2f; background: #fff9f7; }
 .field input.is-invalid:focus { border-color: #b83b2f; box-shadow: 0 0 0 3px rgba(184, 59, 47, 0.13); }
 .field .field-error { display: none; color: #9f3026; font-size: 0.68rem; font-weight: 600; line-height: 1.35; }
 .field .field-error:not(:empty) { display: block; }
 .field textarea { resize: vertical; }
-.consent { display: flex; align-items: start; gap: 0.7rem; color: var(--muted); font-size: 0.7rem; line-height: 1.5; }
 .notes-field { gap: 0; }
 .optional-field-toggle {
   width: 100%;
@@ -219,6 +219,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .promotion-status.is-success { font-weight: 700; }
 .promotion-status.is-error { color: #9f3026; }
 .promotion-status.is-loading { color: var(--gold-dark); }
+.consent { display: flex; align-items: start; gap: 0.7rem; color: var(--muted); font-size: 0.7rem; line-height: 1.5; }
 .consent input { margin-top: 0.15rem; accent-color: var(--green); }
 .terms-link { display: inline; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-decoration: underline; cursor: pointer; }
 .terms-link:hover { color: var(--gold-dark); }
@@ -278,8 +279,6 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .review-total small { color: var(--muted); font-size: 0.63rem; }
 .review-total b { font-size: 0.75rem; }
 .review-total strong { color: var(--gold-dark); font: 600 1.45rem var(--font-display); }
-.review-note { margin: 0; padding: 0.75rem 1.25rem; color: #665b48; background: rgba(255, 215, 137, 0.24); font-size: 0.65rem; line-height: 1.45; }
-
 .panel-actions { margin-top: 2rem; padding-top: 1.25rem; display: flex; align-items: center; justify-content: space-between; border-top: 1px solid var(--line); }
 .panel-actions .primary-button { margin-left: auto; }
 
@@ -349,6 +348,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .review-guest p { margin: 0; padding-left: calc(22px + 0.5rem); overflow-wrap: anywhere; font-size: 0.69rem; line-height: 1.4; }
 .review-guest-service { color: var(--ink); font-weight: 600; }
 .review-guest-service em { color: var(--muted); font-weight: 400; }
+.review-guest-pref { color: var(--muted); }
 .review-pricing { padding: 0.7rem 1.25rem 0; display: grid; gap: 0.45rem; border-top: 1px solid rgba(143, 95, 0, 0.14); }
 .review-pricing > div { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; color: var(--muted); font-size: 0.7rem; }
 .review-pricing strong { color: var(--ink); font-size: 0.75rem; font-weight: 700; }
@@ -356,7 +356,6 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .review-promotion-row > span { min-width: 0; font-weight: 400; }
 .review-promotion-row strong { color: #277344; }
 .review-pricing [hidden] { display: none; }
-.review-guest-pref { color: var(--muted); }
 .primary-button { min-height: 44px; padding: 0.72rem 1.15rem; display: inline-flex; align-items: center; justify-content: center; gap: 0.5rem; border: 0; border-radius: 99px; color: white; background: var(--green); font-size: 0.75rem; font-weight: 700; cursor: pointer; transition: 160ms ease; }
 .primary-button:hover { transform: translateY(-1px); background: var(--gold-dark); }
 .primary-button:disabled { cursor: not-allowed; opacity: 0.38; transform: none; }
@@ -402,7 +401,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
     z-index: 1002;
     top: auto;
     right: 0;
-    bottom: 0;
+    bottom: var(--keyboard-inset, 0px);
     left: 0;
     width: 100%;
     max-height: min(82dvh, 680px);
@@ -418,7 +417,7 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
   .summary-close svg { width: 18px; fill: none; stroke: var(--ink); stroke-width: 1.8; }
   .summary-overlay { position: fixed; z-index: 1001; inset: 0; display: block; background: rgba(31, 32, 27, 0.48); opacity: 0; visibility: hidden; transition: 180ms ease; }
   .summary-overlay.is-open { opacity: 1; visibility: visible; }
-  .mobile-summary-bar { position: fixed; z-index: 900; right: 0.75rem; bottom: max(0.75rem, env(safe-area-inset-bottom)); left: 0.75rem; min-height: 62px; padding: 0.65rem 0.85rem 0.65rem 1rem; display: grid; grid-template-columns: minmax(0, 1fr) auto 28px; align-items: center; gap: 0.75rem; border: 1px solid rgba(255,255,255,0.18); border-radius: 16px; color: white; background: var(--ink); box-shadow: 0 14px 38px rgba(31, 32, 27, 0.3); text-align: left; cursor: pointer; }
+  .mobile-summary-bar { position: fixed; z-index: 900; right: 0.75rem; bottom: calc(max(0.75rem, env(safe-area-inset-bottom)) + var(--keyboard-inset, 0px)); left: 0.75rem; min-height: 62px; padding: 0.65rem 0.85rem 0.65rem 1rem; display: grid; grid-template-columns: minmax(0, 1fr) auto 28px; align-items: center; gap: 0.75rem; border: 1px solid rgba(255,255,255,0.18); border-radius: 16px; color: white; background: var(--ink); box-shadow: 0 14px 38px rgba(31, 32, 27, 0.3); text-align: left; cursor: pointer; }
   .mobile-summary-bar > span { min-width: 0; display: grid; gap: 0.1rem; }
   .mobile-summary-bar small { color: #dcccae; font-size: 0.58rem; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; }
   .mobile-summary-bar b { overflow: hidden; font-size: 0.72rem; text-overflow: ellipsis; white-space: nowrap; }

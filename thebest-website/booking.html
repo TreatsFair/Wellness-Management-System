@@ -66,7 +66,7 @@
       >
         <div>
           <small>Time temporarily reserved</small>
-          <strong id="payment-deadline-title">Complete payment before the deadline</strong>
+          <strong id="payment-deadline-title">Your booking is reserved</strong>
           <span id="payment-deadline-copy"
             >Your booking will be cancelled if payment is not completed in time.</span
           >
@@ -271,7 +271,7 @@
                 <input
                   name="name"
                   autocomplete="name"
-                  placeholder="e.g. Sarah Tan"
+                  placeholder="Sarah Tan"
                   required
                 />
               </label>
@@ -282,7 +282,7 @@
                   name="phone"
                   autocomplete="tel"
                   inputmode="tel"
-                  placeholder="+60 12 345 6789"
+                  placeholder="0123456789"
                   maxlength="24"
                   aria-describedby="billing-phone-error"
                   required
@@ -311,14 +311,29 @@
                   aria-live="polite"
                 ></small>
               </label>
-              <label class="field field-wide">
-                <span>Anything we should know? <small>Optional</small></span>
-                <textarea
-                  name="notes"
-                  rows="3"
-                  placeholder="Preferences, accessibility needs or special requests"
-                ></textarea>
-              </label>
+              <div class="field field-wide notes-field">
+                <button
+                  class="optional-field-toggle"
+                  id="notes-toggle"
+                  type="button"
+                  aria-expanded="false"
+                  aria-controls="notes-field-body"
+                >
+                  <span>Anything we should know? <small> Optional</small></span>
+                  <span class="optional-field-toggle-state" id="notes-toggle-state">Add details</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="m6 9 6 6 6-6" />
+                  </svg>
+                </button>
+                <div class="optional-field-body" id="notes-field-body" hidden>
+                  <textarea
+                    id="booking-notes"
+                    name="notes"
+                    rows="3"
+                    placeholder="Preferences, accessibility needs or special requests"
+                  ></textarea>
+                </div>
+              </div>
               <label class="booking-honeypot" aria-hidden="true">
                 Website
                 <input name="website" tabindex="-1" autocomplete="off" />
@@ -331,25 +346,10 @@
                     Terms and Conditions
                   </button>
                   and acknowledge that all payments are final and non-refundable.
-                  </span
-                >
+                </span
+              >
               </label>
             </form>
-          </section>
-
-          <div class="panel-actions">
-            <button class="text-button" id="back-button" type="button" hidden>
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="m15 18-6-6 6-6" />
-              </svg>
-              Back
-            </button>
-            <button
-              class="primary-button"
-              id="continue-button"
-              type="button"
-              disabled
-            >
 
             <div class="promotion-slot billing-promotion-slot" id="billing-promotion-slot">
               <button
@@ -387,6 +387,21 @@
                 </div>
               </div>
             </div>
+          </section>
+
+          <div class="panel-actions">
+            <button class="text-button" id="back-button" type="button" hidden>
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="m15 18-6-6 6-6" />
+              </svg>
+              Back
+            </button>
+            <button
+              class="primary-button"
+              id="continue-button"
+              type="button"
+              disabled
+            >
               Continue
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="m9 18 6-6-6-6" />
@@ -406,10 +421,11 @@
             class="summary-close"
             id="summary-close"
             type="button"
-            aria-label="Close booking summary"
+            aria-label="Collapse booking summary"
           >
             <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="m6 6 12 12M18 6 6 18" />
+              <circle cx="12" cy="12" r="9.25" />
+              <path d="m8 10 4 4 4-4" />
             </svg>
           </button>
           <article class="review-card">
@@ -442,22 +458,6 @@
               </div>
             </dl>
             <div class="review-guest-list" id="review-guest-list"></div>
-            <div class="review-total">
-              <span
-                ><small>Estimated duration</small
-                ><b id="review-duration">0 minutes</b></span
-              >
-              <span
-                ><small>Total payable</small
-                ><strong id="review-total">RM 0</strong></span
-              >
-            </div>
-            <p class="review-note">
-            </p>
-          </article>
-        </aside>
-      </div>
-
             <div class="promotion-slot summary-promotion-slot" id="summary-promotion-slot"></div>
             <div class="review-pricing" aria-label="Price breakdown">
               <div>
@@ -469,6 +469,20 @@
                 <strong id="review-promotion">−RM 0</strong>
               </div>
             </div>
+            <div class="review-total">
+              <span
+                ><small>Estimated duration</small
+                ><b id="review-duration">0 minutes</b></span
+              >
+              <span
+                ><small>Total payable</small
+                ><strong id="review-total">RM 0</strong></span
+              >
+            </div>
+          </article>
+        </aside>
+      </div>
+
       <div class="summary-overlay" id="summary-overlay"></div>
       <button
         class="mobile-summary-bar"
@@ -481,9 +495,13 @@
           <small>Booking summary</small>
           <b id="mobile-summary-caption">Choose an outlet</b>
         </span>
-        <strong id="mobile-summary-total">RM 0</strong>
+        <span class="mobile-summary-total">
+          <small>Total</small>
+          <strong id="mobile-summary-total">RM 0</strong>
+        </span>
         <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="m9 18 6-6-6-6" />
+          <circle cx="12" cy="12" r="9.25" />
+          <path d="m8 14 4-4 4 4" />
         </svg>
       </button>
     </main>
@@ -562,6 +580,15 @@
           staff or other customers; payment is non-refundable in these cases.
         </p>
 
+        <h3>Promotions & Voucher Codes</h3>
+        <p>
+          Promotional and voucher codes are subject to their stated validity period, participating outlet(s), eligible services, minimum spend, usage limits and other applicable conditions. Unless otherwise stated, codes cannot be combined with other promotions and have no cash value.
+
+          A voucher is considered redeemed only upon successful completion of the eligible booking/payment. A voucher temporarily reserved during checkout may become available again if the booking is not completed or expires.
+
+          The Best Family Wellness reserves the right to reject, cancel or reverse a promotional benefit where a code has been obtained or used fraudulently, duplicated, altered, used contrary to its stated eligibility conditions, or applied as a result of an obvious technical or pricing error.
+        </p>
+
         <h3>Personal Information</h3>
         <p>
           We may collect your name, contact information, booking detailsand
@@ -580,15 +607,6 @@
 
     <script src="./js/booking-config.js?v=20260802"></script>
     <script src="./js/booking-api.js?v=20260903-5"></script>
-        <h3>Promotions & Voucher Codes</h3>
-        <p>
-          Promotional and voucher codes are subject to their stated validity period, participating outlet(s), eligible services, minimum spend, usage limits and other applicable conditions. Unless otherwise stated, codes cannot be combined with other promotions and have no cash value.
-
-          A voucher is considered redeemed only upon successful completion of the eligible booking/payment. A voucher temporarily reserved during checkout may become available again if the booking is not completed or expires.
-
-          The Best Family Wellness reserves the right to reject, cancel or reverse a promotional benefit where a code has been obtained or used fraudulently, duplicated, altered, used contrary to its stated eligibility conditions, or applied as a result of an obvious technical or pricing error.
-        </p>
-
     <script src="./js/booking-page.js?v=20260904-3"></script>
   </body>
 </html>
