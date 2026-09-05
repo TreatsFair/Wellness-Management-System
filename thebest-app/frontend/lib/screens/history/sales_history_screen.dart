@@ -1037,7 +1037,10 @@ class _HistoryOrder {
   final List<Map<String, dynamic>> therapistAllocations;
   final double servicePrice;
   final double sstAmount;
+  final double grossAmount;
+  final double discountAmount;
   final double totalAmount;
+  final String promotionCode;
   final double therapistCommissionAmount;
   final double counterCommissionAmount;
   final DateTime paidAt;
@@ -1070,7 +1073,10 @@ class _HistoryOrder {
     required this.therapistAllocations,
     required this.servicePrice,
     required this.sstAmount,
+    required this.grossAmount,
+    required this.discountAmount,
     required this.totalAmount,
+    required this.promotionCode,
     required this.therapistCommissionAmount,
     required this.counterCommissionAmount,
     required this.paidAt,
@@ -1377,10 +1383,16 @@ class _HistoryOrder {
       ],
       servicePrice: servicePrice,
       sstAmount: _asDouble(tx['sstAmount']),
+      grossAmount: _asDouble(
+        tx['grossAmount'],
+        _asDouble(tx['totalAmount']) + _asDouble(tx['discountAmount']),
+      ),
+      discountAmount: _asDouble(tx['discountAmount']),
       totalAmount: _asDouble(
         tx['totalAmount'],
         _asDouble(appointment['totalPrice']),
       ),
+      promotionCode: _asString(tx['promotionCode']),
       therapistCommissionAmount: _asDouble(tx['therapistCommissionAmount']),
       counterCommissionAmount: _asDouble(tx['counterCommissionAmount']),
       paidAt: paidAt,
@@ -1398,6 +1410,7 @@ class _HistoryOrder {
       source == 'online' ||
       source == 'appointment_addon';
   bool get isOnlineBooking => source == 'online';
+  bool get hasMonetaryPromotion => discountAmount > 0.004;
   bool get hasTransactionRecord => !id.startsWith('appointment:');
   bool get isWalkIn => source == 'walkin';
   bool get isVoided => paymentStatus == 'voided';
@@ -1650,6 +1663,8 @@ class _HistoryAddOnLine {
 
 class _HistorySummary {
   final double collection;
+  final double totalDiscount;
+  final int discountedOrderCount;
   final double serviceNet;
   final double sst;
   final int orderCount;
@@ -1660,6 +1675,8 @@ class _HistorySummary {
 
   const _HistorySummary({
     required this.collection,
+    required this.totalDiscount,
+    required this.discountedOrderCount,
     required this.serviceNet,
     required this.sst,
     required this.orderCount,
@@ -1671,6 +1688,8 @@ class _HistorySummary {
 
   static const empty = _HistorySummary(
     collection: 0,
+    totalDiscount: 0,
+    discountedOrderCount: 0,
     serviceNet: 0,
     sst: 0,
     orderCount: 0,
@@ -1721,6 +1740,8 @@ class _HistorySummary {
         .where((id) => id.trim().isNotEmpty)
         .toSet();
     var collection = 0.0;
+    var totalDiscount = 0.0;
+    var discountedOrderCount = 0;
     var serviceNet = 0.0;
     var sst = 0.0;
     var itemCount = 0;
@@ -1733,6 +1754,8 @@ class _HistorySummary {
 
     for (final order in collectionOrders) {
       collection += order.totalAmount;
+      totalDiscount += order.discountAmount;
+      if (order.hasMonetaryPromotion) discountedOrderCount++;
       sst += order.sstAmount;
       final method =
           (order.paymentMethod == 'billplz' || order.paymentMethod == 'online')
@@ -1752,6 +1775,8 @@ class _HistorySummary {
 
     return _HistorySummary(
       collection: collection,
+      totalDiscount: totalDiscount,
+      discountedOrderCount: discountedOrderCount,
       serviceNet: serviceNet,
       sst: sst,
       orderCount: collectionOrders.length,
@@ -1935,6 +1960,20 @@ class _HistorySidePanel extends StatelessWidget {
                 value: _money(summary.totalTherapistCommission),
                 selected: selectedPane == _HistoryPane.staff,
                 onTap: onOpenStaff,
+              ),
+              const SizedBox(height: 22),
+              const _SideSectionLabel('Discounts'),
+              _SideMetricRow(
+                icon: Icons.receipt_outlined,
+                iconColor: const Color(0xFFE11D48),
+                label: 'Discounted sales',
+                value: '${summary.discountedOrderCount}',
+              ),
+              _SideMetricRow(
+                icon: Icons.local_offer_outlined,
+                iconColor: const Color(0xFFE11D48),
+                label: 'Total discount',
+                value: _money(summary.totalDiscount),
               ),
               const SizedBox(height: 22),
               const _SideSectionLabel('Tax & Settlement'),
@@ -2886,6 +2925,17 @@ class _HistoryOrderCard extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
+                if (!order.isVoided && order.hasMonetaryPromotion) ...[
+                  const SizedBox(height: 3),
+                  Text(
+                    '${order.promotionCode.isEmpty ? 'Promotion' : order.promotionCode} · ${_money(order.discountAmount)} discount',
+                    style: const TextStyle(
+                      color: Color(0xFF4D8B45),
+                      fontSize: 11,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
               ],
             ),
           ],
@@ -2963,6 +3013,17 @@ class _HistoryOrderCard extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
+        if (!order.isVoided && order.hasMonetaryPromotion) ...[
+          const SizedBox(height: 3),
+          Text(
+            '${order.promotionCode.isEmpty ? 'Promotion' : order.promotionCode} · ${_money(order.discountAmount)} discount',
+            style: const TextStyle(
+              color: Color(0xFF4D8B45),
+              fontSize: 11,
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+        ],
         const SizedBox(height: 10),
         Row(
           children: [
@@ -3227,9 +3288,35 @@ class _OrderDetailSheet extends StatelessWidget {
                       ? '${order.paymentLabel} - Voided'
                       : order.paymentLabel,
                 ),
-                _DetailRow('Service Net', _money(order.servicePrice)),
-                _DetailRow('SST', _money(order.sstAmount)),
-                _DetailRow('Total', _money(order.totalAmount), strong: true),
+                if (order.hasMonetaryPromotion) ...[
+                  _DetailRow(
+                    'Original service price',
+                    _money(order.grossAmount),
+                  ),
+                  _DetailRow(
+                    'Promo code',
+                    order.promotionCode.isEmpty
+                        ? 'Promotion applied'
+                        : order.promotionCode,
+                  ),
+                  _DetailRow(
+                    'Discount',
+                    '-${_money(order.discountAmount)}',
+                  ),
+                  _DetailRow(
+                    'Final paid',
+                    _money(order.totalAmount),
+                    strong: true,
+                  ),
+                ] else ...[
+                  _DetailRow('Service Net', _money(order.servicePrice)),
+                  _DetailRow('SST', _money(order.sstAmount)),
+                  _DetailRow(
+                    'Total paid',
+                    _money(order.totalAmount),
+                    strong: true,
+                  ),
+                ],
               ],
             ),
             if (isAdmin && order.isServiceCompleted && !order.isVoided) ...[

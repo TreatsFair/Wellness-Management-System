@@ -536,6 +536,8 @@ class _ReportOrder {
   final String customerId;
   final String customerName;
   final String therapistId;
+                  _DiscountPromotionsCard(data: _data, loading: _loading),
+                  SizedBox(height: compact ? 10 : 18),
   final String therapistName;
   final String counterStaffId;
   final String counterStaffName;
@@ -592,7 +594,10 @@ class _ReportOrder {
     final customerId = _asString(transaction['customerId']).isNotEmpty
         ? _asString(transaction['customerId'])
         : _asString(appointment['customerId']);
+  final double grossAmount;
+  final double discountAmount;
     final rawTherapistName = _asString(
+  final String promotionCode;
       transaction['therapistName'],
       _asString(
         transaction['staffName'],
@@ -614,7 +619,10 @@ class _ReportOrder {
       nameCandidates: [
         rawTherapistName,
         transaction['therapistName'],
+    required this.grossAmount,
+    required this.discountAmount,
         transaction['staffName'],
+    required this.promotionCode,
         appointment['therapistName'],
         appointment['staffName'],
       ],
@@ -715,6 +723,11 @@ class _ReportOrder {
       serviceCompletedAt: serviceCompletedAt,
       createdAt: paidAt,
     );
+    final discountAmount = _asDouble(transaction['discountAmount']);
+    final grossAmount = _asDouble(
+      transaction['grossAmount'],
+      totalAmount + discountAmount,
+    );
   }
 
   bool get isAppointment =>
@@ -752,7 +765,10 @@ List<_ReportServiceItem> _resolveServiceItems(
   required Map<String, dynamic> appointment,
   required Map<String, Map<String, dynamic>> services,
 }) {
+      grossAmount: grossAmount,
+      discountAmount: discountAmount,
   final directItems = _parseServiceItems(
+      promotionCode: _asString(transaction['promotionCode']),
     transaction['serviceItems'] ?? transaction['items'],
     services,
   );
@@ -894,6 +910,7 @@ class _ReportData {
     var sst = 0.0;
     var itemCount = 0;
     var appointmentOrders = 0;
+  final List<_PromotionDiscount> promotionDiscounts;
     var walkInOrders = 0;
     var staffCommission = 0.0;
     var counterCommissionTotal = 0.0;
@@ -905,6 +922,7 @@ class _ReportData {
       final paidInRange = _inDateRange(order.paidAt, start, endExclusive);
       final serviceInRange =
           order.serviceCompletedAt != null &&
+    required this.promotionDiscounts,
           _inDateRange(order.serviceCompletedAt!, start, endExclusive);
 
       if (paidInRange) {
@@ -917,6 +935,7 @@ class _ReportData {
 
         final dayIndex = _stripDate(order.paidAt).difference(start).inDays;
         if (dayIndex >= 0 && dayIndex < dailyTotals.length) {
+    promotionDiscounts: [],
           dailyTotals[dayIndex] += order.totalAmount;
         }
 
@@ -936,8 +955,12 @@ class _ReportData {
         appointmentOrders += 1;
       } else {
         walkInOrders += 1;
+    final promotionTotals = <String, _MutablePromotionDiscount>{};
       }
 
+    var grossSales = 0.0;
+    var discounts = 0.0;
+    var discountedTransactions = 0;
       final resolvedTherapistId = _resolvedOrderStaffId(
         staff,
         order.therapistId,
@@ -957,6 +980,20 @@ class _ReportData {
       var hasAssignedServiceStaff = order.therapistAllocations.isNotEmpty;
 
       for (final item in order.serviceItems) {
+        grossSales += order.grossAmount;
+        discounts += order.discountAmount;
+        if (order.discountAmount > 0.004) {
+          discountedTransactions += 1;
+          final code = order.promotionCode.isEmpty
+              ? 'Promotion'
+              : order.promotionCode;
+          promotionTotals
+              .putIfAbsent(code, () => _MutablePromotionDiscount(code))
+            ..uses += 1
+            ..discount += order.discountAmount
+            ..gross += order.grossAmount
+            ..net += order.totalAmount;
+        }
         final serviceKey = item.id.isNotEmpty
             ? item.id
             : item.name.toLowerCase();
@@ -1237,6 +1274,9 @@ class _ReportSummary {
   final int orderCount;
   final int itemCount;
   final int customerCount;
+        grossSales: grossSales,
+        discounts: discounts,
+        discountedTransactions: discountedTransactions,
   final int appointmentOrders;
   final int walkInOrders;
   final double staffCommission;
@@ -1253,6 +1293,10 @@ class _ReportSummary {
     required this.staffCommission,
   });
 
+      promotionDiscounts: promotionTotals.values
+          .map((value) => value.toValue())
+          .toList()
+        ..sort((a, b) => b.discount.compareTo(a.discount)),
   static const empty = _ReportSummary(
     totalSales: 0,
     serviceNet: 0,
@@ -1280,6 +1324,9 @@ class _BreakdownSlice {
   final double amount;
   final int count;
   final Color color;
+  final double grossSales;
+  final double discounts;
+  final int discountedTransactions;
 
   const _BreakdownSlice({
     required this.label,
@@ -1291,6 +1338,9 @@ class _BreakdownSlice {
 
 class _ServicePerformance {
   final String id;
+    required this.grossSales,
+    required this.discounts,
+    required this.discountedTransactions,
   final String name;
   final String category;
   final int quantity;
@@ -1303,6 +1353,9 @@ class _ServicePerformance {
     required this.quantity,
     required this.revenue,
   });
+    grossSales: 0,
+    discounts: 0,
+    discountedTransactions: 0,
 }
 
 class _StaffCommission {
@@ -1314,6 +1367,43 @@ class _StaffCommission {
   final double commission;
 
   const _StaffCommission({
+  double get averageDiscount => discountedTransactions == 0
+      ? 0
+      : discounts / discountedTransactions;
+}
+
+class _PromotionDiscount {
+  final String code;
+  final int uses;
+  final double discount;
+  final double gross;
+  final double net;
+
+  const _PromotionDiscount({
+    required this.code,
+    required this.uses,
+    required this.discount,
+    required this.gross,
+    required this.net,
+  });
+}
+
+class _MutablePromotionDiscount {
+  final String code;
+  int uses = 0;
+  double discount = 0;
+  double gross = 0;
+  double net = 0;
+
+  _MutablePromotionDiscount(this.code);
+
+  _PromotionDiscount toValue() => _PromotionDiscount(
+        code: code,
+        uses: uses,
+        discount: discount,
+        gross: gross,
+        net: net,
+      );
     required this.id,
     required this.name,
     required this.role,
@@ -1559,78 +1649,111 @@ class _MetricGrid extends StatelessWidget {
     final earningStaff = data.staffCommissions
         .where((staff) => staff.commission > 0)
         .length;
-    final cards = [
+    final financialCards = [
       _MetricCard(
-        title: 'Daily Collection',
-        value: loading ? '-' : _money(summary.totalSales),
-        detail: '${summary.orderCount} payments',
-        icon: Icons.payments_outlined,
+        title: 'Gross Sales',
+        value: loading ? '-' : _money(summary.grossSales),
+        detail: 'Before promotional discounts',
+        icon: Icons.receipt_long_outlined,
         color: _teal,
       ),
       _MetricCard(
-        title: 'Completed Service Net',
-        value: loading ? '-' : _money(summary.serviceNet),
-        detail: 'SST collected ${_money(summary.sst)}',
-        icon: Icons.spa_outlined,
-        color: _green,
+        title: 'Discounts',
+        value: loading ? '-' : _money(summary.discounts),
+        detail: '${summary.discountedTransactions} discounted sales',
+        icon: Icons.local_offer_outlined,
+        color: _rose,
       ),
       _MetricCard(
-        title: 'Avg Order',
-        value: loading ? '-' : _money(summary.averageOrder),
-        detail: '${summary.customerCount} customers',
-        icon: Icons.trending_up_rounded,
-        color: _blue,
+        title: 'Net Sales',
+        value: loading ? '-' : _money(summary.totalSales),
+        detail: 'Gross less discounts',
+        icon: Icons.calculate_outlined,
+        color: _teal,
+      ),
+      _MetricCard(
+        title: 'Sales Collected',
+        value: loading ? '-' : _money(summary.totalSales),
+        detail: '${summary.orderCount} paid transactions',
+        icon: Icons.payments_outlined,
+        color: _teal,
       ),
       _MetricCard(
         title: 'Services Completed',
         value: loading ? '-' : '${summary.itemCount}',
         detail: '${summary.appointmentOrders} bookings, ${summary.walkInOrders} walk-ins',
         icon: Icons.inventory_2_outlined,
-        color: _amber,
+        color: _teal,
+      ),
+      _MetricCard(
+        title: 'Average Order',
+        value: loading ? '-' : _money(summary.averageOrder),
+        detail: '${summary.customerCount} customers',
+        icon: Icons.trending_up_rounded,
+        color: _teal,
       ),
       _MetricCard(
         title: 'Staff Commission',
         value: loading ? '-' : _money(summary.staffCommission),
         detail: '$earningStaff staff earning',
         icon: Icons.groups_2_outlined,
-        color: _violet,
+        color: _teal,
       ),
       _MetricCard(
         title: 'Counter Commission',
         value: loading ? '-' : _money(data.counterCommissionTotal),
         detail: 'Counter staff earnings',
         icon: Icons.point_of_sale_outlined,
-        color: _rose,
+        color: _teal,
       ),
     ];
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        final columns = width >= 1180
-            ? 6
-            : width >= 900
-                ? 3
-                : width >= 340
-                    ? 2
-                    : 1;
+        final columns = width >= 1000
+            ? 4
+            : width >= 340
+                ? 2
+                : 1;
         final mobile = width < 600;
         final largeUi =
             context.uiScale.preset == UiScalePreset.large ||
             MediaQuery.textScalerOf(context).scale(1) > 1.15;
-        return GridView.builder(
-          shrinkWrap: true,
-          physics: const NeverScrollableScrollPhysics(),
-          itemCount: cards.length,
-          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: columns,
-            crossAxisSpacing: mobile ? 8 : 12,
-            mainAxisSpacing: mobile ? 8 : 12,
-            mainAxisExtent: mobile
-                ? (largeUi ? 116 : 100)
-                : (largeUi ? 172 : 148),
-          ),
-          itemBuilder: (context, index) => cards[index],
+        Widget grid(List<Widget> cards) {
+          return GridView.builder(
+            shrinkWrap: true,
+            physics: const NeverScrollableScrollPhysics(),
+            itemCount: cards.length,
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+              crossAxisCount: columns,
+              crossAxisSpacing: mobile ? 8 : 12,
+              mainAxisSpacing: mobile ? 8 : 12,
+              mainAxisExtent: mobile
+                  ? (largeUi ? 140 : 122)
+                  : (largeUi ? 172 : 148),
+            ),
+            itemBuilder: (context, index) => cards[index],
+          );
+        }
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _ReportSectionHeading(
+              title: 'Financial overview',
+              subtitle: 'Revenue, discounts and collected sales',
+            ),
+            SizedBox(height: mobile ? 8 : 10),
+            grid(financialCards),
+            SizedBox(height: mobile ? 14 : 18),
+            const _ReportSectionHeading(
+              title: 'Operations & team',
+              subtitle: 'Completed services and commission signals',
+            ),
+            SizedBox(height: mobile ? 8 : 10),
+            grid(operationsCards),
+          ],
         );
       },
     );
@@ -2014,6 +2137,8 @@ class _CategoryBarChart extends StatelessWidget {
               x: index,
               barRods: [
                 BarChartRodData(
+    ];
+    final operationsCards = [
                   toY: items[index].amount,
                   width: 34,
                   color: items[index].color,
@@ -2070,6 +2195,210 @@ class _TopServicesCard extends StatelessWidget {
     );
   }
 }
+class _ReportSectionHeading extends StatelessWidget {
+  final String title;
+  final String subtitle;
+
+  const _ReportSectionHeading({
+    required this.title,
+    required this.subtitle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final phone = MediaQuery.of(context).size.width < 600;
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  color: _ink,
+                  fontSize: phone ? 13 : 15,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                subtitle,
+                style: TextStyle(
+                  color: _muted,
+                  fontSize: phone ? 10 : 11,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: phone ? 1 : 2,
+          child: Divider(color: _line, height: 1),
+        ),
+      ],
+    );
+  }
+}
+
+class _DiscountPromotionsCard extends StatelessWidget {
+  final _ReportData data;
+  final bool loading;
+
+  const _DiscountPromotionsCard({required this.data, required this.loading});
+
+  @override
+  Widget build(BuildContext context) {
+    final summary = data.summary;
+    final compact = MediaQuery.of(context).size.width < 600;
+    return _ReportCard(
+      padding: EdgeInsets.all(compact ? 12 : 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const _CardTitle(
+            title: 'Discounts & Promotions',
+            subtitle: 'Redeemed monetary promotions in this date range',
+            icon: Icons.local_offer_outlined,
+            color: _rose,
+          ),
+          SizedBox(height: compact ? 12 : 18),
+          if (loading)
+            SizedBox(
+              height: compact ? 96 : 120,
+              child: const _ChartSkeleton(),
+            )
+          else ...[
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final stats = <Widget>[
+                  _DiscountStat(
+                    'Total discounts',
+                    _money(summary.discounts),
+                  ),
+                  _DiscountStat(
+                    'Discounted transactions',
+                    '${summary.discountedTransactions}',
+                  ),
+                  _DiscountStat(
+                    'Average discount',
+                    _money(summary.averageDiscount),
+                  ),
+                  _DiscountStat(
+                    'Gross sales affected',
+                    _money(data.promotionDiscounts.fold<double>(
+                      0,
+                      (total, item) => total + item.gross,
+                    )),
+                  ),
+                ];
+                if (constraints.maxWidth >= 760) {
+                  return Row(
+                    children: [
+                      for (final stat in stats) Expanded(child: stat),
+                    ],
+                  );
+                }
+                return Wrap(
+                  spacing: 24,
+                  runSpacing: 12,
+                  children: [
+                    for (final stat in stats)
+                      SizedBox(
+                        width: compact ? 140 : 190,
+                        child: stat,
+                      ),
+                  ],
+                );
+              },
+            ),
+            const SizedBox(height: 14),
+            if (data.promotionDiscounts.isEmpty)
+              const _EmptyState(
+                icon: Icons.local_offer_outlined,
+                title: 'No monetary promotions redeemed',
+              )
+            else
+              for (final promotion in data.promotionDiscounts) ...[
+                const Divider(height: 18),
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            promotion.code,
+                            style: const TextStyle(
+                              color: _ink,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                          const SizedBox(height: 3),
+                          Text(
+                            '${promotion.uses} use${promotion.uses == 1 ? '' : 's'} · Gross ${_money(promotion.gross)} · Net ${_money(promotion.net)}',
+                            style: const TextStyle(
+                              color: _muted,
+                              fontSize: 12,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Text(
+                      '-${_money(promotion.discount)}',
+                      style: const TextStyle(
+                        color: _rose,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscountStat extends StatelessWidget {
+  final String label;
+  final String value;
+
+  const _DiscountStat(this.label, this.value);
+
+  @override
+  Widget build(BuildContext context) => Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: const TextStyle(
+              color: _muted,
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 18,
+              fontWeight: FontWeight.w900,
+            ),
+          ),
+        ],
+      );
+
+}
+
 
 class _TopServiceRow extends StatelessWidget {
   final int rank;
