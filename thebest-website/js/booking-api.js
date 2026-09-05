@@ -6,10 +6,12 @@
   const baseUrl = configured ? `${supabaseUrl}/functions/v1/booking-api` : "";
 
   class BookingApiError extends Error {
-    constructor(message, status) {
+    constructor(message, status, code = "", details = null) {
       super(message);
       this.name = "BookingApiError";
       this.status = status;
+      this.code = code;
+      this.details = details;
     }
   }
 
@@ -25,7 +27,12 @@
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
-      throw new BookingApiError(payload.error || "Booking request failed", response.status);
+      throw new BookingApiError(
+        payload.error || "Booking request failed",
+        response.status,
+        payload.code || "",
+        payload.details || null,
+      );
     }
     return payload;
   }
@@ -64,6 +71,14 @@
     createHold: (body) => request("/booking-holds", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+    applyPromotion: (token, code) => request("/booking-holds/promotion", {
+      method: "POST",
+      body: JSON.stringify({ token, code }),
+    }),
+    removePromotion: (token) => request("/booking-holds/promotion/remove", {
+      method: "POST",
+      body: JSON.stringify({ token }),
     }),
     confirmHold: (token) => request("/booking-holds/confirm", {
       method: "POST",

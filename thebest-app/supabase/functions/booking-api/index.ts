@@ -282,7 +282,14 @@ function json(
     headers: { ...responseHeaders(request), ...extraHeaders },
   });
 }
-function fail(request: Request, message: string, status = 400): Response { return json(request, { error: message }, status); }
+function fail(
+  request: Request,
+  message: string,
+  status = 400,
+  code?: string,
+): Response {
+  return json(request, { error: message, ...(code ? { code } : {}) }, status);
+}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -291,6 +298,59 @@ function errorMessage(error: unknown): string {
     if (typeof message === "string") return message;
   }
   return String(error);
+}
+
+function rpcErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const record = error as Record<string, unknown>;
+  for (const value of [record.details, record.hint, record.message]) {
+    const match = String(value ?? "").match(/\b((?:PROMOTION|HOLD)_[A-Z0-9_]+)\b/);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function isPromotionError(error: unknown): boolean {
+  const code = rpcErrorCode(error);
+  return Boolean(code?.startsWith("PROMOTION_"));
+}
+
+type PublicBookingPricing = {
+  subtotal_amount: number;
+  discount_amount: number;
+  final_amount: number;
+  promotion_id: string | null;
+  promotion_code_id: string | null;
+  promotion_code: string | null;
+  promotion_name: string | null;
+  benefit_type: string | null;
+  benefit_value: number | null;
+  free_addon_service_id: string | null;
+  free_addon_service_name: string | null;
+  pricing_snapshot: Record<string, unknown> | null;
+  status: string;
+  expires_at: string | null;
+};
+
+function publicBookingPricingRow(row: Record<string, unknown>): PublicBookingPricing {
+  return {
+    subtotal_amount: Number(row.subtotal_amount ?? 0),
+    discount_amount: Number(row.discount_amount ?? 0),
+    final_amount: Number(row.final_amount ?? 0),
+    promotion_id: row.promotion_id ? String(row.promotion_id) : null,
+    promotion_code_id: row.promotion_code_id ? String(row.promotion_code_id) : null,
+    promotion_code: row.promotion_code ? String(row.promotion_code) : null,
+    promotion_name: row.promotion_name ? String(row.promotion_name) : null,
+    benefit_type: row.benefit_type ? String(row.benefit_type) : null,
+    benefit_value: row.benefit_value == null ? null : Number(row.benefit_value),
+    free_addon_service_id: row.free_addon_service_id ? String(row.free_addon_service_id) : null,
+    free_addon_service_name: row.free_addon_service_name ? String(row.free_addon_service_name) : null,
+    pricing_snapshot: row.pricing_snapshot && typeof row.pricing_snapshot === "object"
+      ? row.pricing_snapshot as Record<string, unknown>
+      : null,
+    status: String(row.status ?? ""),
+    expires_at: row.expires_at ? String(row.expires_at) : null,
+  };
 }
 function pathOf(request: Request): string {
   const path = new URL(request.url).pathname;
@@ -471,6 +531,11 @@ async function enforceIpRateLimit(
     (path === "/booking-holds" || path === "/booking-groups")
   ) {
     rule = ["hold", 12, 3600];
+  } else if (
+    request.method === "POST" &&
+    (path === "/booking-holds/promotion" || path === "/booking-holds/promotion/remove")
+  ) {
+    rule = ["promotion", 20, 600];
   } else if (request.method === "POST" && path === "/booking-holds/pay") {
     rule = ["payment", 10, 600];
   } else if (request.method === "GET" && path === "/booking-holds/status") {
@@ -549,6 +614,25 @@ async function rpcScalar<T = string>(
   const { data, error } = await supabase.rpc(name, args);
   if (error) throw error;
   return data as T | null;
+}
+
+async function publicBookingPricing(token: string): Promise<PublicBookingPricing | null> {
+  const rows = await rpc("get_public_booking_pricing", { p_token: token }) as Array<Record<string, unknown>>;
+  return rows[0] ? publicBookingPricingRow(rows[0]) : null;
+}
+
+function promotionPayload(pricing: PublicBookingPricing | null): Record<string, unknown> | null {
+  if (!pricing?.promotion_code) return null;
+  return {
+    id: pricing.promotion_id,
+    code_id: pricing.promotion_code_id,
+    code: pricing.promotion_code,
+    name: pricing.promotion_name,
+    benefit_type: pricing.benefit_type,
+    benefit_value: pricing.benefit_value,
+    free_addon_service_id: pricing.free_addon_service_id,
+    free_addon_service_name: pricing.free_addon_service_name,
+  };
 }
 
 type BookingBillBinding = {
@@ -860,8 +944,9 @@ async function route(request: Request): Promise<Response> {
     const allocations = groupAllocations(body.allocations);
     const startAt = String(body.start_at ?? "").trim();
     if (!allocations || !startAt) return fail(request, "Treatments and time are required");
+    const promotionCode = String(body.promotion_code ?? "").trim().slice(0, 80);
     try {
-      const rows = await rpc("create_public_booking_group_hold_v1", {
+      const commonArgs = {
         p_allocations: allocations,
         p_start_at: startAt,
         p_customer_name: String(body.customer_name ?? ""),
@@ -869,22 +954,34 @@ async function route(request: Request): Promise<Response> {
         p_customer_email: String(body.customer_email ?? ""),
         p_notes: String(body.notes ?? ""),
         p_request_fingerprint: await fingerprint(request),
-      }) as Array<Record<string, unknown>>;
+      };
+      const rows = promotionCode
+        ? await rpc("create_public_booking_group_hold_with_promotion_v1", {
+          ...commonArgs,
+          p_promotion_code: promotionCode,
+        }) as Array<Record<string, unknown>>
+        : await rpc("create_public_booking_group_hold_v1", commonArgs) as Array<Record<string, unknown>>;
       const hold = rows[0];
       if (!hold) return fail(request, "Unable to reserve this group time", 500);
       const paymentRows = await rpc("get_booking_group_for_payment", {
         p_token: hold.group_token,
       }) as Array<Record<string, unknown>>;
       const payment = paymentRows[0];
+      const pricing = await publicBookingPricing(String(hold.group_token));
       return json(request, { hold: {
         token: hold.group_token,
         expires_at: hold.hold_expires_at,
-        total_price: Number(payment?.total_amount ?? hold.total_price),
+        total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
         guest_count: Number(hold.guest_count),
         status: "pending_payment",
+        pricing,
+        promotion: promotionPayload(pricing),
       } }, 201);
     } catch (error) {
       const message = errorMessage(error);
+      if (isPromotionError(error)) {
+        return fail(request, message, 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+      }
       if (/no longer available|already booked|capacity/i.test(message)) {
         return fail(request, "That time can no longer fit the whole group — there may not be enough masseurs matching everyone's preference. Please pick another time.", 409);
       }
@@ -897,30 +994,94 @@ async function route(request: Request): Promise<Response> {
     const catalogueId = uuid(body.catalogue_id);
     const startAt = String(body.start_at ?? "").trim();
     if (!catalogueId || !startAt) return fail(request, "Treatment and time are required");
+    const promotionCode = String(body.promotion_code ?? "").trim().slice(0, 80);
     try {
-      const rows = await rpc("create_public_booking_hold_v2", {
+      const commonArgs = {
         p_catalogue_id: catalogueId, p_start_at: startAt,
         p_therapist_preference: preference(body.therapist_preference),
         p_customer_name: String(body.customer_name ?? ""), p_customer_phone: String(body.customer_phone ?? ""),
         p_customer_email: String(body.customer_email ?? ""), p_therapist_request: String(body.therapist_request ?? ""),
         p_notes: String(body.notes ?? ""), p_request_fingerprint: await fingerprint(request),
-      }) as Array<Record<string, unknown>>;
+      };
+      const rows = promotionCode
+        ? await rpc("create_public_booking_hold_with_promotion_v1", {
+          ...commonArgs,
+          p_promotion_code: promotionCode,
+        }) as Array<Record<string, unknown>>
+        : await rpc("create_public_booking_hold_v2", commonArgs) as Array<Record<string, unknown>>;
       const hold = rows[0];
       if (!hold) return fail(request, "Unable to reserve this time", 500);
       const paymentRows = await rpc("get_booking_hold_for_payment", {
         p_token: hold.hold_token,
       }) as Array<Record<string, unknown>>;
       const payment = paymentRows[0];
+      const pricing = await publicBookingPricing(String(hold.hold_token));
       return json(request, { hold: {
         token: hold.hold_token, expires_at: hold.hold_expires_at,
-        total_price: Number(payment?.total_amount ?? hold.total_price),
+        total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
         duration_minutes: Number(hold.duration_minutes), status: "pending_payment",
+        pricing,
+        promotion: promotionPayload(pricing),
       } }, 201);
     } catch (error) {
       const message = errorMessage(error);
+      if (isPromotionError(error)) {
+        return fail(request, message, 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+      }
       if (/no longer available/i.test(message)) return fail(request, "That time was just taken. Please choose another time.", 409);
       throw error;
     }
+  }
+  if (request.method === "POST" && path === "/booking-holds/promotion") {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const token = uuid(body?.token);
+    const code = String(body?.code ?? "").trim().slice(0, 80);
+    if (!token) return fail(request, "A valid booking reference is required");
+    if (!code) return fail(request, "Enter a promotion code first.", 422, "PROMOTION_CODE_REQUIRED");
+    const tokenRateLimit = await enforceTokenRateLimit(request, token, "promotion_per_hold", 12, 600);
+    if (tokenRateLimit) return tokenRateLimit;
+    try {
+      const rows = await rpc("reserve_public_booking_promotion", {
+        p_token: token,
+        p_code: code,
+        p_customer_id: null,
+      }) as Array<Record<string, unknown>>;
+      const result = rows[0];
+      if (!result?.success) {
+        return fail(
+          request,
+          String(result?.error_message ?? "Promotion could not be applied."),
+          422,
+          String(result?.error_code ?? "PROMOTION_INVALID"),
+        );
+      }
+      const pricing = await publicBookingPricing(token);
+      return json(request, { promotion: promotionPayload(pricing), pricing });
+    } catch (error) {
+      if (isPromotionError(error)) {
+        return fail(request, errorMessage(error), 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+      }
+      throw error;
+    }
+  }
+  if (request.method === "POST" && path === "/booking-holds/promotion/remove") {
+    const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+    const token = uuid(body?.token);
+    if (!token) return fail(request, "A valid booking reference is required");
+    const tokenRateLimit = await enforceTokenRateLimit(request, token, "promotion_per_hold", 12, 600);
+    if (tokenRateLimit) return tokenRateLimit;
+    const rows = await rpc("remove_public_booking_promotion", { p_token: token }) as Array<Record<string, unknown>>;
+    const result = rows[0];
+    if (!result?.success) {
+      return fail(
+        request,
+        String(result?.error_message ?? "Promotion could not be removed."),
+        422,
+        String(result?.error_code ?? "PROMOTION_INVALID"),
+      );
+    }
+    const pricing = await publicBookingPricing(token);
+    return json(request, { pricing, promotion: null });
   }
   if (request.method === "POST" && path === "/booking-holds/pay") {
     if (!BILLPLZ_CONFIGURED) return fail(request, "Payment is not configured yet.", 503);
@@ -1136,14 +1297,17 @@ async function route(request: Request): Promise<Response> {
       { p_token: token },
     ) as Array<Record<string, unknown>>;
     const payment = paymentRows[0];
+    const pricing = await publicBookingPricing(token);
     return json(request, { hold: {
       token: hold.token,
       status: hold.status,
       expires_at: hold.expires_at,
-      total_price: Number(payment?.total_amount ?? hold.total_price),
+      total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
       start_at: hold.start_at,
       end_at: hold.end_at,
       guest_count: Number(hold.guest_count ?? 1),
+      pricing,
+      promotion: promotionPayload(pricing),
       // Same receipt_number staff see in the app's transaction record — null until
       // the Billplz webhook has confirmed payment and created that row.
       receipt_number: payment?.receipt_number ?? null,
