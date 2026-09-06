@@ -77,12 +77,15 @@ const summarySheet = document.querySelector("#booking-summary");
 const summaryToggle = document.querySelector("#mobile-summary-toggle");
 const summaryClose = document.querySelector("#summary-close");
 const summaryOverlay = document.querySelector("#summary-overlay");
+const bookingFieldSelector = ".details-form input, .details-form textarea, .details-form select, #promotion-box input, #promotion-box textarea, #promotion-box select";
 const paymentDeadline = document.querySelector("#payment-deadline");
 const paymentCountdown = document.querySelector("#payment-countdown");
 const stepNames = ["Outlet", "Guests", "Treatments", "Date & time", "Billing"];
 let dateRequestSerial = 0;
 let holdCountdownTimer = null;
 let holdExpiryInProgress = false;
+let promotionMessageTimer = null;
+let lastBookingFieldFocusAt = 0;
 
 function readBookingSession() {
   try {
@@ -312,25 +315,40 @@ function promotionBenefitLabel(promotion, pricing) {
   const type = String(promotion?.benefit_type || pricing?.benefit_type || "");
   const value = Number(promotion?.benefit_value ?? pricing?.benefit_value ?? 0);
   if (type === "percentage_discount") {
-    return `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}% off`;
+    const percentageLabel = `${Number.isInteger(value) ? value.toFixed(0) : value.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}% off`;
+    const maximumDiscount = Number(promotion?.maximum_discount ?? pricing?.maximum_discount);
+    return Number.isFinite(maximumDiscount) && maximumDiscount > 0
+      ? `${percentageLabel}, capped at RM${maximumDiscount.toFixed(2)}`
+      : percentageLabel;
   }
   if (type === "fixed_discount") return `${money(value)} off`;
   const addon = promotion?.free_addon_service_name || pricing?.free_addon_service_name;
   return addon ? `${addon} is free` : "Free add-on";
 }
+function minimumSpendPromotionMessage(error) {
+  const responseMessage = String(error?.message || "");
+  const responseAmount = responseMessage.match(/\bRM\s*([0-9]+(?:\.[0-9]{1,2})?)\b/i)?.[1];
+  const amount = responseAmount == null
+    ? Number(error?.details?.minimum_spend)
+    : Number(responseAmount);
+  return Number.isFinite(amount)
+    ? `Minimum spend of RM${amount.toFixed(2)} is required to use this code.`
+    : "Minimum spend is required to use this code.";
+}
 function promotionErrorMessage(error) {
   const code = String(error?.code || "");
   const messages = {
     PROMOTION_CODE_REQUIRED: "Enter a promotion code first.",
-    PROMOTION_NOT_FOUND: "We could not find that promotion code.",
-    PROMOTION_INACTIVE: "This promotion code is inactive.",
-    PROMOTION_EXPIRED: "This promotion code is expired or not active yet.",
+    PROMOTION_INVALID: "The promotional code is invalid.",
+    PROMOTION_NOT_FOUND: "The promotional code is invalid.",
+    PROMOTION_INACTIVE: "The promotional code is invalid.",
+    PROMOTION_EXPIRED: "The promotional code is invalid.",
     PROMOTION_NOT_ONLINE: "This promotion is not available for online bookings.",
     PROMOTION_OUTLET: "This code is not valid for the selected outlet.",
     PROMOTION_SERVICE: "This code is not valid for the selected treatment.",
-    PROMOTION_MINIMUM_SPEND: error?.message || "Your booking does not meet the minimum spend for this promotion.",
+    PROMOTION_MINIMUM_SPEND: minimumSpendPromotionMessage(error),
     PROMOTION_FULLY_REDEEMED: "This promotion has been fully redeemed.",
-    PROMOTION_ALREADY_REDEEMED: "This promotion has already been used for this booking.",
+    PROMOTION_ALREADY_REDEEMED: "The promotional code is invalid.",
     PROMOTION_CUSTOMER_LIMIT: "This promotion has reached its limit for this customer.",
     PROMOTION_ADDON_NOT_FOUND: "The free add-on service is no longer available.",
     PROMOTION_ADDON_REQUIRES_SCHEDULED_ADDON: "This free add-on needs a separate scheduled slot and cannot be added to this booking yet.",
@@ -349,7 +367,7 @@ function renderPromotion() {
   promotionRemoveButton.disabled = state.promotionBusy;
   promotionStatus.className = "promotion-status";
   if (state.promotionBusy) {
-    promotionStatus.textContent = "Checking your promotion code…";
+    promotionStatus.textContent = state.promotionMessage || "Applying your promotional code.";
     promotionStatus.classList.add("is-loading");
   } else if (state.promotionMessage) {
     promotionStatus.textContent = state.promotionMessage;
@@ -907,7 +925,26 @@ function updateUi() {
   persistBookingSession();
 }
 
-function openSummary() { summarySheet.classList.add("is-open"); summaryOverlay.classList.add("is-open"); summaryToggle.setAttribute("aria-expanded", "true"); document.body.classList.add("summary-open"); summaryClose.focus(); }
+function isBookingField(element) {
+  return element instanceof HTMLElement && Boolean(element.closest(bookingFieldSelector));
+}
+
+function openSummary(event) {
+  const keyboardTransitionActive =
+    document.body.classList.contains("keyboard-open") ||
+    isBookingField(document.activeElement) ||
+    performance.now() - lastBookingFieldFocusAt < 700;
+  if (keyboardTransitionActive) {
+    event?.preventDefault();
+    closeSummary();
+    return;
+  }
+  summarySheet.classList.add("is-open");
+  summaryOverlay.classList.add("is-open");
+  summaryToggle.setAttribute("aria-expanded", "true");
+  document.body.classList.add("summary-open");
+  summaryClose.focus({ preventScroll: true });
+}
 function closeSummary() { summarySheet.classList.remove("is-open"); summaryOverlay.classList.remove("is-open"); summaryToggle.setAttribute("aria-expanded", "false"); document.body.classList.remove("summary-open"); }
 
 function setConfirmationEyebrow(value) {
@@ -1066,9 +1103,22 @@ function initializePaymentReturn() {
   paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); return true;
 }
 
-function setPromotionMessage(message, isError = false) {
+function setPromotionMessage(message, isError = false, temporaryMs = 0) {
+  if (promotionMessageTimer) {
+    window.clearTimeout(promotionMessageTimer);
+    promotionMessageTimer = null;
+  }
   state.promotionMessage = message;
   state.promotionMessageIsError = isError;
+  if (message && temporaryMs > 0) {
+    promotionMessageTimer = window.setTimeout(() => {
+      promotionMessageTimer = null;
+      if (state.promotionMessage !== message || state.promotionBusy) return;
+      state.promotionMessage = "";
+      state.promotionMessageIsError = false;
+      updateUi();
+    }, temporaryMs);
+  }
 }
 
 function promotionContactPayload(form) {
@@ -1146,7 +1196,20 @@ async function applyPromotionCode() {
     persistBookingSession();
     startHoldCountdown();
   } catch (error) {
-    setPromotionMessage(promotionErrorMessage(error), true);
+    const errorCode = String(error?.code || "");
+    const temporaryInvalid = [
+      "PROMOTION_INVALID",
+      "PROMOTION_NOT_FOUND",
+      "PROMOTION_INACTIVE",
+      "PROMOTION_EXPIRED",
+      "PROMOTION_FULLY_REDEEMED",
+      "PROMOTION_ALREADY_REDEEMED",
+    ].includes(errorCode);
+    setPromotionMessage(
+      promotionErrorMessage(error),
+      true,
+      temporaryInvalid ? 2500 : 0,
+    );
     if (error.status === 409) {
       state.time = null;
       await loadAvailability();
@@ -1163,7 +1226,7 @@ async function removePromotionCode() {
   const code = promotionCodeValue();
   if (!code) return;
   state.promotionBusy = true;
-  setPromotionMessage("");
+  setPromotionMessage("Removing your promotional code");
   updateUi();
   try {
     if (promotionAppliedForCurrentBooking() && state.hold?.token) {
@@ -1185,7 +1248,7 @@ async function removePromotionCode() {
     promotionCodeField.value = "";
     state.promotion = null;
     state.holdFingerprint = state.hold?.token ? currentBookingFingerprint() : "";
-    setPromotionMessage("Promotion removed.");
+    setPromotionMessage("Promotional code removed.", false, 2200);
     persistBookingSession();
   } catch (error) {
     setPromotionMessage(promotionErrorMessage(error), true);
@@ -1362,9 +1425,15 @@ promotionApplyButton?.addEventListener("click", applyPromotionCode);
 promotionRemoveButton?.addEventListener("click", removePromotionCode);
 
 function updateKeyboardInset() {
-  if (!window.visualViewport) return;
+  if (!window.visualViewport) {
+    document.body.classList.remove("keyboard-open");
+    return;
+  }
   const inset = Math.max(0, window.innerHeight - window.visualViewport.height - window.visualViewport.offsetTop);
   document.documentElement.style.setProperty("--keyboard-inset", `${Math.round(inset)}px`);
+  const keyboardOpen = inset > 80;
+  document.body.classList.toggle("keyboard-open", keyboardOpen);
+  if (keyboardOpen) closeSummary();
 }
 
 window.visualViewport?.addEventListener("resize", updateKeyboardInset);
@@ -1372,10 +1441,13 @@ window.visualViewport?.addEventListener("scroll", updateKeyboardInset);
 window.addEventListener("resize", updateKeyboardInset);
 window.addEventListener("resize", syncPromotionPlacement);
 document.addEventListener("focusin", (event) => {
-  const field = event.target instanceof HTMLElement
-    ? event.target.closest(".details-form input, .details-form textarea, .details-form select, #promotion-box input, #promotion-box textarea, #promotion-box select")
-    : null;
+  const field = isBookingField(event.target) ? event.target.closest(bookingFieldSelector) : null;
   if (!field) return;
+  lastBookingFieldFocusAt = performance.now();
+  // Never leave the fixed summary controls over a field while the user is typing.
+  // This also protects against a tap landing on the summary bar after iOS resizes
+  // the visual viewport for the keyboard.
+  closeSummary();
   window.setTimeout(() => {
     updateKeyboardInset();
     const viewportHeight = window.visualViewport?.height || window.innerHeight;

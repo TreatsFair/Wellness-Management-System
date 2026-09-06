@@ -10,10 +10,10 @@ body {
 html { overflow-y: auto; }
 
 body {
-  padding-bottom: calc(96px + var(--keyboard-inset, 0px));
+  padding-bottom: 96px;
   overflow-y: visible;
   touch-action: auto;
-  scroll-padding-bottom: calc(112px + var(--keyboard-inset, 0px));
+  scroll-padding-bottom: 112px;
 }
 
 .booking-header {
@@ -280,7 +280,7 @@ body {
   z-index: 1002;
   top: auto;
   right: 0.35rem;
-  bottom: calc(max(0.35rem, env(safe-area-inset-bottom)) + var(--keyboard-inset, 0px));
+  bottom: max(0.35rem, env(safe-area-inset-bottom));
   left: 0.35rem;
   width: auto;
   max-width: 100%;
@@ -303,7 +303,7 @@ body {
 .summary-overlay { display: block; }
 .mobile-summary-bar {
   right: 0.65rem;
-  bottom: calc(max(0.65rem, env(safe-area-inset-bottom)) + var(--keyboard-inset, 0px));
+  bottom: max(0.65rem, env(safe-area-inset-bottom));
   left: 0.65rem;
   min-height: 68px;
   padding: 0.65rem 0.7rem 0.65rem 0.95rem;
@@ -326,8 +326,24 @@ body {
 .mobile-summary-bar > svg circle { fill: rgba(255, 252, 244, 0.5); }
 
 .summary-sheet-handle { position: absolute; z-index: 3; top: 8px; left: 50%; transform: translateX(-50%); margin: 0; background: #d2a955; }
-.summary-close { top: 0.7rem; right: 0.75rem; }
+.summary-close { top: 0.7rem; right: calc(0.65rem + 0.7rem - 0.35rem); }
 .summary-close svg { width: 32px; height: 32px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+@media (max-width: 900px) {
+  body.keyboard-open .mobile-summary-bar {
+    pointer-events: none;
+  }
+  body.keyboard-open .booking-summary,
+  body.keyboard-open .booking-summary.is-open {
+    transform: translateY(105%);
+    visibility: hidden;
+    pointer-events: none;
+  }
+  body.keyboard-open .summary-overlay {
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
 .review-card { overflow: visible; }
 .review-heading { padding: 1.2rem 3.5rem 0.85rem 1rem; align-items: flex-start; }
 .review-heading h3 { font-size: 1.2rem; }
