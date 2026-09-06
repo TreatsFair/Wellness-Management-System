@@ -488,14 +488,16 @@ class _ReportsScreenState extends State<ReportsScreen> {
             return SingleChildScrollView(
               physics: const AlwaysScrollableScrollPhysics(),
               padding: EdgeInsets.fromLTRB(
-                wide ? 28 : compact ? 10 : 16,
-                compact ? 4 : 8,
-                wide ? 28 : compact ? 10 : 16,
-                compact ? 18 : 28,
+                wide ? 28 : 16,
+                compact ? 8 : 10,
+                wide ? 28 : 16,
+                compact ? 24 : 28,
               ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+              child: SizedBox(
+                width: constraints.maxWidth,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   _ReportHeader(
                     range: _range,
                     rangeLabel: _rangeLabel,
@@ -570,6 +572,7 @@ class _ReportsScreenState extends State<ReportsScreen> {
                   SizedBox(height: compact ? 10 : 18),
                   _PaymentBreakdownCard(data: _data, loading: _loading),
                 ],
+              ),
               ),
             );
           },
@@ -1580,7 +1583,7 @@ class _ReportHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final phone = MediaQuery.of(context).size.width < 600;
     return _ReportCard(
-      padding: EdgeInsets.all(phone ? 12 : 18),
+      padding: EdgeInsets.all(phone ? 16 : 18),
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 700;
@@ -1591,7 +1594,7 @@ class _ReportHeader extends StatelessWidget {
                 'REPORTING OVERVIEW',
                 style: TextStyle(
                   color: _teal,
-                  fontSize: phone ? 9 : 10,
+                  fontSize: phone ? 10 : 10,
                   fontWeight: FontWeight.w900,
                   letterSpacing: 1.2,
                 ),
@@ -1601,7 +1604,7 @@ class _ReportHeader extends StatelessWidget {
                 'Business Performance',
                 style: TextStyle(
                   color: _ink,
-                  fontSize: phone ? 18 : 24,
+                  fontSize: phone ? 20 : 24,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -1610,7 +1613,7 @@ class _ReportHeader extends StatelessWidget {
                 rangeLabel,
                 style: TextStyle(
                   color: _muted,
-                  fontSize: phone ? 11 : 13,
+                  fontSize: phone ? 12 : 13,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -1621,8 +1624,11 @@ class _ReportHeader extends StatelessWidget {
             runSpacing: phone ? 6 : 8,
             alignment: compact ? WrapAlignment.start : WrapAlignment.end,
             children: _ReportRange.values.map((item) {
+              final custom = item == _ReportRange.custom;
               return _RangeChip(
-                label: item.label,
+                label: custom ? null : item.label,
+                icon: custom ? Icons.calendar_month_rounded : null,
+                tooltip: custom ? 'Custom date range' : null,
                 selected: item == range,
                 enabled: !loading,
                 compact: phone,
@@ -1652,7 +1658,9 @@ class _ReportHeader extends StatelessWidget {
 }
 
 class _RangeChip extends StatelessWidget {
-  final String label;
+  final String? label;
+  final IconData? icon;
+  final String? tooltip;
   final bool selected;
   final bool enabled;
   final bool compact;
@@ -1660,6 +1668,8 @@ class _RangeChip extends StatelessWidget {
 
   const _RangeChip({
     required this.label,
+    this.icon,
+    this.tooltip,
     required this.selected,
     required this.enabled,
     this.compact = false,
@@ -1668,28 +1678,47 @@ class _RangeChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return InkWell(
+    final iconOnly = icon != null && (label == null || label!.isEmpty);
+    final chip = InkWell(
       onTap: enabled ? onTap : null,
       borderRadius: BorderRadius.circular(8),
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
+        width: iconOnly ? (compact ? 40 : 44) : null,
+        constraints: BoxConstraints(minHeight: compact ? 40 : 44),
         padding: EdgeInsets.symmetric(
-          horizontal: compact ? 9 : 14,
-          vertical: compact ? 7 : 10,
+          horizontal: iconOnly ? 0 : (compact ? 10 : 14),
+          vertical: compact ? 8 : 10,
         ),
+        alignment: Alignment.center,
         decoration: BoxDecoration(
           color: selected ? _teal : Colors.white,
           borderRadius: BorderRadius.circular(8),
           border: Border.all(color: selected ? _teal : _line),
         ),
-        child: Text(
-          label,
-          style: TextStyle(
-            color: selected ? Colors.white : _ink,
-            fontWeight: FontWeight.w800,
-            fontSize: compact ? 10 : 12,
-          ),
-        ),
+        child: iconOnly
+            ? Icon(
+                icon,
+                color: selected ? Colors.white : _teal,
+                size: compact ? 18 : 20,
+              )
+            : Text(
+                label!,
+                style: TextStyle(
+                  color: selected ? Colors.white : _ink,
+                  fontWeight: FontWeight.w800,
+                  fontSize: compact ? 11.5 : 12,
+                ),
+              ),
+      ),
+    );
+    return Semantics(
+      button: true,
+      label: tooltip ?? label,
+      enabled: enabled,
+      child: Tooltip(
+        message: tooltip ?? label ?? '',
+        child: chip,
       ),
     );
   }
@@ -1966,7 +1995,7 @@ class _ReportDateRangeDialogState extends State<_ReportDateRangeDialog> {
                     visualDensity: VisualDensity.compact,
                   ),
                 ],
-              ),
+                ),
               const SizedBox(height: 12),
               Row(
                 children: [
@@ -2165,8 +2194,8 @@ class _MetricGrid extends StatelessWidget {
               crossAxisSpacing: mobile ? 8 : 12,
               mainAxisSpacing: mobile ? 8 : 12,
               mainAxisExtent: mobile
-                  ? (largeUi ? 140 : 122)
-                  : (largeUi ? 172 : 148),
+                  ? (largeUi ? 156 : 136)
+                  : (largeUi ? 184 : 160),
             ),
             itemBuilder: (context, index) => cards[index],
           );
@@ -2217,7 +2246,7 @@ class _ReportSectionHeading extends StatelessWidget {
                 title,
                 style: TextStyle(
                   color: _ink,
-                  fontSize: phone ? 13 : 15,
+                  fontSize: phone ? 15 : 15,
                   fontWeight: FontWeight.w900,
                 ),
               ),
@@ -2226,7 +2255,7 @@ class _ReportSectionHeading extends StatelessWidget {
                 subtitle,
                 style: TextStyle(
                   color: _muted,
-                  fontSize: phone ? 10 : 11,
+                  fontSize: phone ? 11.5 : 11,
                   fontWeight: FontWeight.w700,
                 ),
               ),
@@ -2253,6 +2282,19 @@ class _DiscountPromotionsCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final summary = data.summary;
     final compact = MediaQuery.of(context).size.width < 600;
+    final grossSalesAffected = data.promotionDiscounts.fold<double>(
+      0,
+      (total, item) => total + item.gross,
+    );
+    final stats = [
+      _DiscountStat('Total discounts', _money(summary.discounts)),
+      _DiscountStat(
+        'Discounted transactions',
+        '${summary.discountedTransactions}',
+      ),
+      _DiscountStat('Average discount', _money(summary.averageDiscount)),
+      _DiscountStat('Gross sales affected', _money(grossSalesAffected)),
+    ];
     return _ReportCard(
       padding: EdgeInsets.all(compact ? 12 : 18),
       child: Column(
@@ -2261,10 +2303,10 @@ class _DiscountPromotionsCard extends StatelessWidget {
           const _CardTitle(
             title: 'Discounts & Promotions',
             subtitle: 'Redeemed monetary promotions in this date range',
-            icon: Icons.local_offer_outlined,
+            icon: Icons.local_offer_rounded,
             color: _rose,
           ),
-          SizedBox(height: compact ? 12 : 18),
+          SizedBox(height: compact ? 14 : 18),
           if (loading)
             SizedBox(
               height: compact ? 96 : 120,
@@ -2273,94 +2315,221 @@ class _DiscountPromotionsCard extends StatelessWidget {
           else ...[
             LayoutBuilder(
               builder: (context, constraints) {
-                final stats = <Widget>[
-                  _DiscountStat(
-                    'Total discounts',
-                    _money(summary.discounts),
+                final columns = constraints.maxWidth >= 760
+                    ? 4
+                    : constraints.maxWidth >= 320
+                    ? 2
+                    : 1;
+                final gap = compact ? 8.0 : 12.0;
+                final panelPadding = compact ? 8.0 : 10.0;
+                final availableWidth = constraints.maxWidth - panelPadding * 2;
+                final itemWidth = columns == 1
+                    ? availableWidth
+                    : (availableWidth - gap * (columns - 1)) / columns;
+                return Container(
+                  padding: EdgeInsets.all(panelPadding),
+                  decoration: BoxDecoration(
+                    color: _rose.withValues(alpha: 0.025),
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: _rose.withValues(alpha: 0.10)),
                   ),
-                  _DiscountStat(
-                    'Discounted transactions',
-                    '${summary.discountedTransactions}',
-                  ),
-                  _DiscountStat(
-                    'Average discount',
-                    _money(summary.averageDiscount),
-                  ),
-                  _DiscountStat(
-                    'Gross sales affected',
-                    _money(data.promotionDiscounts.fold<double>(
-                      0,
-                      (total, item) => total + item.gross,
-                    )),
-                  ),
-                ];
-                if (constraints.maxWidth >= 760) {
-                  return Row(
+                  child: Wrap(
+                    spacing: gap,
+                    runSpacing: gap,
                     children: [
-                      for (final stat in stats) Expanded(child: stat),
+                      for (final stat in stats)
+                        SizedBox(width: itemWidth, child: stat),
                     ],
-                  );
-                }
-                return Wrap(
-                  spacing: 24,
-                  runSpacing: 12,
-                  children: [
-                    for (final stat in stats)
-                      SizedBox(
-                        width: compact ? 140 : 190,
-                        child: stat,
-                      ),
-                  ],
+                  ),
                 );
               },
             ),
-            const SizedBox(height: 14),
+            SizedBox(height: compact ? 16 : 20),
             if (data.promotionDiscounts.isEmpty)
-              const _EmptyState(
-                icon: Icons.local_offer_outlined,
-                title: 'No monetary promotions redeemed',
-              )
-            else
+              _DiscountEmptyState(compact: compact)
+            else ...[
+              Row(
+                children: [
+                  Text(
+                    'Redeemed promotions',
+                    style: TextStyle(
+                      color: _ink,
+                      fontSize: compact ? 12 : 13,
+                      fontWeight: FontWeight.w900,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(child: Divider(color: _line, height: 1)),
+                ],
+              ),
               for (final promotion in data.promotionDiscounts) ...[
-                const Divider(height: 18),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            promotion.code,
-                            style: const TextStyle(
-                              color: _ink,
-                              fontWeight: FontWeight.w900,
-                            ),
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            '${promotion.uses} use${promotion.uses == 1 ? '' : 's'} · Gross ${_money(promotion.gross)} · Net ${_money(promotion.net)}',
-                            style: const TextStyle(
-                              color: _muted,
-                              fontSize: 12,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Text(
-                      '-${_money(promotion.discount)}',
-                      style: const TextStyle(
-                        color: _rose,
-                        fontWeight: FontWeight.w900,
-                      ),
-                    ),
-                  ],
+                const SizedBox(height: 8),
+                _PromotionActivityRow(
+                  promotion: promotion,
+                  compact: compact,
                 ),
               ],
+            ],
           ],
+        ],
+      ),
+    );
+  }
+}
+
+class _PromotionActivityRow extends StatelessWidget {
+  final _PromotionDiscount promotion;
+  final bool compact;
+
+  const _PromotionActivityRow({
+    required this.promotion,
+    required this.compact,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 10 : 14,
+        vertical: compact ? 10 : 12,
+      ),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _line),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          _SoftIcon(
+            icon: Icons.local_offer_rounded,
+            color: _rose,
+            size: compact ? 34 : 38,
+          ),
+          SizedBox(width: compact ? 9 : 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  promotion.code,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: compact ? 12 : 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  '${promotion.uses} use${promotion.uses == 1 ? '' : 's'} · Gross ${_money(promotion.gross)} · Net ${_money(promotion.net)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _muted,
+                    fontSize: compact ? 10.5 : 11.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          SizedBox(width: compact ? 8 : 12),
+          Container(
+            constraints: BoxConstraints(minWidth: compact ? 70 : 84),
+            padding: EdgeInsets.symmetric(
+              horizontal: compact ? 8 : 10,
+              vertical: compact ? 7 : 8,
+            ),
+            decoration: BoxDecoration(
+              color: _rose.withValues(alpha: 0.08),
+              borderRadius: BorderRadius.circular(9),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  'DISCOUNT',
+                  style: TextStyle(
+                    color: _rose,
+                    fontSize: compact ? 8 : 9,
+                    fontWeight: FontWeight.w900,
+                    letterSpacing: 0.6,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '-${_money(promotion.discount)}',
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    color: _rose,
+                    fontSize: compact ? 12 : 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DiscountEmptyState extends StatelessWidget {
+  final bool compact;
+
+  const _DiscountEmptyState({required this.compact});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: double.infinity,
+      padding: EdgeInsets.symmetric(
+        horizontal: compact ? 12 : 16,
+        vertical: compact ? 14 : 18,
+      ),
+      decoration: BoxDecoration(
+        color: _rose.withValues(alpha: 0.025),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: _rose.withValues(alpha: 0.10)),
+      ),
+      child: Row(
+        children: [
+          _SoftIcon(
+            icon: Icons.local_offer_rounded,
+            color: _muted,
+            size: compact ? 38 : 44,
+          ),
+          SizedBox(width: compact ? 10 : 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'No promotions redeemed yet',
+                  style: TextStyle(
+                    color: _ink,
+                    fontSize: compact ? 12 : 13,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(
+                  'Promotion activity will appear here once a discount is used.',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    color: _muted,
+                    fontSize: compact ? 10.5 : 11.5,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -2374,29 +2543,48 @@ class _DiscountStat extends StatelessWidget {
   const _DiscountStat(this.label, this.value);
 
   @override
-  Widget build(BuildContext context) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: const TextStyle(
-              color: _muted,
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
+  Widget build(BuildContext context) {
+    final phone = MediaQuery.of(context).size.width < 600;
+    return ConstrainedBox(
+      constraints: BoxConstraints(minHeight: phone ? 76 : 82),
+      child: Container(
+        padding: EdgeInsets.symmetric(
+          horizontal: phone ? 12 : 14,
+          vertical: phone ? 10 : 12,
+        ),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: _rose.withValues(alpha: 0.12)),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              label,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: _muted,
+                fontSize: phone ? 10.5 : 11.5,
+                fontWeight: FontWeight.w800,
+              ),
             ),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            value,
-            style: const TextStyle(
-              color: _ink,
-              fontSize: 18,
-              fontWeight: FontWeight.w900,
+            const SizedBox(height: 5),
+            Text(
+              value,
+              style: TextStyle(
+                color: _ink,
+                fontSize: phone ? 18 : 20,
+                fontWeight: FontWeight.w900,
+              ),
             ),
-          ),
-        ],
-      );
-
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _MetricCard extends StatelessWidget {
@@ -2438,25 +2626,33 @@ class _MetricCard extends StatelessWidget {
                 vertical: phone ? 8 : 12,
               ),
               child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _SoftIcon(
-                    icon: icon,
-                    color: color,
-                    size: phone ? 28 : 36,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: [
+                      _SoftIcon(
+                        icon: icon,
+                        color: color,
+                        size: phone ? 32 : 38,
+                      ),
+                      SizedBox(width: phone ? 8 : 10),
+                      Expanded(
+                        child: Text(
+                          title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: _ink,
+                            fontSize: phone ? 12 : 13,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                      ),
+                    ],
                   ),
-                  const Spacer(),
-                  Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: _ink,
-                      fontSize: phone ? 10 : 12,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                  SizedBox(height: phone ? 3 : 6),
+                  SizedBox(height: phone ? 12 : 16),
                   SizedBox(
                     width: double.infinity,
                     child: FittedBox(
@@ -2467,7 +2663,7 @@ class _MetricCard extends StatelessWidget {
                         maxLines: 1,
                         style: TextStyle(
                           color: _ink,
-                          fontSize: phone ? 16 : 23,
+                          fontSize: phone ? 21 : 23,
                           fontWeight: FontWeight.w900,
                         ),
                       ),
@@ -2477,11 +2673,11 @@ class _MetricCard extends StatelessWidget {
                     SizedBox(height: phone ? 2 : 4),
                     Text(
                       detail,
-                      maxLines: 1,
+                      maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         color: _muted,
-                        fontSize: phone ? 9 : 11,
+                        fontSize: phone ? 10.5 : 11,
                         fontWeight: FontWeight.w700,
                       ),
                     ),
@@ -5048,7 +5244,7 @@ class _CardTitle extends StatelessWidget {
                 style: TextStyle(
                   color: _ink,
                   fontWeight: FontWeight.w900,
-                  fontSize: phone ? 14 : 16,
+                  fontSize: phone ? 15 : 16,
                 ),
               ),
               SizedBox(height: phone ? 2 : 3),
@@ -5059,7 +5255,7 @@ class _CardTitle extends StatelessWidget {
                 style: TextStyle(
                   color: _muted,
                   fontWeight: FontWeight.w700,
-                  fontSize: phone ? 11 : 12,
+                  fontSize: phone ? 12 : 12,
                 ),
               ),
             ],
@@ -5111,7 +5307,7 @@ class _ReportCard extends StatelessWidget {
       padding: padding,
       decoration: BoxDecoration(
         color: Colors.white,
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(12),
         border: Border.all(color: _line),
         boxShadow: [
           BoxShadow(
