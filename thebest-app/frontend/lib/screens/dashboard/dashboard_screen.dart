@@ -1929,7 +1929,11 @@ class _TabletOrdersCard extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               'Sales Collected',
-              style: TextStyle(fontSize: 12, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
             const SizedBox(height: 6),
             Text(
@@ -1945,7 +1949,11 @@ class _TabletOrdersCard extends StatelessWidget {
               isLoading
                   ? 'Loading transactions'
                   : '${stats.totalTransactions} paid transactions',
-              style: TextStyle(fontSize: 12, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
           ],
         ),
@@ -2002,7 +2010,11 @@ class _TabletAppointmentCard extends StatelessWidget {
             const SizedBox(height: 16),
             Text(
               'Total',
-              style: TextStyle(fontSize: 12, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
             const SizedBox(height: 10),
             _AppointmentRow(
@@ -2082,6 +2094,9 @@ class _TabletStaffAvailabilityCard extends StatelessWidget {
                     style: TextButton.styleFrom(
                       foregroundColor: const Color(0xFF1B6B72),
                       visualDensity: VisualDensity.compact,
+                      minimumSize: Size.zero,
+                      padding: EdgeInsets.zero,
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     ),
                     child: const Text('View all'),
                   ),
@@ -2140,12 +2155,16 @@ class _TabletOtherCard extends StatelessWidget {
             children: [
               _IconBox(icon: icon, bg: iconBg, color: iconColor),
               const SizedBox(width: 12),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w700,
-                  color: context.appText,
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w700,
+                    color: context.appText,
+                  ),
                 ),
               ),
             ],
@@ -2295,32 +2314,35 @@ class _PhoneLayout extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Top bar ──────────────────────────────────────────
-          _DashboardTopBar(
-            profile: profile,
-            email: email,
-            role: role,
-            isLoadingSettings: isLoadingSettings,
-            notificationCount: notificationCount,
-            onOpenNotifications: onOpenNotifications,
-            onOpenSettings: onOpenSettings,
-            onSwitchOutlet: onSwitchOutlet,
-          ),
-          if (dashboardError != null)
-            _DashboardErrorBanner(
-              message: dashboardError!,
-              onRetry: onRefreshDashboard,
-            ),
+    return LayoutBuilder(
+      builder: (context, constraints) => SingleChildScrollView(
+        child: SizedBox(
+          width: constraints.maxWidth,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // ── Top bar ──────────────────────────────────────────
+              _DashboardTopBar(
+                profile: profile,
+                email: email,
+                role: role,
+                isLoadingSettings: isLoadingSettings,
+                notificationCount: notificationCount,
+                onOpenNotifications: onOpenNotifications,
+                onOpenSettings: onOpenSettings,
+                onSwitchOutlet: onSwitchOutlet,
+              ),
+              if (dashboardError != null)
+                _DashboardErrorBanner(
+                  message: dashboardError!,
+                  onRetry: onRefreshDashboard,
+                ),
 
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                 // ── Main section ─────────────────────────────
                 const _SectionLabel('Main'),
                 const SizedBox(height: 12),
@@ -2380,10 +2402,12 @@ class _PhoneLayout extends StatelessWidget {
                 ),
 
                 const SizedBox(height: 24),
-              ],
-            ),
+                  ],
+                ),
+              ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -2556,7 +2580,11 @@ class _PhoneAppointmentCard extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               'Total Today',
-              style: TextStyle(fontSize: 11, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
             const SizedBox(height: 4),
             Text(
@@ -2575,7 +2603,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFF4CAF50),
-                    fontWeight: FontWeight.w500,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
                 Text(
@@ -2585,7 +2613,7 @@ class _PhoneAppointmentCard extends StatelessWidget {
                   style: const TextStyle(
                     fontSize: 11,
                     color: Color(0xFFF59E0B),
-                    fontWeight: FontWeight.w500,
+                    fontWeight: FontWeight.w700,
                   ),
                 ),
               ],
@@ -2711,7 +2739,11 @@ class _PhonePosCard extends StatelessWidget {
             const SizedBox(height: 10),
             Text(
               'Sales Collected',
-              style: TextStyle(fontSize: 11, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
             const SizedBox(height: 4),
             Text(
@@ -2725,7 +2757,11 @@ class _PhonePosCard extends StatelessWidget {
             const SizedBox(height: 4),
             Text(
               isLoading ? 'Loading' : '${stats.totalTransactions} transactions',
-              style: TextStyle(fontSize: 11, color: context.appMuted),
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: context.appMuted,
+              ),
             ),
           ],
         ),
@@ -2926,6 +2962,9 @@ class _PhoneStaffStatusCard extends StatelessWidget {
                 style: TextButton.styleFrom(
                   visualDensity: VisualDensity.compact,
                   foregroundColor: const Color(0xFF1B6B72),
+                  minimumSize: Size.zero,
+                  padding: EdgeInsets.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
                 child: const Text('View all'),
               ),
@@ -3443,24 +3482,46 @@ class _TodayQueueOverview extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Wrap(
-            spacing: 20,
-            runSpacing: 14,
-            children: [
-              _QueueOverviewPerson(
-                label: 'Stored starter',
-                therapist: queue.starter,
-              ),
-              _QueueOverviewPerson(
-                label: 'Current live Next',
-                therapist: queue.currentNext,
-                showNext: true,
-              ),
-              _QueueOverviewStatus(
-                isManual: queue.isManualOverride,
-                changedAt: changedAt,
-              ),
-            ],
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final overview = <Widget>[
+                _QueueOverviewPerson(
+                  label: 'Stored starter',
+                  therapist: queue.starter,
+                ),
+                _QueueOverviewPerson(
+                  label: 'Current live Next',
+                  therapist: queue.currentNext,
+                  showNext: true,
+                ),
+                _QueueOverviewStatus(
+                  isManual: queue.isManualOverride,
+                  changedAt: changedAt,
+                ),
+              ];
+              if (constraints.maxWidth < 620) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    overview[0],
+                    const SizedBox(height: 14),
+                    overview[1],
+                    const SizedBox(height: 14),
+                    overview[2],
+                  ],
+                );
+              }
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(child: overview[0]),
+                  const SizedBox(width: 20),
+                  Expanded(child: overview[1]),
+                  const SizedBox(width: 20),
+                  Expanded(child: overview[2]),
+                ],
+              );
+            },
           ),
           if ((queue.reason ?? '').trim().isNotEmpty) ...[
             const SizedBox(height: 12),
@@ -3493,45 +3554,42 @@ class _QueueOverviewPerson extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final person = therapist;
-    return SizedBox(
-      width: 190,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            label,
-            style: TextStyle(fontSize: 10.5, color: context.appMuted),
-          ),
-          const SizedBox(height: 7),
-          Row(
-            children: [
-              _TodayQueueAvatar(therapist: person, size: 34),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Text(
-                  person?.name ?? 'Not set',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w800,
-                    color: context.appText,
-                  ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: TextStyle(fontSize: 10.5, color: context.appMuted),
+        ),
+        const SizedBox(height: 7),
+        Row(
+          children: [
+            _TodayQueueAvatar(therapist: person, size: 34),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                person?.name ?? 'Not set',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w800,
+                  color: context.appText,
                 ),
               ),
-              if (showNext && person != null)
-                const Padding(
-                  padding: EdgeInsets.only(left: 5),
-                  child: Icon(
-                    Icons.auto_awesome,
-                    size: 15,
-                    color: Color(0xFF1B6B72),
-                  ),
+            ),
+            if (showNext && person != null)
+              const Padding(
+                padding: EdgeInsets.only(left: 5),
+                child: Icon(
+                  Icons.auto_awesome_rounded,
+                  size: 16,
+                  color: Color(0xFF1B6B72),
                 ),
-            ],
-          ),
-        ],
-      ),
+              ),
+          ],
+        ),
+      ],
     );
   }
 }
@@ -3547,44 +3605,41 @@ class _QueueOverviewStatus extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: 190,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Starter source',
-            style: TextStyle(fontSize: 10.5, color: context.appMuted),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Starter source',
+          style: TextStyle(fontSize: 10.5, color: context.appMuted),
+        ),
+        const SizedBox(height: 7),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+          decoration: BoxDecoration(
+            color: isManual
+                ? const Color(0xFFFFF7ED)
+                : const Color(0xFFECFDF3),
+            borderRadius: BorderRadius.circular(999),
           ),
-          const SizedBox(height: 7),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-            decoration: BoxDecoration(
+          child: Text(
+            isManual ? 'Manual override' : 'Automatic',
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w800,
               color: isManual
-                  ? const Color(0xFFFFF7ED)
-                  : const Color(0xFFECFDF3),
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: Text(
-              isManual ? 'Manual override' : 'Automatic',
-              style: TextStyle(
-                fontSize: 10.5,
-                fontWeight: FontWeight.w800,
-                color: isManual
-                    ? const Color(0xFFB45309)
-                    : const Color(0xFF15803D),
-              ),
+                  ? const Color(0xFFB45309)
+                  : const Color(0xFF15803D),
             ),
           ),
-          if (changedAt != null) ...[
-            const SizedBox(height: 5),
-            Text(
-              'Changed ${DateFormat('h:mm a').format(changedAt!)}',
-              style: TextStyle(fontSize: 10, color: context.appMuted),
-            ),
-          ],
+        ),
+        if (changedAt != null) ...[
+          const SizedBox(height: 5),
+          Text(
+            'Changed ${DateFormat('h:mm a').format(changedAt!)}',
+            style: TextStyle(fontSize: 10, color: context.appMuted),
+          ),
         ],
-      ),
+      ],
     );
   }
 }
@@ -3867,12 +3922,16 @@ class _PhoneOtherCard extends StatelessWidget {
             children: [
               _IconBox(icon: icon, bg: iconBg, color: iconColor, size: 32),
               const SizedBox(width: 10),
-              Text(
-                label,
-                style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: context.appText,
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w700,
+                    color: context.appText,
+                  ),
                 ),
               ),
             ],
@@ -5761,7 +5820,14 @@ class _AppointmentRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label, style: TextStyle(fontSize: 14, color: context.appText)),
+        Text(
+          label,
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w700,
+            color: context.appText,
+          ),
+        ),
         Text(
           count,
           style: const TextStyle(
@@ -5838,8 +5904,34 @@ class _LiveTherapistQueueSummary extends StatelessWidget {
     final free = therapists.where((therapist) => therapist.isFree).length;
     final busy = total - free;
 
-    // Deliberately one line tall: this is a glanceable status strip above the
-    // therapist cards, not a stat panel competing with them.
+    // Keep the label and counts on one glanceable row. Compact metrics use
+    // tighter separators so the full "Live Availability" label remains clear
+    // on a narrow phone.
+    final metrics = Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _QueueMetric(
+          label: 'Free',
+          value: free,
+          color: const Color(0xFF16A34A),
+          compact: compact,
+        ),
+        _QueueMetricDivider(compact: compact),
+        _QueueMetric(
+          label: 'Busy',
+          value: busy,
+          color: const Color(0xFFD97706),
+          compact: compact,
+        ),
+        _QueueMetricDivider(compact: compact),
+        _QueueMetric(
+          label: 'Total',
+          value: total,
+          color: context.appMuted,
+          compact: compact,
+        ),
+      ],
+    );
     return Container(
       width: double.infinity,
       padding: EdgeInsets.symmetric(
@@ -5855,34 +5947,28 @@ class _LiveTherapistQueueSummary extends StatelessWidget {
         children: [
           const _LiveQueueDot(),
           const SizedBox(width: 7),
-          Flexible(
+          Expanded(
             child: Text(
-              'Live team availability',
+              'Live Availability',
+              maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: TextStyle(
-                fontSize: 11,
+                fontSize: compact ? 10.5 : 11,
                 fontWeight: FontWeight.w700,
                 color: context.appMuted,
               ),
             ),
           ),
-          const Spacer(),
-          _QueueMetric(
-            label: 'Free',
-            value: free,
-            color: const Color(0xFF16A34A),
-          ),
-          _QueueMetricDivider(),
-          _QueueMetric(
-            label: 'Busy',
-            value: busy,
-            color: const Color(0xFFD97706),
-          ),
-          _QueueMetricDivider(),
-          _QueueMetric(
-            label: 'On shift',
-            value: total,
-            color: context.appMuted,
+          SizedBox(width: compact ? 6 : 12),
+          Expanded(
+            child: Align(
+              alignment: Alignment.centerRight,
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: metrics,
+              ),
+            ),
           ),
         ],
       ),
@@ -5907,14 +5993,16 @@ class _LiveQueueDot extends StatelessWidget {
 }
 
 class _QueueMetricDivider extends StatelessWidget {
-  const _QueueMetricDivider();
+  const _QueueMetricDivider({this.compact = false});
+
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
     return Container(
       width: 1,
-      height: 11,
-      margin: const EdgeInsets.symmetric(horizontal: 9),
+      height: compact ? 10 : 11,
+      margin: EdgeInsets.symmetric(horizontal: compact ? 5 : 9),
       color: context.appBorder,
     );
   }
@@ -5925,11 +6013,13 @@ class _QueueMetric extends StatelessWidget {
     required this.label,
     required this.value,
     required this.color,
+    this.compact = false,
   });
 
   final String label;
   final int value;
   final Color color;
+  final bool compact;
 
   @override
   Widget build(BuildContext context) {
@@ -5941,17 +6031,17 @@ class _QueueMetric extends StatelessWidget {
         Text(
           '$value',
           style: TextStyle(
-            fontSize: 13,
+            fontSize: compact ? 12 : 13,
             height: 1,
             fontWeight: FontWeight.w800,
             color: color,
           ),
         ),
-        const SizedBox(width: 4),
+        SizedBox(width: compact ? 3 : 4),
         Text(
           label,
           style: TextStyle(
-            fontSize: 10.5,
+            fontSize: compact ? 10 : 10.5,
             height: 1,
             fontWeight: FontWeight.w600,
             color: context.appMuted,
@@ -6032,15 +6122,30 @@ class _TherapistQueueCard extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  therapist.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w800,
-                    color: context.appText,
-                  ),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        therapist.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w800,
+                          color: context.appText,
+                        ),
+                      ),
+                    ),
+                    if (therapist.isNext)
+                      const Padding(
+                        padding: EdgeInsets.only(left: 5),
+                        child: Icon(
+                          Icons.auto_awesome_rounded,
+                          size: 16,
+                          color: Color(0xFF1B6B72),
+                        ),
+                      ),
+                  ],
                 ),
                 if (therapist.reservationStatus.isNotEmpty) ...[
                   const SizedBox(height: 3),

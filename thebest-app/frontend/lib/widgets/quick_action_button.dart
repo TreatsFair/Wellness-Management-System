@@ -14,6 +14,7 @@ class QuickActionButton extends StatelessWidget {
   /// When true the tile is filled with the brand color (the single primary
   /// action on a screen); otherwise it is a white card.
   final bool emphasized;
+  final Color? accentColor;
 
   const QuickActionButton({
     super.key,
@@ -22,14 +23,16 @@ class QuickActionButton extends StatelessWidget {
     required this.onTap,
     this.sublabel,
     this.emphasized = false,
+    this.accentColor,
   });
 
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
+    final accent = accentColor ?? scheme.primary;
     final fg = emphasized ? Colors.white : scheme.onSurface;
-    final iconBg = emphasized ? Colors.white24 : scheme.primaryContainer;
-    final iconFg = emphasized ? Colors.white : scheme.onPrimaryContainer;
+    final iconBg = emphasized ? Colors.white24 : accent.withValues(alpha: 0.12);
+    final iconFg = emphasized ? Colors.white : accent;
     return AppCard(
       onTap: onTap,
       color: emphasized ? AppColors.primary : null,
@@ -57,7 +60,7 @@ class QuickActionButton extends StatelessWidget {
               children: [
                 Text(
                   label,
-                  maxLines: 1,
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 15,
@@ -68,19 +71,23 @@ class QuickActionButton extends StatelessWidget {
                 if (sublabel != null)
                   Text(
                     sublabel!,
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 12,
+                      fontSize: 12.5,
                       color: emphasized ? Colors.white70 : scheme.onSurfaceVariant,
                     ),
                   ),
               ],
             ),
           ),
-          Icon(
-            Icons.chevron_right,
-            color: emphasized ? Colors.white70 : scheme.onSurfaceVariant,
+          SizedBox(
+            width: 40,
+            height: 40,
+            child: Icon(
+              Icons.chevron_right_rounded,
+              color: emphasized ? Colors.white70 : scheme.onSurfaceVariant,
+            ),
           ),
         ],
       ),

@@ -178,19 +178,13 @@ class _MoreScreen extends StatelessWidget {
       body: ListView(
         padding: const EdgeInsets.all(AppSpacing.lg),
         children: [
-          const Padding(
-            padding: EdgeInsets.only(
-              left: AppSpacing.xs,
-              bottom: AppSpacing.md,
-            ),
-            child: Text('More', style: AppText.title),
-          ),
-          const SectionHeader('Daily reference'),
+          const SectionHeader('Daily operations'),
           const SizedBox(height: AppSpacing.md),
           QuickActionButton(
-            icon: Icons.point_of_sale_outlined,
+            icon: Icons.point_of_sale_rounded,
             label: 'Walk-in order',
             sublabel: 'Create a walk-in service order',
+            accentColor: AppColors.accent,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const WalkInPosScreen()),
@@ -198,21 +192,23 @@ class _MoreScreen extends StatelessWidget {
           ),
           const SizedBox(height: AppSpacing.md),
           QuickActionButton(
-            icon: Icons.people_outline,
+            icon: Icons.people_alt_rounded,
             label: 'Members',
             sublabel: 'Customer list and details',
+            accentColor: AppColors.info,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(builder: (_) => const CustomerScreen()),
             ),
           ),
           const SizedBox(height: AppSpacing.xl),
-          const SectionHeader('Setup'),
+          const SectionHeader('Business management'),
           const SizedBox(height: AppSpacing.md),
           QuickActionButton(
-            icon: Icons.tune_outlined,
+            icon: Icons.tune_rounded,
             label: 'Management',
             sublabel: 'Services, rooms, therapists, online booking',
+            accentColor: AppColors.primary,
             onTap: () => Navigator.push(
               context,
               MaterialPageRoute(
@@ -221,11 +217,14 @@ class _MoreScreen extends StatelessWidget {
             ),
           ),
           if (isAdmin) ...[
+            const SizedBox(height: AppSpacing.xl),
+            const SectionHeader('Business insights'),
             const SizedBox(height: AppSpacing.md),
             QuickActionButton(
-              icon: Icons.bar_chart_outlined,
+              icon: Icons.insights_rounded,
               label: 'Reports',
               sublabel: 'Sales, commissions, and analytics',
+              accentColor: AppColors.primary,
               onTap: () => Navigator.push(
                 context,
                 MaterialPageRoute(

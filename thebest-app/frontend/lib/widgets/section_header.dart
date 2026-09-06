@@ -14,7 +14,30 @@ class SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Expanded(child: Text(title, style: AppText.heading)),
+        Expanded(
+          child: Row(
+            children: [
+              Container(
+                width: 4,
+                height: 19,
+                decoration: BoxDecoration(
+                  color: AppColors.primary,
+                  borderRadius: BorderRadius.circular(AppRadius.pill),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: Text(
+                  title,
+                  style: AppText.heading.copyWith(
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.15,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
         if (actionLabel != null)
           TextButton(
             onPressed: onAction,
