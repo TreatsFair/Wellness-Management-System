@@ -315,22 +315,68 @@ function isPromotionError(error: unknown): boolean {
   return Boolean(code?.startsWith("PROMOTION_"));
 }
 
+function operationalErrorLabel(error: unknown): string {
+  return rpcErrorCode(error) ?? (error instanceof Error ? error.name : "UnknownError");
+}
+
+const GENERIC_PROMOTION_ERROR_CODES = new Set([
+  "PROMOTION_INVALID",
+  "PROMOTION_NOT_FOUND",
+  "PROMOTION_INACTIVE",
+  "PROMOTION_EXPIRED",
+  "PROMOTION_FULLY_REDEEMED",
+  "PROMOTION_ALREADY_REDEEMED",
+]);
+const GENERIC_PROMOTION_ERROR_MESSAGE = "The promotional code is invalid.";
+const FULLY_REDEEMED_PROMOTION_MESSAGE = "This promotion has been fully redeemed.";
+
+function publicPromotionFailure(
+  request: Request,
+  message: string,
+  status: number,
+  internalCode: string | null | undefined,
+  promotionUsageType: string | null = null,
+): Response {
+  const code = String(internalCode ?? "");
+  if (code === "PROMOTION_FULLY_REDEEMED" && promotionUsageType === "multi_use") {
+    return fail(request, FULLY_REDEEMED_PROMOTION_MESSAGE, status, code);
+  }
+  if (GENERIC_PROMOTION_ERROR_CODES.has(code)) {
+    return fail(request, GENERIC_PROMOTION_ERROR_MESSAGE, status, "PROMOTION_INVALID");
+  }
+  return fail(request, message, status, code || "PROMOTION_INVALID");
+}
+
 type PublicBookingPricing = {
   subtotal_amount: number;
   discount_amount: number;
   final_amount: number;
   promotion_id: string | null;
-  promotion_code_id: string | null;
   promotion_code: string | null;
-  promotion_name: string | null;
   benefit_type: string | null;
   benefit_value: number | null;
-  free_addon_service_id: string | null;
+  maximum_discount?: number | null;
   free_addon_service_name: string | null;
-  pricing_snapshot: Record<string, unknown> | null;
-  status: string;
-  expires_at: string | null;
 };
+
+function optionalNumber(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function maximumDiscountFromRow(row: Record<string, unknown>): number | null | undefined {
+  if (Object.prototype.hasOwnProperty.call(row, "maximum_discount")) {
+    return optionalNumber(row.maximum_discount);
+  }
+  const snapshot = row.pricing_snapshot && typeof row.pricing_snapshot === "object"
+    ? row.pricing_snapshot as Record<string, unknown>
+    : null;
+  if (snapshot && Object.prototype.hasOwnProperty.call(snapshot, "maximum_discount")) {
+    return optionalNumber(snapshot.maximum_discount);
+  }
+  return undefined;
+}
 
 function publicBookingPricingRow(row: Record<string, unknown>): PublicBookingPricing {
   return {
@@ -338,18 +384,11 @@ function publicBookingPricingRow(row: Record<string, unknown>): PublicBookingPri
     discount_amount: Number(row.discount_amount ?? 0),
     final_amount: Number(row.final_amount ?? 0),
     promotion_id: row.promotion_id ? String(row.promotion_id) : null,
-    promotion_code_id: row.promotion_code_id ? String(row.promotion_code_id) : null,
     promotion_code: row.promotion_code ? String(row.promotion_code) : null,
-    promotion_name: row.promotion_name ? String(row.promotion_name) : null,
     benefit_type: row.benefit_type ? String(row.benefit_type) : null,
     benefit_value: row.benefit_value == null ? null : Number(row.benefit_value),
-    free_addon_service_id: row.free_addon_service_id ? String(row.free_addon_service_id) : null,
+    maximum_discount: maximumDiscountFromRow(row),
     free_addon_service_name: row.free_addon_service_name ? String(row.free_addon_service_name) : null,
-    pricing_snapshot: row.pricing_snapshot && typeof row.pricing_snapshot === "object"
-      ? row.pricing_snapshot as Record<string, unknown>
-      : null,
-    status: String(row.status ?? ""),
-    expires_at: row.expires_at ? String(row.expires_at) : null,
   };
 }
 function pathOf(request: Request): string {
@@ -616,21 +655,98 @@ async function rpcScalar<T = string>(
   return data as T | null;
 }
 
+type BookingPromotionMetadata = {
+  usage_type?: unknown;
+  maximum_discount?: unknown;
+};
+
+async function bookingPromotionMetadata(args: {
+  promotionId?: string | null;
+  code?: string | null;
+}): Promise<BookingPromotionMetadata | null> {
+  const { data, error } = await supabase.rpc("get_booking_promotion_metadata", {
+    p_promotion_id: args.promotionId ?? null,
+    p_code: args.code ?? null,
+  });
+  if (error) throw error;
+  const row = Array.isArray(data) ? data[0] : data;
+  return row && typeof row === "object" ? row as BookingPromotionMetadata : null;
+}
+
+// This lookup only decides whether a fully redeemed code is reusable or
+// single-use. It is deliberately silent on failure and never logs the code.
+async function promotionUsageTypeForCode(code: string): Promise<string | null> {
+  const normalizedCode = code.trim().toUpperCase();
+  if (!normalizedCode) return null;
+  try {
+    const metadata = await bookingPromotionMetadata({ code: normalizedCode });
+    const usageType = String(metadata?.usage_type ?? "");
+    return usageType || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+const promotionMaximumDiscountCache = new Map<
+  string,
+  { value: number | null; expiresAt: number }
+>();
+const PROMOTION_METADATA_CACHE_MS = 60_000;
+
+async function promotionMaximumDiscount(promotionId: string): Promise<number | null> {
+  const cached = promotionMaximumDiscountCache.get(promotionId);
+  if (cached && cached.expiresAt > Date.now()) return cached.value;
+
+  const metadata = await bookingPromotionMetadata({ promotionId });
+  const value = optionalNumber(metadata?.maximum_discount);
+  promotionMaximumDiscountCache.set(promotionId, {
+    value,
+    expiresAt: Date.now() + PROMOTION_METADATA_CACHE_MS,
+  });
+  return value;
+}
+
 async function publicBookingPricing(token: string): Promise<PublicBookingPricing | null> {
   const rows = await rpc("get_public_booking_pricing", { p_token: token }) as Array<Record<string, unknown>>;
-  return rows[0] ? publicBookingPricingRow(rows[0]) : null;
+  const pricing = rows[0] ? publicBookingPricingRow(rows[0]) : null;
+  if (
+    pricing?.promotion_id &&
+    pricing.benefit_type === "percentage_discount" &&
+    pricing.maximum_discount == null
+  ) {
+    try {
+      pricing.maximum_discount = await promotionMaximumDiscount(pricing.promotion_id);
+    } catch (error) {
+      // The cap is display metadata only; never let an optional lookup break
+      // server-authoritative pricing or an otherwise valid booking.
+      console.error("Unable to load optional promotion display metadata", error);
+      pricing.maximum_discount = null;
+    }
+  }
+  return pricing;
+}
+
+function publicPricingPayload(pricing: PublicBookingPricing | null): Record<string, unknown> | null {
+  if (!pricing) return null;
+  return {
+    subtotal_amount: pricing.subtotal_amount,
+    discount_amount: pricing.discount_amount,
+    final_amount: pricing.final_amount,
+    promotion_code: pricing.promotion_code,
+    benefit_type: pricing.benefit_type,
+    benefit_value: pricing.benefit_value,
+    maximum_discount: pricing.maximum_discount ?? null,
+    free_addon_service_name: pricing.free_addon_service_name,
+  };
 }
 
 function promotionPayload(pricing: PublicBookingPricing | null): Record<string, unknown> | null {
   if (!pricing?.promotion_code) return null;
   return {
-    id: pricing.promotion_id,
-    code_id: pricing.promotion_code_id,
     code: pricing.promotion_code,
-    name: pricing.promotion_name,
     benefit_type: pricing.benefit_type,
     benefit_value: pricing.benefit_value,
-    free_addon_service_id: pricing.free_addon_service_id,
+    maximum_discount: pricing.maximum_discount ?? null,
     free_addon_service_name: pricing.free_addon_service_name,
   };
 }
@@ -974,13 +1090,17 @@ async function route(request: Request): Promise<Response> {
         total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
         guest_count: Number(hold.guest_count),
         status: "pending_payment",
-        pricing,
+        pricing: publicPricingPayload(pricing),
         promotion: promotionPayload(pricing),
       } }, 201);
     } catch (error) {
       const message = errorMessage(error);
       if (isPromotionError(error)) {
-        return fail(request, message, 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+        const failureCode = rpcErrorCode(error);
+        const usageType = failureCode === "PROMOTION_FULLY_REDEEMED"
+          ? await promotionUsageTypeForCode(promotionCode)
+          : null;
+        return publicPromotionFailure(request, message, 422, failureCode, usageType);
       }
       if (/no longer available|already booked|capacity/i.test(message)) {
         return fail(request, "That time can no longer fit the whole group — there may not be enough masseurs matching everyone's preference. Please pick another time.", 409);
@@ -1020,13 +1140,17 @@ async function route(request: Request): Promise<Response> {
         token: hold.hold_token, expires_at: hold.hold_expires_at,
         total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
         duration_minutes: Number(hold.duration_minutes), status: "pending_payment",
-        pricing,
+        pricing: publicPricingPayload(pricing),
         promotion: promotionPayload(pricing),
       } }, 201);
     } catch (error) {
       const message = errorMessage(error);
       if (isPromotionError(error)) {
-        return fail(request, message, 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+        const failureCode = rpcErrorCode(error);
+        const usageType = failureCode === "PROMOTION_FULLY_REDEEMED"
+          ? await promotionUsageTypeForCode(promotionCode)
+          : null;
+        return publicPromotionFailure(request, message, 422, failureCode, usageType);
       }
       if (/no longer available/i.test(message)) return fail(request, "That time was just taken. Please choose another time.", 409);
       throw error;
@@ -1048,18 +1172,30 @@ async function route(request: Request): Promise<Response> {
       }) as Array<Record<string, unknown>>;
       const result = rows[0];
       if (!result?.success) {
-        return fail(
+        const failureCode = String(result?.error_code ?? "PROMOTION_INVALID");
+        const usageType = failureCode === "PROMOTION_FULLY_REDEEMED"
+          ? await promotionUsageTypeForCode(code)
+          : null;
+        return publicPromotionFailure(
           request,
           String(result?.error_message ?? "Promotion could not be applied."),
           422,
-          String(result?.error_code ?? "PROMOTION_INVALID"),
+          failureCode,
+          usageType,
         );
       }
       const pricing = await publicBookingPricing(token);
-      return json(request, { promotion: promotionPayload(pricing), pricing });
+      return json(request, {
+        promotion: promotionPayload(pricing),
+        pricing: publicPricingPayload(pricing),
+      });
     } catch (error) {
       if (isPromotionError(error)) {
-        return fail(request, errorMessage(error), 422, rpcErrorCode(error) ?? "PROMOTION_INVALID");
+        const failureCode = rpcErrorCode(error);
+        const usageType = failureCode === "PROMOTION_FULLY_REDEEMED"
+          ? await promotionUsageTypeForCode(code)
+          : null;
+        return publicPromotionFailure(request, errorMessage(error), 422, failureCode, usageType);
       }
       throw error;
     }
@@ -1073,7 +1209,7 @@ async function route(request: Request): Promise<Response> {
     const rows = await rpc("remove_public_booking_promotion", { p_token: token }) as Array<Record<string, unknown>>;
     const result = rows[0];
     if (!result?.success) {
-      return fail(
+      return publicPromotionFailure(
         request,
         String(result?.error_message ?? "Promotion could not be removed."),
         422,
@@ -1081,7 +1217,7 @@ async function route(request: Request): Promise<Response> {
       );
     }
     const pricing = await publicBookingPricing(token);
-    return json(request, { pricing, promotion: null });
+    return json(request, { pricing: publicPricingPayload(pricing), promotion: null });
   }
   if (request.method === "POST" && path === "/booking-holds/pay") {
     if (!BILLPLZ_CONFIGURED) return fail(request, "Payment is not configured yet.", 503);
@@ -1306,7 +1442,7 @@ async function route(request: Request): Promise<Response> {
       start_at: hold.start_at,
       end_at: hold.end_at,
       guest_count: Number(hold.guest_count ?? 1),
-      pricing,
+      pricing: publicPricingPayload(pricing),
       promotion: promotionPayload(pricing),
       // Same receipt_number staff see in the app's transaction record — null until
       // the Billplz webhook has confirmed payment and created that row.
@@ -1319,5 +1455,10 @@ async function route(request: Request): Promise<Response> {
 Deno.serve(async (request) => {
   if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: responseHeaders(request) });
   try { return await route(request); }
-  catch (error) { console.error(error); return fail(request, "The booking service is temporarily unavailable", 500); }
+  catch (error) {
+    // Do not serialize request bodies or arbitrary database errors: public
+    // promo codes must never become an accidental log field.
+    console.error("Booking service request failed", operationalErrorLabel(error));
+    return fail(request, "The booking service is temporarily unavailable", 500);
+  }
 });
