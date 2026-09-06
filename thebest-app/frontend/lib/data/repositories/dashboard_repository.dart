@@ -75,7 +75,10 @@ class DashboardRepository {
       ascending: false,
     );
     return rows.where((row) {
-      final createdAt = asDateTime(row['createdAt']);
+      // created_at is timestamptz. Compare the instant in the device's local
+      // business timezone so transactions between midnight and 08:00 MYT stay
+      // on the correct Dashboard day.
+      final createdAt = asDateTime(row['createdAt'])?.toLocal();
       return createdAt != null && dateKey(createdAt) == key;
     }).toList();
   }
@@ -91,7 +94,7 @@ class DashboardRepository {
       ascending: false,
     );
     return rows.where((row) {
-      final createdAt = asDateTime(row['createdAt']);
+      final createdAt = asDateTime(row['createdAt'])?.toLocal();
       if (createdAt == null) return false;
       final key = dateKey(createdAt);
       return key.compareTo(startKey) >= 0 && key.compareTo(endKey) < 0;
