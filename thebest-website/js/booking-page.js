@@ -6,6 +6,13 @@ const fallbackOutlets = {
 const api = window.BookingApi;
 const outlets = JSON.parse(JSON.stringify(fallbackOutlets));
 const MAX_GUESTS = 6;
+const ONLINE_PAYMENT_ENABLED =
+  window.BOOKING_CONFIG?.onlinePaymentEnabled === true;
+const ONLINE_PAYMENT_OUTLETS = new Set(
+  Array.isArray(window.BOOKING_CONFIG?.onlinePaymentOutletCodes)
+    ? window.BOOKING_CONFIG.onlinePaymentOutletCodes
+    : [],
+);
 const BOOKING_ROUTE_OUTLETS = {
   "/booking-taman-wahyu": "taman-wahyu",
   "/booking-pv128": "pv128",
@@ -48,7 +55,7 @@ const state = {
   promotionMessageIsError: false,
   promotionBusy: false,
   promotionExpanded: false,
-  paymentUrl: "",
+  paymentHandoff: null,
   appointment: null,
 };
 
@@ -80,6 +87,7 @@ const summaryOverlay = document.querySelector("#summary-overlay");
 const bookingFieldSelector = ".details-form input, .details-form textarea, .details-form select, #promotion-box input, #promotion-box textarea, #promotion-box select";
 const paymentDeadline = document.querySelector("#payment-deadline");
 const paymentCountdown = document.querySelector("#payment-countdown");
+const comingSoonDialog = document.querySelector("#coming-soon-dialog");
 const stepNames = ["Outlet", "Guests", "Treatments", "Date & time", "Billing"];
 let dateRequestSerial = 0;
 let holdCountdownTimer = null;
@@ -194,7 +202,6 @@ function persistBookingSession() {
       time: state.time,
       hold: state.hold,
       holdFingerprint: state.holdFingerprint,
-      paymentUrl: state.paymentUrl,
       form: formSnapshot(),
     }));
   } catch (_) {
@@ -221,7 +228,7 @@ function restoreBookingSession() {
   state.hold = saved.hold?.token ? saved.hold : null;
   state.holdFingerprint = typeof saved.holdFingerprint === "string" ? saved.holdFingerprint : "";
   state.promotion = saved.hold?.promotion || null;
-  state.paymentUrl = typeof saved.paymentUrl === "string" ? saved.paymentUrl : "";
+  state.paymentHandoff = null;
   state.step = Math.min(5, Math.max(1, Number(saved.step) || 1));
   applyFormSnapshot(saved.form);
   if (state.hold?.token) {
@@ -249,7 +256,7 @@ function clearActiveHold() {
   state.hold = null;
   state.holdFingerprint = "";
   state.promotion = null;
-  state.paymentUrl = "";
+  state.paymentHandoff = null;
   holdExpiryInProgress = false;
   if (holdCountdownTimer) clearInterval(holdCountdownTimer);
   holdCountdownTimer = null;
@@ -435,6 +442,20 @@ function showNotice(message, isError = false) {
   notice.classList.toggle("is-error", isError);
 }
 function clearNotice() { document.querySelector(".booking-mode-notice")?.remove(); }
+function showComingSoon() {
+  if (comingSoonDialog && !comingSoonDialog.open) {
+    comingSoonDialog.showModal();
+    return;
+  }
+  showNotice("Online payment is coming soon. Please check back shortly.");
+}
+
+function onlinePaymentEnabledForOutlet() {
+  return ONLINE_PAYMENT_ENABLED &&
+    Boolean(state.outlet) &&
+    (ONLINE_PAYMENT_OUTLETS.size === 0 ||
+      ONLINE_PAYMENT_OUTLETS.has(state.outlet));
+}
 
 async function loadOutlets() {
   const loading = document.querySelector("#outlet-loading");
@@ -1170,7 +1191,7 @@ async function applyPromotionCode() {
           promotion: applied.promotion,
         };
         state.promotion = applied.promotion;
-        state.paymentUrl = "";
+        state.paymentHandoff = null;
         setPromotionMessage("");
         persistBookingSession();
         return;
@@ -1190,7 +1211,7 @@ async function applyPromotionCode() {
     state.hold = payload.hold;
     state.holdFingerprint = fingerprint;
     state.promotion = payload.hold?.promotion || null;
-    state.paymentUrl = "";
+    state.paymentHandoff = null;
     state.appointment = null;
     setPromotionMessage("");
     persistBookingSession();
@@ -1240,7 +1261,7 @@ async function removePromotionCode() {
           pricing: removed.pricing,
           promotion: null,
         };
-        state.paymentUrl = "";
+        state.paymentHandoff = null;
       } else {
         clearActiveHold();
       }
@@ -1258,7 +1279,87 @@ async function removePromotionCode() {
   }
 }
 
+const FIUU_PAYMENT_HOSTS = new Set([
+  "sandbox-payment.fiuu.com",
+  "pay.fiuu.com",
+]);
+
+function submitHostedPayment(handoff) {
+  if (typeof handoff?.url === "string" && handoff.url) {
+    let legacyUrl;
+    try {
+      legacyUrl = new URL(handoff.url);
+    } catch (_) {
+      throw new Error("The secure payment destination is invalid.");
+    }
+    if (
+      legacyUrl.protocol !== "https:" ||
+      !["www.billplz.com", "www.billplz-sandbox.com"].includes(
+        legacyUrl.hostname,
+      )
+    ) {
+      throw new Error("The secure payment destination is invalid.");
+    }
+    window.location.assign(legacyUrl.toString());
+    return;
+  }
+
+  const fields = handoff?.fields;
+  let action;
+  try {
+    action = new URL(String(handoff?.action || ""));
+  } catch (_) {
+    throw new Error("The secure payment destination is invalid.");
+  }
+  if (
+    action.protocol !== "https:" ||
+    !FIUU_PAYMENT_HOSTS.has(action.hostname) ||
+    !/^\/RMS\/pay\/[A-Za-z0-9_-]+\/$/.test(action.pathname) ||
+    !fields ||
+    typeof fields !== "object" ||
+    Array.isArray(fields)
+  ) {
+    throw new Error("The secure payment handoff is invalid.");
+  }
+  for (const required of [
+    "amount",
+    "orderid",
+    "vcode",
+    "PaymentExpirationTime",
+    "waittime",
+    "returnurl",
+    "callbackurl",
+    "cancelurl",
+  ]) {
+    if (typeof fields[required] !== "string" || !fields[required].trim()) {
+      throw new Error("The secure payment handoff is incomplete.");
+    }
+  }
+
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = action.toString();
+  form.acceptCharset = "UTF-8";
+  form.hidden = true;
+  for (const [name, value] of Object.entries(fields)) {
+    if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(name) || typeof value !== "string") {
+      throw new Error("The secure payment handoff contains an invalid field.");
+    }
+    const input = document.createElement("input");
+    input.type = "hidden";
+    input.name = name;
+    input.value = value;
+    form.appendChild(input);
+  }
+  document.body.appendChild(form);
+  form.submit();
+}
+
 async function redirectActivePayment() {
+  if (!onlinePaymentEnabledForOutlet()) {
+    showComingSoon();
+    return;
+  }
   if (!state.hold?.token) return;
   if (holdRemainingMs() <= 0) {
     await expireActiveHold();
@@ -1267,12 +1368,15 @@ async function redirectActivePayment() {
   nextButton.disabled = true;
   nextButton.textContent = "Opening secure payment...";
   try {
-    if (!state.paymentUrl) {
-      const pay = await api.payHold(state.hold.token, BOOKING_RETURN_PATH);
-      state.paymentUrl = pay.url;
+    if (!state.paymentHandoff) {
+      state.paymentHandoff = await api.payHold(
+        state.hold.token,
+        BOOKING_RETURN_PATH,
+      );
     }
-    persistBookingSession();
-    window.location.assign(state.paymentUrl);
+    const paymentHandoff = state.paymentHandoff;
+    state.paymentHandoff = null;
+    submitHostedPayment(paymentHandoff);
   } catch (error) {
     if (error.status === 409) {
       await expireActiveHold();
@@ -1285,6 +1389,10 @@ async function redirectActivePayment() {
 }
 
 async function submitHold() {
+  if (!onlinePaymentEnabledForOutlet()) {
+    showComingSoon();
+    return;
+  }
   const contactDetailsValid = validateBillingFields({ showErrors: true });
   if (!contactDetailsValid || !detailsForm.reportValidity() || !state.time) {
     detailsForm.querySelector(":invalid")?.focus();
@@ -1338,13 +1446,15 @@ async function submitHold() {
     state.hold = payload.hold;
     state.holdFingerprint = fingerprint;
     state.promotion = payload.hold?.promotion || null;
-    state.paymentUrl = "";
+    state.paymentHandoff = null;
     state.appointment = null;
     let holdNoticeMessage = null;
     try {
       nextButton.textContent = "Preparing secure payment...";
-      const pay = await api.payHold(payload.hold.token, BOOKING_RETURN_PATH);
-      state.paymentUrl = pay.url;
+      state.paymentHandoff = await api.payHold(
+        payload.hold.token,
+        BOOKING_RETURN_PATH,
+      );
     } catch (payError) {
       if (window.BOOKING_CONFIG?.testAutoConfirm) {
         try { state.appointment = (await api.confirmHold(payload.hold.token)).appointment; }
@@ -1357,7 +1467,7 @@ async function submitHold() {
     persistBookingSession();
     startHoldCountdown();
     if (holdNoticeMessage) showNotice(holdNoticeMessage, true); else clearNotice();
-    if (state.paymentUrl) showPaymentHandoff();
+    if (state.paymentHandoff) showPaymentHandoff();
     else if (state.appointment) showConfirmation({ hold: payload.hold });
   } catch (error) {
     showNotice(error.message || "Unable to reserve this group time.", true);
@@ -1482,6 +1592,9 @@ document.querySelector("#close-dialog").addEventListener("click", () => {
   document.querySelector("#confirmation-dialog").close();
 });
 document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => { if (event.currentTarget.dataset.paymentState === "checking") event.preventDefault(); });
+document.querySelector("#coming-soon-close").addEventListener("click", () => {
+  comingSoonDialog.close();
+});
 document.querySelector("#terms-link").addEventListener("click", (event) => {
   event.preventDefault();
   document.querySelector("#terms-dialog").showModal();
@@ -1545,9 +1658,21 @@ async function initializeBooking() {
 }
 initializeBooking();
 
+function restorePaymentButtonAfterNavigation() {
+  if (!state.hold?.token) return;
+  state.paymentHandoff = null;
+  setContinueLabel();
+  nextButton.disabled = !canContinue();
+}
+
+window.addEventListener("pagehide", restorePaymentButtonAfterNavigation);
 window.addEventListener("pageshow", () => {
+  restorePaymentButtonAfterNavigation();
   if (state.hold?.token) startHoldCountdown();
 });
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && state.hold?.token) startHoldCountdown();
+  if (!document.hidden) {
+    restorePaymentButtonAfterNavigation();
+    if (state.hold?.token) startHoldCountdown();
+  }
 });

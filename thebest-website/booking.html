@@ -15,7 +15,7 @@
     />
     <link rel="icon" href="./pics/FB profile-180x180px-02.jpg" />
     <link rel="stylesheet" href="./styles/modern-normalise.css" />
-    <link rel="stylesheet" href="./styles/booking-page.css?v=20260907-1" />
+    <link rel="stylesheet" href="./styles/booking-page.css?v=20260909-1" />
     <link rel="stylesheet" href="./styles/booking-responsive.css?v=20260907-1" />
     <title>Book an Appointment | The Best Family Wellness</title>
   </head>
@@ -271,7 +271,7 @@
                 <input
                   name="name"
                   autocomplete="name"
-                  placeholder="Sarah Tan"
+                  placeholder=""
                   required
                 />
               </label>
@@ -282,7 +282,7 @@
                   name="phone"
                   autocomplete="tel"
                   inputmode="tel"
-                  placeholder="0123456789"
+                  placeholder=""
                   maxlength="24"
                   aria-describedby="billing-phone-error"
                   required
@@ -300,7 +300,7 @@
                   name="email"
                   autocomplete="email"
                   type="email"
-                  placeholder="sarah@example.com"
+                  placeholder=""
                   maxlength="254"
                   aria-describedby="billing-email-error"
                   required
@@ -345,7 +345,8 @@
                   <button type="button" class="terms-link" id="terms-link">
                     Terms and Conditions
                   </button>
-                  and acknowledge that all payments are final and non-refundable.
+                  and acknowledge the Cancellation &amp; Refund
+                  Policy.
                 </span
               >
               </label>
@@ -522,6 +523,29 @@
       </button>
     </dialog>
 
+    <dialog
+      class="coming-soon-dialog"
+      id="coming-soon-dialog"
+      aria-labelledby="coming-soon-title"
+    >
+      <div class="coming-soon-icon" aria-hidden="true">
+        <svg viewBox="0 0 32 32">
+          <path d="m16 3 2.3 10.7L29 16l-10.7 2.3L16 29l-2.3-10.7L3 16l10.7-2.3L16 3Z" />
+          <path d="m25 4 .7 3.3L29 8l-3.3.7L25 12l-.7-3.3L21 8l3.3-.7L25 4Z" />
+        </svg>
+      </div>
+      <p class="eyebrow">Secure payment upgrade</p>
+      <h2 id="coming-soon-title">Coming soon</h2>
+      <p>
+        We’re upgrading our online payment gateway to Fiuu. Online payments
+        are temporarily unavailable, so no booking or payment has been created.
+        Please check back soon.
+      </p>
+      <button class="primary-button" id="coming-soon-close" type="button">
+        Got it
+      </button>
+    </dialog>
+
     <dialog class="terms-dialog" id="terms-dialog">
       <div class="terms-dialog-head">
         <h2>Booking Terms &amp; Conditions</h2>
@@ -537,31 +561,123 @@
         </button>
       </div>
       <div class="terms-body">
-        <h3>Booking &amp; Confirmation</h3>
+        <h3 id="acceptance">Acceptance of Terms</h3>
         <p>
-          Please check your outlet, service, date and time carefully before
-          paying. Your selected slot is held for 10 minutes while you complete
-          payment — your appointment is only confirmed once payment is
-          successful and a booking confirmation is shown. Please keep your
-          booking reference for any enquiries.
+          By selecting the acceptance checkbox and proceeding with a booking,
+          you confirm that you have read, understood and agreed to these Terms
+          &amp; Conditions. These terms apply to appointments requested through
+          The Best Family Wellness booking website.
         </p>
 
-        <h3>Prices &amp; Payment</h3>
+        <h3 id="booking-confirmation">Booking &amp; Confirmation</h3>
         <p>
-          All prices are in Malaysian Ringgit and any applicable SST is shown
-          before you pay. Payments are processed securely through Billplz — we
-          do not collect or store your card, bank or e-wallet login details. A
-          pending, failed or abandoned payment does not confirm a booking.
+          Please check your selected outlet, service, date and time carefully
+          before making payment. Your selected appointment slot is reserved for
+          a limited payment period of 10 minutes while you complete payment.
+        </p>
+        <p>
+          Your appointment is confirmed only after payment has been successfully
+          verified and a booking confirmation has been issued by The Best Family
+          Wellness. Please keep your booking reference for any enquiries. If
+          you are charged but do not receive a booking confirmation, please
+          contact us as soon as possible so we can verify your payment and
+          booking status.
         </p>
 
-        <h3>Cancellations, No-Shows &amp; Refunds</h3>
+        <h3 id="prices-payment">Prices &amp; Payment</h3>
         <p>
-          Payments are final and non-refundable for cancellations, no-shows,
-          late arrivals we can't accommodate, incorrect booking details, or a
-          change of mind. To reschedule, please contact your selected outlet as
-          early as possible — this is subject to availability. If we need to
-          cancel or change your appointment, we'll offer a new time or an
-          equivalent service in exchange.
+          All prices are stated in Malaysian Ringgit (MYR). Any applicable SST,
+          taxes or charges will be displayed before payment where applicable.
+        </p>
+        <p>
+          Online payments are processed by our appointed third-party payment
+          gateway and the applicable card, bank or e-wallet payment channel
+          shown during checkout. The payment provider displayed at checkout
+          will be the provider responsible for processing that transaction. We
+          do not store full card numbers, bank login credentials, e-wallet PINs
+          or one-time passwords.
+        </p>
+        <p>
+          A pending, failed, abandoned, cancelled or reversed payment does not
+          by itself confirm an appointment.
+        </p>
+
+        <h3 id="refunds">Cancellation, Rescheduling &amp; Refunds</h3>
+        <p>
+          Customers who wish to reschedule an appointment should
+          contact The Best Family Wellness as early as possible before the
+          scheduled appointment time.
+        </p>
+        <p>
+          Change-of-mind cancellations, late cancellations, no-shows,
+          incorrect booking details provided by the customer, and late
+          arrivals that cannot reasonably be accommodated are generally
+          non-refundable. Rescheduling is subject to appointment availability
+          and approval by The Best Family Wellness.
+        </p>
+
+        <h3 id="refund-eligibility">When a Refund May Be Provided</h3>
+        <p>A full or partial refund may be provided where:</p>
+        <ul>
+          <li>The Best Family Wellness cannot provide the booked service.</li>
+          <li>Payment was received but the booking cannot be confirmed or fulfilled.</li>
+          <li>A duplicate payment, incorrect charge or overpayment occurred.</li>
+          <li>A verified technical or payment-processing error affected the transaction.</li>
+          <li>A refund is required under applicable law or payment-channel rules.</li>
+        </ul>
+
+        <h3 id="completed-services">Completed Services</h3>
+        <p>
+          Payments for services that have already been fully provided are
+          generally non-refundable, except where required by applicable law or
+          where a valid issue relating to the service or transaction requires
+          further review.
+        </p>
+
+        <h3 id="refund-method">Refund Method &amp; Timing</h3>
+        <p>
+          Approved full or partial refunds will normally be returned to the
+          same payment method used for the original transaction, including the
+          original card, bank account or e-wallet, where supported by the
+          relevant payment channel. Refunds will not normally be made to another
+          person or through a different payment method.
+        </p>
+
+        <p>
+          Refunds are subject to the processing procedures and timelines of the
+          relevant bank, card issuer, e-wallet, payment provider and payment
+          scheme. Once a refund has been submitted, the time required for the
+          refunded amount to appear in the customer's account may vary
+          depending on the payment method and financial institution.
+        </p>
+
+        <h3 id="refund-request">Booking Enquiries</h3>
+        <p>
+          For any booking enquiries or refund requests, please contact The Best
+          Family Wellness (The Best Wellness Sdn. Bhd.) at
+          <a href="tel:0122872238">012-287 2238</a> or
+          <a href="mailto:thebestwellness@yahoo.com">thebestwellness@yahoo.com</a>.
+          Please provide, where available:
+        </p>
+
+        <ul>
+          <li>Booking or order reference number</li>
+          <li>Customer name and contact number</li>
+          <li>Payment transaction ID or payment reference</li>
+          <li>Payment amount, date and payment channel</li>
+          <li>Reason for the refund request</li>
+          <li>Proof of payment or transaction receipt, if available</li>
+        </ul>
+
+        <h3>Late or Expired Payment Transactions</h3>
+        <p>
+          Online bookings may be reserved for a limited payment period. If
+          payment is completed after the reservation period has expired, or
+          payment is received but the booking cannot be created, we will verify
+          the transaction with the relevant payment provider. If the
+          appointment cannot be fulfilled, the payment will be refunded or
+          otherwise resolved with the customer in accordance with the
+          applicable payment-provider procedures.
         </p>
 
         <h3>Late Arrival</h3>
@@ -591,22 +707,18 @@
 
         <h3>Personal Information</h3>
         <p>
-          We may collect your name, contact information, booking detailsand
-          booking status you provide to manage your appointment, process payment
-          (via Billplz) and contact you about your booking. We keep this
-          information secure and only use it for these purposes.
-        </p>
-
-        <h3>Booking Enquiries</h3>
-        <p>
-          For any booking enquires, please contact your selected outlet
-          directly.
+          We may use and share the information required to manage your booking
+          and process, verify, settle, refund or investigate payment
+          transactions with Fiuu, the relevant payment channel, banks, card
+          issuers, e-wallet providers and authorised service providers. We keep
+          this information secure and do not store your full payment
+          credentials.
         </p>
       </div>
     </dialog>
 
-    <script src="./js/booking-config.js?v=20260802"></script>
+    <script src="./js/booking-config.js?v=20260915-1"></script>
     <script src="./js/booking-api.js?v=20260903-5"></script>
-    <script src="./js/booking-page.js?v=20260907-1"></script>
+    <script src="./js/booking-page.js?v=20260916-1"></script>
   </body>
 </html>

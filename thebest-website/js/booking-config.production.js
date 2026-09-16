@@ -11,6 +11,8 @@
 window.BOOKING_CONFIG = {
   supabaseUrl: "https://erjttzhownsxohpvzjbs.supabase.co",
   publishableKey: "sb_publishable_1z21AP6inEGHlsinvDQeKQ_FVc_K4zE",
+  onlinePaymentEnabled: false,
+  onlinePaymentOutletCodes: [],
   // Permanently disabled. The deployed booking-api hardcodes AUTO_CONFIRM =
   // false and does not read a test-autoconfirm variable at all, so this is
   // belt-and-braces rather than the actual gate.
