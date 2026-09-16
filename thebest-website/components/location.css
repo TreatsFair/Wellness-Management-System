@@ -73,7 +73,7 @@
 
 .home-service-card.location-card-override .menu__img {
     display: none; 
-    padding-left: 1.5rem;
+    padding: 0;
 }
 
 /* Medium screens (>= 768px) */

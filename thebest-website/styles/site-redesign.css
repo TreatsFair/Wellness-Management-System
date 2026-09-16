@@ -793,3 +793,21 @@ body {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
 }
+
+/* Storefront framing: the source photos are portrait-oriented. A taller,
+   centered mobile window shows the sign and entrance without the old
+   letterbox-like crop or the location-card padding gap. */
+.home-service-card.location-card-override .menu__img {
+  display: block;
+  width: 100%;
+  padding: 0 !important;
+  object-position: center 44%;
+}
+
+@media (max-width: 767px) {
+  .home-service-card.location-card-override .menu__img {
+    height: clamp(280px, 68vw, 340px);
+    min-height: 0;
+    object-fit: cover;
+  }
+}
