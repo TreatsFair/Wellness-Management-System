@@ -1,0 +1,160 @@
+{
+  "schema_version": 1,
+  "release": {
+    "reference_head": "c3d21d05c1c2b2c23886e0ecb2bef0aa3a3c56e8",
+    "expected_branch": "main"
+  },
+  "paths": {
+    "frontend": "thebest-app/frontend",
+    "supabase": "thebest-app/supabase",
+    "migration_directory": "thebest-app/supabase/migrations",
+    "authoring_sql_directory": "thebest-app/supabase/sql",
+    "booking_function": "thebest-app/supabase/functions/booking-api/index.ts",
+    "booking_function_directory": "thebest-app/supabase/functions/booking-api",
+    "website_js_directory": "thebest-website/js",
+    "staging_config": "thebest-app/frontend/lib/core/supabase/supabase_config.dart",
+    "production_config": "thebest-app/frontend/lib/core/supabase/production_supabase_config.dart",
+    "default_flutter_entrypoint": "thebest-app/frontend/lib/main.dart",
+    "staging_flutter_entrypoint": "thebest-app/frontend/lib/main_staging.dart",
+    "production_flutter_entrypoint": "thebest-app/frontend/lib/main_production.dart",
+    "website_staging_config": "thebest-website/js/booking-config.js",
+    "website_production_config": "thebest-website/js/booking-config.production.js",
+    "supabase_config": "thebest-app/supabase/config.toml"
+  },
+  "edge_functions": {
+    "booking_api_slug": "booking-api"
+  },
+  "environments": {
+    "local": {
+      "label": "LOCAL",
+      "project_ref": null,
+      "supabase_url": null,
+      "flutter_entrypoint": "thebest-app/frontend/lib/main.dart",
+      "expected_billplz_mode": null,
+      "db_url_env": null
+    },
+    "staging": {
+      "label": "STAGING",
+      "project_ref": "hvyzexmsaxwendcexehx",
+      "supabase_url": "https://hvyzexmsaxwendcexehx.supabase.co",
+      "flutter_entrypoint": "thebest-app/frontend/lib/main_staging.dart",
+      "expected_billplz_mode": "sandbox",
+      "db_url_env": "PREFLIGHT_STAGING_DB_URL"
+    },
+    "production": {
+      "label": "PRODUCTION",
+      "project_ref": "erjttzhownsxohpvzjbs",
+      "supabase_url": "https://erjttzhownsxohpvzjbs.supabase.co",
+      "flutter_entrypoint": "thebest-app/frontend/lib/main_production.dart",
+      "expected_billplz_mode": "live",
+      "db_url_env": "PREFLIGHT_PRODUCTION_DB_URL"
+    }
+  },
+  "git": {
+    "allowed_dirty": [
+      {
+        "pattern": "Report_Context.md",
+        "reason": "existing context artifact is intentionally excluded from this release"
+      },
+      {
+        "pattern": "thebest-app/frontend/lib/data/repositories/business_settings_repository.dart",
+        "reason": "known EOL-only worktree noise; exclude explicitly per release manifest"
+      },
+      {
+        "pattern": "thebest-website/components/location.css",
+        "reason": "deferred storefront/location-card styling"
+      },
+      {
+        "pattern": "thebest-website/index.html",
+        "reason": "deferred storefront stylesheet cache-busting"
+      },
+      {
+        "pattern": "thebest-website/styles/site-redesign.css",
+        "reason": "deferred storefront image/crop styling"
+      }
+    ]
+  },
+  "migrations": {
+    "filename_pattern": "^\\d{14}_[A-Za-z0-9][A-Za-z0-9_.-]*\\.sql$",
+    "legacy_files": [
+      {
+        "name": "20260728_commission_overrides_do_not_restrict_services.sql",
+        "reason": "historical deployment identity uses an eight-digit date; keep it separate from timestamped migration identities"
+      }
+    ],
+    "promotion_security_sources": [
+      "thebest-app/supabase/migrations/20260903124110_promotion_engine.sql",
+      "thebest-app/supabase/migrations/20260903164505_promotion_financial_reporting.sql",
+      "thebest-app/supabase/migrations/20260905175318_promotion_metadata_rpc_acl_fix.sql"
+    ]
+  },
+  "website_syntax_files": [
+    "thebest-website/js/booking-api.js",
+    "thebest-website/js/booking-config.js",
+    "thebest-website/js/booking-config.production.js",
+    "thebest-website/js/booking-page.js",
+    "thebest-website/js/disable-card-links.js",
+    "thebest-website/js/image-gallery.js",
+    "thebest-website/js/main.js",
+    "thebest-website/js/menu.js",
+    "thebest-website/js/mobile-nav.js",
+    "thebest-website/js/site-enhance.js"
+  ],
+  "edge_static_checks": [
+    {
+      "id": "edge.booking_api_deno_check",
+      "label": "booking-api deno check",
+      "path": "thebest-app/supabase/functions/booking-api/index.ts",
+      "required": true
+    }
+  ],
+  "integration_checks": [
+    {
+      "id": "promotion.contract.137",
+      "path": "thebest-app/supabase/tests/137_promotion_engine_contract.sql",
+      "kind": "psql_sql",
+      "classification": "rollback-only transaction",
+      "safety": "STAGING only; BEGIN/ROLLBACK contract; temporary writes are not persisted",
+      "required_opt_in": "PREFLIGHT_ALLOW_STAGING_ROLLBACK",
+      "required_opt_in_value": "I_UNDERSTAND"
+    },
+    {
+      "id": "promotion.contract.139",
+      "path": "thebest-app/supabase/tests/139_promotion_financial_reporting_contract.sql",
+      "kind": "psql_sql",
+      "classification": "rollback-only transaction",
+      "safety": "STAGING only; BEGIN/ROLLBACK contract; temporary fixtures are not persisted",
+      "required_opt_in": "PREFLIGHT_ALLOW_STAGING_ROLLBACK",
+      "required_opt_in_value": "I_UNDERSTAND"
+    },
+    {
+      "id": "promotion.concurrency",
+      "path": "thebest-app/supabase/functions/tests/promotion_concurrency_test.ts",
+      "kind": "deno_test",
+      "classification": "STAGING fixture creation and cleanup",
+      "safety": "STAGING only; public API calls and explicit cleanup; not rollback-only",
+      "required_opt_in": "PREFLIGHT_ALLOW_STAGING_FIXTURES",
+      "required_opt_in_value": "I_UNDERSTAND",
+      "required_env": [
+        "BOOKING_API_URL",
+        "BOOKING_PUBLISHABLE_KEY",
+        "TEST_PROMOTION_CODE",
+        "TEST_PROMOTION_TOKEN_A",
+        "TEST_PROMOTION_TOKEN_B"
+      ]
+    }
+  ],
+  "known_blockers": [
+    {
+      "id": "payment.stale_hosted_checkout",
+      "status": "BLOCKED",
+      "active": true,
+      "severity": "P0",
+      "release_scope": "production",
+      "applies_to": ["local", "staging", "production"],
+      "summary": "Hosted checkout may remain payable after the application booking hold expires.",
+      "reason": "The stale Mastercard checkout experiment was TEST_CONFIRMED_UNSAFE; mitigation is still pending.",
+      "state": "awaiting_mitigation"
+    }
+  ]
+}
