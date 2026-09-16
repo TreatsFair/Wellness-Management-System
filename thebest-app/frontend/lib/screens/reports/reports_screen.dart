@@ -10,6 +10,7 @@ import '../../data/repositories/appointment_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/service_repository.dart';
 import '../../data/repositories/therapist_repository.dart';
+import '../../widgets/app_date_range_dialog.dart';
 
 const _teal = Color(0xFF1B6B72);
 const _ink = Color(0xFF111827);
@@ -417,16 +418,14 @@ class _ReportsScreenState extends State<ReportsScreen> {
   }
 
   Future<void> _openCustomRange() async {
-    final picked = await showDialog<DateTimeRange>(
+    final picked = await showAppDateRangeDialog(
       context: context,
-      builder: (context) => _ReportDateRangeDialog(
-        initialStartDate: _rangeStart,
-        initialEndDate: _rangeEndExclusive.subtract(
-          const Duration(days: 1),
-        ),
-        firstDate: DateTime(2020),
-        lastDate: _today,
+      initialStartDate: _rangeStart,
+      initialEndDate: _rangeEndExclusive.subtract(
+        const Duration(days: 1),
       ),
+      firstDate: DateTime(2020),
+      lastDate: _today,
     );
     if (picked == null || !mounted) return;
     setState(() {

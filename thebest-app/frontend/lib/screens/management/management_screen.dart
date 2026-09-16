@@ -17,6 +17,7 @@ import '../therapists/therapist_screen.dart';
 import 'accessibility_screen.dart';
 import 'business_settings_screen.dart';
 import 'online_booking_screen.dart';
+import 'payment_refunds_screen.dart';
 import 'service_management_screen.dart';
 
 const _teal = Color(0xFF1B6B72);
@@ -228,6 +229,20 @@ class ManagementScreen extends StatelessWidget {
                           builder: (_) => OnlineBookingScreen(
                             userRole: userRole,
                           ),
+                        ),
+                      ),
+                    ),
+                  if (userRole.trim().toLowerCase() == 'admin')
+                    _ManagementOption(
+                      icon: Icons.payments_outlined,
+                      color: AppColors.warning,
+                      title: 'Payments & Refunds',
+                      subtitle:
+                          'Read-only Fiuu payment, refund, and review status',
+                      onTap: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const PaymentRefundsScreen(),
                         ),
                       ),
                     ),
