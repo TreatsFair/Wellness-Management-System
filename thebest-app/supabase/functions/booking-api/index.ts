@@ -1,4 +1,18 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
+import {
+  fiuuHostedPaymentRequest,
+  fiuuReversalRequest,
+  fiuuResponseFromForm,
+  fiuuResponseValidationIssue,
+  fiuuStatusRequest,
+  fiuuReturnProof,
+  verifyFiuuReversalResponse,
+  verifyFiuuReturnProof,
+  verifyFiuuStatusResponse,
+  type FiuuCredentials,
+  type FiuuReversalResponse,
+  type FiuuStatusResponse,
+} from "./fiuu.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -19,8 +33,119 @@ const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(supabaseUrl, secretKey(), { auth: { persistSession: false, autoRefreshToken: false } });
 
 // Public unpaid auto-confirm is permanently disabled. Paid conversion is only
-// reached from the signature-verified Billplz callback below.
+// reached from a signature-verified gateway notification below.
 const AUTO_CONFIRM = false;
+
+// Never accept the gateway from a public request. The exact Supabase project
+// selects Fiuu sandbox versus live; Billplz remains a dormant fallback.
+const BOOKING_PAYMENT_GATEWAY = (Deno.env.get("BOOKING_PAYMENT_GATEWAY") ?? "billplz").trim();
+const FIUU_SANDBOX_MERCHANT_ID = (Deno.env.get("FIUU_SANDBOX_MERCHANT_ID") ?? "").trim();
+const FIUU_SANDBOX_VERIFY_KEY = (Deno.env.get("FIUU_SANDBOX_VERIFY_KEY") ?? "").trim();
+const FIUU_SANDBOX_SECRET_KEY = (Deno.env.get("FIUU_SANDBOX_SECRET_KEY") ?? "").trim();
+const FIUU_SANDBOX_EXTENDED_VCODE = (Deno.env.get("FIUU_SANDBOX_EXTENDED_VCODE") ?? "").trim();
+const FIUU_LIVE_MERCHANT_ID = (Deno.env.get("FIUU_LIVE_MERCHANT_ID") ?? "").trim();
+const FIUU_LIVE_VERIFY_KEY = (Deno.env.get("FIUU_LIVE_VERIFY_KEY") ?? "").trim();
+const FIUU_LIVE_SECRET_KEY = (Deno.env.get("FIUU_LIVE_SECRET_KEY") ?? "").trim();
+const FIUU_LIVE_EXTENDED_VCODE = (Deno.env.get("FIUU_LIVE_EXTENDED_VCODE") ?? "").trim();
+const FIUU_SANDBOX_API_BASE_URL = (
+  Deno.env.get("FIUU_SANDBOX_API_BASE_URL") ?? "https://sandbox-api.fiuu.com"
+).trim();
+const FIUU_LIVE_API_BASE_URL = (
+  Deno.env.get("FIUU_LIVE_API_BASE_URL") ?? "https://api.fiuu.com"
+).trim();
+
+const STAGING_SUPABASE_ORIGIN = "https://hvyzexmsaxwendcexehx.supabase.co";
+const PRODUCTION_SUPABASE_ORIGIN = "https://erjttzhownsxohpvzjbs.supabase.co";
+type FiuuEnvironment = "sandbox" | "live";
+
+function supabaseOrigin(): string {
+  try {
+    return new URL(supabaseUrl).origin.toLowerCase();
+  } catch (_) {
+    return "";
+  }
+}
+
+function fiuuEnvironment(): FiuuEnvironment {
+  const origin = supabaseOrigin();
+  if (origin === STAGING_SUPABASE_ORIGIN) return "sandbox";
+  if (origin === PRODUCTION_SUPABASE_ORIGIN) return "live";
+  throw new Error("Fiuu is only configured for the named STAGING or PRODUCTION project");
+}
+
+function fiuuCredentials(): FiuuCredentials {
+  const environment = fiuuEnvironment();
+  const configured = environment === "sandbox"
+    ? {
+      merchantId: FIUU_SANDBOX_MERCHANT_ID,
+      verifyKey: FIUU_SANDBOX_VERIFY_KEY,
+      secretKey: FIUU_SANDBOX_SECRET_KEY,
+      extendedVcode: FIUU_SANDBOX_EXTENDED_VCODE,
+    }
+    : {
+      merchantId: FIUU_LIVE_MERCHANT_ID,
+      verifyKey: FIUU_LIVE_VERIFY_KEY,
+      secretKey: FIUU_LIVE_SECRET_KEY,
+      extendedVcode: FIUU_LIVE_EXTENDED_VCODE,
+    };
+  const merchantMatchesEnvironment = environment === "sandbox"
+    ? configured.merchantId.startsWith("SB_")
+    : Boolean(configured.merchantId) && !configured.merchantId.startsWith("SB_");
+  if (!merchantMatchesEnvironment || !configured.verifyKey ||
+      !configured.secretKey || !["true", "false"].includes(configured.extendedVcode)) {
+    throw new Error(`Fiuu ${environment} credentials are not configured for this project`);
+  }
+  return {
+    merchantId: configured.merchantId,
+    verifyKey: configured.verifyKey,
+    secretKey: configured.secretKey,
+    extendedVcode: configured.extendedVcode === "true",
+  };
+}
+
+function fiuuConfigurationConfigured(): boolean {
+  try {
+    fiuuCredentials();
+    fiuuApiBaseUrl();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function fiuuEnvironmentForHealth(): FiuuEnvironment | null {
+  try {
+    return fiuuEnvironment();
+  } catch (_) {
+    return null;
+  }
+}
+
+function fiuuPaymentBaseUrl(): string {
+  return fiuuEnvironment() === "sandbox"
+    ? "https://sandbox-payment.fiuu.com"
+    : "https://pay.fiuu.com";
+}
+
+function fiuuApiBaseUrl(): string {
+  const environment = fiuuEnvironment();
+  const raw = environment === "sandbox"
+    ? FIUU_SANDBOX_API_BASE_URL
+    : FIUU_LIVE_API_BASE_URL;
+  const expectedHost = environment === "sandbox"
+    ? "sandbox-api.fiuu.com"
+    : "api.fiuu.com";
+  try {
+    const parsed = new URL(raw);
+    if (parsed.protocol !== "https:" || parsed.hostname.toLowerCase() !== expectedHost ||
+        parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      throw new Error("invalid host");
+    }
+    return parsed.origin;
+  } catch (_) {
+    throw new Error(`Fiuu ${environment} API base URL is invalid`);
+  }
+}
 
 // Billplz (sandbox or production, selected entirely by which base URL/keys are set).
 // The configuration contract is the site origin; API paths are appended below.
@@ -485,7 +610,7 @@ function billDescription(hold: Record<string, unknown>): string {
         timeZone: "Asia/Kuala_Lumpur",
         weekday: "short", day: "numeric", month: "short",
         hour: "numeric", minute: "2-digit", hour12: true,
-      }).format(when);
+      }).format(when).replace(/\s+/g, " ");
     }
   }
 
@@ -761,6 +886,427 @@ type BookingBillBinding = {
   expires_at: string;
 };
 
+type FiuuAttempt = {
+  id: string;
+  hold_token: string;
+  outlet_id: string;
+  merchant_id: string;
+  order_id: string;
+  amount: number;
+  expires_at: string;
+  status: string;
+  gateway_transaction_id: string | null;
+};
+
+const FIUU_ORDER_ID = /^W[a-f0-9]{32}$/;
+
+async function fiuuAttemptByOrder(orderId: string): Promise<FiuuAttempt | null> {
+  if (!FIUU_ORDER_ID.test(orderId)) return null;
+  const result = await supabase.from("booking_payment_attempts")
+    .select("id,hold_token,outlet_id,merchant_id,order_id,amount,expires_at,status,gateway_transaction_id")
+    .eq("order_id", orderId).maybeSingle();
+  if (result.error) throw result.error;
+  return result.data as FiuuAttempt | null;
+}
+
+async function startFiuuPayment(
+  request: Request,
+  token: string,
+  requestedPath: unknown,
+): Promise<Response> {
+  const credentials = fiuuCredentials();
+  if (!BOOKING_REDIRECT_BASE) return fail(request, "Payment return is not configured.", 503);
+  const binding = await bookingBillBinding(token);
+  if (!binding) return fail(request, "Booking reference not found", 404);
+  if (binding.status !== "pending_payment" || bindingIsExpired(binding)) {
+    return fail(request, "This booking hold has expired. Please start again.", 409);
+  }
+  if (binding.billplz_bill_id) {
+    return fail(request, "This booking already has a different payment link.", 409);
+  }
+  const outletCode = await bookingOutletCode(binding);
+  if (!new Set(["taman-wahyu", "pv128"]).has(outletCode)) {
+    return fail(request, "Payment is not configured for this outlet.", 503);
+  }
+  let rows = await rpc("get_booking_group_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
+  if (!rows[0]) rows = await rpc("get_booking_hold_for_payment", { p_token: token }) as Array<Record<string, unknown>>;
+  const hold = rows[0];
+  if (!hold || String(hold.status) !== "pending_payment" ||
+      new Date(String(hold.expires_at)).getTime() <= Date.now()) {
+    return fail(request, "This booking hold has expired. Please start again.", 409);
+  }
+  const amount = Number(hold.total_amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return fail(request, "The booking price is unavailable.", 409);
+  }
+  const orderId = `W${crypto.randomUUID().replaceAll("-", "")}`;
+  const attempt = await rpcScalar<FiuuAttempt>("claim_fiuu_payment_attempt", {
+    p_token: token,
+    p_order_id: orderId,
+    p_merchant_id: credentials.merchantId,
+    p_amount: Number(amount.toFixed(2)),
+    p_expires_at: hold.expires_at,
+  });
+  if (!attempt || !["created", "pending"].includes(attempt.status)) {
+    return fail(request, "This booking can no longer accept payment.", 409);
+  }
+  const returnUrl = new URL(`${supabaseUrl}/functions/v1/booking-api/fiuu/return`);
+  returnUrl.searchParams.set("order", attempt.order_id);
+  returnUrl.searchParams.set("proof", fiuuReturnProof(attempt.order_id, credentials.secretKey));
+  const cancelUrl = bookingRedirectUrl(token, requestedPath);
+  if (!cancelUrl) return fail(request, "Payment return is not configured.", 503);
+  const waitTimeSeconds = Math.max(
+    1,
+    Math.floor((new Date(attempt.expires_at).getTime() - Date.now()) / 1000),
+  );
+  const checkout = fiuuHostedPaymentRequest({
+    environment: fiuuEnvironment(),
+    credentials,
+    orderId: attempt.order_id,
+    amount: Number(attempt.amount).toFixed(2),
+    customerName: String(hold.customer_name ?? ""),
+    customerEmail: String(hold.customer_email ?? ""),
+    customerMobile: normalizeMyPhone(String(hold.customer_phone ?? "")),
+    description: billDescription(hold),
+    expiresAt: new Date(attempt.expires_at),
+    waitTimeSeconds,
+    returnUrl: returnUrl.toString(),
+    callbackUrl: `${supabaseUrl}/functions/v1/booking-api/fiuu/callback`,
+    cancelUrl,
+  });
+  return json(request, {
+    action: checkout.action,
+    fields: checkout.fields,
+    reused: attempt.order_id !== orderId,
+  },
+    attempt.order_id === orderId ? 201 : 200);
+}
+
+async function acknowledgeFiuuIpn(form: FormData): Promise<boolean> {
+  const ack = new URLSearchParams();
+  for (const [name, value] of form.entries()) {
+    if (typeof value !== "string") return false;
+    ack.append(name, value);
+  }
+  ack.set("treq", "1");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const result = await fetch(
+      `${fiuuPaymentBaseUrl()}/RMS/API/chkstat/returnipn.php`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: ack.toString(),
+        signal: controller.signal,
+      },
+    );
+    return result.ok;
+  } catch (_) {
+    return false;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function fiuuReturnRedirect(attempt: FiuuAttempt): Promise<Response> {
+  // The shared booking route loads the confirmed booking from its hold token.
+  // Older staging deployments do not yet expose the outlet-specific aliases.
+  const redirect = bookingRedirectUrl(attempt.hold_token, "/booking");
+  if (!redirect) return new Response("Payment return is not configured", { status: 503 });
+  return new Response(null, {
+    status: 303,
+    headers: { Location: redirect, "Cache-Control": "no-store",
+      "Referrer-Policy": "no-referrer" },
+  });
+}
+
+async function handleFiuuNotification(
+  request: Request,
+  kind: "return" | "notification" | "callback",
+): Promise<Response> {
+  const credentials = fiuuCredentials();
+  const form = await request.formData().catch(() => null);
+  if (kind === "return" && (!form || !["skey", "tranID", "status", "amount"]
+    .some((name) => String(form.get(name) ?? "").length > 0))) {
+    // Fiuu can POST an empty browser-return form. A signed URL may restore
+    // navigation, but this path must never mark the payment as paid.
+    const url = new URL(request.url);
+    const orderId = url.searchParams.get("order") ?? "";
+    const proof = url.searchParams.get("proof") ?? "";
+    if (!verifyFiuuReturnProof(orderId, proof, credentials.secretKey)) {
+      return fail(request, "Invalid payment return", 400);
+    }
+    const attempt = await fiuuAttemptByOrder(orderId);
+    if (!attempt || attempt.merchant_id !== credentials.merchantId) {
+      return fail(request, "Invalid payment return", 400);
+    }
+    console.warn("Fiuu browser return contained no payment fields");
+    return fiuuReturnRedirect(attempt);
+  }
+  if (!form) {
+    console.warn("Fiuu response rejected", kind, "form_parse");
+    return fail(request, "Invalid payment response", 400);
+  }
+  // An e-wallet can omit appcode; the signature still covers its empty value.
+  const invalidFields = ["amount", "orderid", "tranID", "domain", "status",
+    "skey", "currency", "paydate"]
+    .filter((name) => form.getAll(name).length !== 1);
+  if (form.getAll("appcode").length > 1) invalidFields.push("appcode");
+  if (invalidFields.length) {
+    console.warn("Fiuu response rejected", kind, "field_count", invalidFields);
+    return fail(request, "Invalid payment response", 400);
+  }
+  const response = fiuuResponseFromForm(form);
+  const attempt = await fiuuAttemptByOrder(response.orderid);
+  if (!attempt) {
+    console.warn("Fiuu response rejected", kind, "unknown_order");
+    return fail(request, "Invalid payment response", 400);
+  }
+  const issue = fiuuResponseValidationIssue(response, {
+    credentials,
+    orderId: attempt.order_id,
+    amount: Number(attempt.amount).toFixed(2),
+  });
+  if (issue) {
+    console.warn("Fiuu response rejected", kind, issue);
+    return fail(request, "Invalid payment response", 400);
+  }
+
+  if (kind === "return") {
+    // A signed browser return is not independent payment evidence. The site
+    // continues polling until a verified server notification records it.
+    if (!(await acknowledgeFiuuIpn(form))) {
+      console.warn("Fiuu return IPN acknowledgement failed");
+    }
+    return fiuuReturnRedirect(attempt);
+  }
+
+  const outcome = await rpcScalar<string>("process_verified_fiuu_payment", {
+    p_order_id: response.orderid,
+    p_merchant_id: response.domain,
+    p_amount: Number(response.amount),
+    p_transaction_id: response.tranID,
+    p_status: response.status,
+    p_channel: response.channel || null,
+  });
+  if (!outcome) return fail(request, "Payment notification was not recorded", 500);
+  if (outcome === "refund_required") {
+    const queued = await rpcScalar<FiuuRefund>("queue_fiuu_refund_reconciliation", {
+      p_order_id: response.orderid,
+      p_transaction_id: response.tranID,
+    });
+    if (!queued) return fail(request, "Payment refund was not queued", 500);
+    console.warn("Fiuu late payment queued for refund reconciliation", response.orderid);
+  } else if (outcome === "review_different_transaction") {
+    console.warn("Fiuu payment needs reconciliation", response.orderid, outcome);
+  }
+
+  if (kind === "callback") {
+    return new Response("CBTOKEN:MPSTATOK", {
+      status: 200,
+      headers: { "Content-Type": "text/plain; charset=utf-8" },
+    });
+  }
+
+  // Notification URL IPN also needs the POST-back acknowledgement.
+  if (!(await acknowledgeFiuuIpn(form))) {
+    return fail(request, "Payment acknowledgement failed", 503);
+  }
+  return new Response("OK", {
+    status: 200,
+    headers: { "Content-Type": "text/plain; charset=utf-8" },
+  });
+}
+
+type FiuuRefund = {
+  id: string;
+  attempt_id: string;
+  gateway_transaction_id: string;
+  amount: number;
+  status: string;
+  claim_token: string | null;
+  gateway_refund_id: string | null;
+  requested_at: string | null;
+};
+
+function fiuuReversalUrl(): string {
+  return `${fiuuApiBaseUrl()}/RMS/API/refundAPI/refund.php`;
+}
+
+function fiuuStatusUrl(): string {
+  return `${fiuuApiBaseUrl()}/RMS/API/gate-query/index.php`;
+}
+
+async function postFiuuJson(
+  url: string,
+  fields: Record<string, string>,
+): Promise<Record<string, unknown>> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(fields).toString(),
+      signal: controller.signal,
+    });
+    const body = await response.text();
+    if (!response.ok) throw new Error(`Fiuu API returned HTTP ${response.status}`);
+    try {
+      return JSON.parse(body) as Record<string, unknown>;
+    } catch (_) {
+      throw new Error("Fiuu API returned an invalid response");
+    }
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function fiuuReversalResponseFromPayload(
+  payload: Record<string, unknown>,
+): FiuuReversalResponse {
+  return {
+    TranID: String(payload.TranID ?? ""),
+    Domain: String(payload.Domain ?? ""),
+    VrfKey: String(payload.VrfKey ?? ""),
+    StatCode: String(payload.StatCode ?? ""),
+    StatDate: String(payload.StatDate ?? ""),
+    refundID: String(payload.refundID ?? ""),
+  };
+}
+
+function fiuuStatusResponseFromPayload(
+  payload: Record<string, unknown>,
+): FiuuStatusResponse {
+  return {
+    Amount: String(payload.Amount ?? ""),
+    TranID: String(payload.TranID ?? ""),
+    Domain: String(payload.Domain ?? ""),
+    Channel: String(payload.Channel ?? ""),
+    VrfKey: String(payload.VrfKey ?? ""),
+    StatCode: String(payload.StatCode ?? ""),
+    StatName: String(payload.StatName ?? ""),
+    Currency: String(payload.Currency ?? ""),
+    ErrorCode: String(payload.ErrorCode ?? ""),
+    ErrorDesc: String(payload.ErrorDesc ?? ""),
+  };
+}
+
+async function checkNextFiuuRefundStatus(): Promise<Record<string, unknown> | null> {
+  const refund = await rpcScalar<FiuuRefund>("claim_fiuu_refund_status_check");
+  // PostgREST can represent a null composite returned by PostgreSQL as an
+  // object whose fields are all null. Treat that as the documented "no work"
+  // result instead of turning every idle maintenance run into HTTP 500.
+  if (!refund || !refund.id) return null;
+  if (!refund.claim_token) throw new Error("Fiuu refund status claim is incomplete");
+  const credentials = fiuuCredentials();
+  const amount = Number(refund.amount).toFixed(2);
+  try {
+    const request = fiuuStatusRequest(
+      refund.gateway_transaction_id,
+      amount,
+      credentials,
+    );
+    const payload = await postFiuuJson(fiuuStatusUrl(), request.fields);
+    const response = fiuuStatusResponseFromPayload(payload);
+    if (!verifyFiuuStatusResponse(
+      response,
+      refund.gateway_transaction_id,
+      amount,
+      credentials,
+    )) {
+      await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+        p_claim_token: refund.claim_token,
+        p_error: "Fiuu status response signature was invalid",
+        p_needs_review: true,
+      });
+      return { action: "status_check", outcome: "needs_review" };
+    }
+    const outcome = await rpcScalar<string>("complete_fiuu_refund_status_check", {
+      p_claim_token: refund.claim_token,
+      p_gateway_status: response.StatCode,
+      p_status_name: response.StatName,
+      p_error_code: response.ErrorCode,
+      p_error: response.ErrorDesc,
+    });
+    return { action: "status_check", outcome: outcome ?? "unknown" };
+  } catch (error) {
+    await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+      p_claim_token: refund.claim_token,
+      p_error: errorMessage(error),
+      p_needs_review: false,
+    });
+    return { action: "status_check", outcome: "retry_scheduled" };
+  }
+}
+
+async function submitNextFiuuRefund(): Promise<Record<string, unknown> | null> {
+  const refund = await rpcScalar<FiuuRefund>("claim_fiuu_refund_submission");
+  if (!refund || !refund.id) return null;
+  if (!refund.claim_token) throw new Error("Fiuu refund submission claim is incomplete");
+  const credentials = fiuuCredentials();
+  try {
+    const request = fiuuReversalRequest(
+      refund.gateway_transaction_id,
+      credentials,
+    );
+    const payload = await postFiuuJson(fiuuReversalUrl(), request.fields);
+    if (typeof payload.error_code === "string") {
+      const outcome = await rpcScalar<string>("complete_fiuu_refund_submission", {
+        p_claim_token: refund.claim_token,
+        p_gateway_refund_id: null,
+        p_gateway_status: null,
+        p_accepted: false,
+        p_error_code: String(payload.error_code),
+        p_error: String(payload.error_desc ?? "Fiuu rejected the refund request"),
+      });
+      return { action: "refund_submission", outcome: outcome ?? "needs_review" };
+    }
+    const response = fiuuReversalResponseFromPayload(payload);
+    if (!verifyFiuuReversalResponse(
+      response,
+      refund.gateway_transaction_id,
+      credentials,
+    )) {
+      await rpcScalar<boolean>("fail_fiuu_refund_submission", {
+        p_claim_token: refund.claim_token,
+        p_error: "Fiuu refund response signature was invalid",
+      });
+      return { action: "refund_submission", outcome: "needs_review" };
+    }
+    const outcome = await rpcScalar<string>("complete_fiuu_refund_submission", {
+      p_claim_token: refund.claim_token,
+      p_gateway_refund_id: response.refundID,
+      p_gateway_status: response.StatCode,
+      p_accepted: response.StatCode === "00",
+      p_error_code: response.StatCode === "00" ? null : response.StatCode,
+      p_error: response.StatCode === "00" ? null : "Fiuu rejected the refund request",
+    });
+    return { action: "refund_submission", outcome: outcome ?? "unknown" };
+  } catch (error) {
+    await rpcScalar<boolean>("fail_fiuu_refund_submission", {
+      p_claim_token: refund.claim_token,
+      p_error: errorMessage(error),
+    });
+    return { action: "refund_submission", outcome: "needs_review" };
+  }
+}
+
+async function maintainFiuuRefunds(): Promise<Record<string, unknown>> {
+  const staleSubmissions = await rpcScalar<number>(
+    "mark_stale_fiuu_refund_submissions_for_review",
+  ) ?? 0;
+  // Fiuu documents a maximum query frequency. Process at most one gateway API
+  // request per maintenance call, checking its own expiry/refund result first.
+  const statusResult = await checkNextFiuuRefundStatus();
+  const result = statusResult ?? await submitNextFiuuRefund();
+  return {
+    stale_refund_submissions: staleSubmissions,
+    refund_action: result,
+  };
+}
+
 type BillCancellationClaim = {
   hold_id: string | null;
   bill_id: string | null;
@@ -962,9 +1508,16 @@ async function route(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const path = pathOf(request);
   if (request.method === "GET" && path === "/health") {
+    const fiuuEnvironmentForResponse = BOOKING_PAYMENT_GATEWAY === "fiuu"
+      ? fiuuEnvironmentForHealth()
+      : null;
     return json(request, {
       ok: true,
-      payment_enabled: BILLPLZ_CONFIGURED,
+      payment_enabled: BOOKING_PAYMENT_GATEWAY === "fiuu"
+        ? fiuuConfigurationConfigured()
+        : BILLPLZ_CONFIGURED,
+      payment_gateway: BOOKING_PAYMENT_GATEWAY,
+      payment_environment: fiuuEnvironmentForResponse,
       payment_collection_mode: BILLPLZ_OUTLET_COLLECTION_MODE
         ? "per_organization"
         : "legacy_single",
@@ -975,6 +1528,8 @@ async function route(request: Request): Promise<Response> {
         ]
         : [],
       payment_cleanup_enabled: Boolean(BOOKING_CLEANUP_SECRET),
+      fiuu_refund_reconciliation_enabled:
+        BOOKING_PAYMENT_GATEWAY === "fiuu" && Boolean(BOOKING_CLEANUP_SECRET),
       auto_confirm: AUTO_CONFIRM,
     });
   }
@@ -986,10 +1541,22 @@ async function route(request: Request): Promise<Response> {
     if (!timingSafeEqual(supplied, BOOKING_CLEANUP_SECRET)) {
       return fail(request, "Forbidden", 403);
     }
+    if (BOOKING_PAYMENT_GATEWAY === "fiuu") {
+      return json(request, { ok: true, ...(await maintainFiuuRefunds()) });
+    }
     return json(request, { ok: true, ...(await cleanupExpiredPaymentHolds()) });
   }
   const rateLimitResponse = await enforceIpRateLimit(request, path);
   if (rateLimitResponse) return rateLimitResponse;
+  if (request.method === "POST" && path === "/fiuu/return") {
+    return handleFiuuNotification(request, "return");
+  }
+  if (request.method === "POST" && path === "/fiuu/notification") {
+    return handleFiuuNotification(request, "notification");
+  }
+  if (request.method === "POST" && path === "/fiuu/callback") {
+    return handleFiuuNotification(request, "callback");
+  }
   if (request.method === "GET" && path === "/outlets") {
     return json(request, { outlets: await publicBookingOutlets() });
   }
@@ -1220,7 +1787,6 @@ async function route(request: Request): Promise<Response> {
     return json(request, { pricing: publicPricingPayload(pricing), promotion: null });
   }
   if (request.method === "POST" && path === "/booking-holds/pay") {
-    if (!BILLPLZ_CONFIGURED) return fail(request, "Payment is not configured yet.", 503);
     const body = await request.json().catch(() => null) as Record<string, unknown> | null;
     const token = uuid(body?.token);
     if (!token) return fail(request, "A valid booking reference is required");
@@ -1232,7 +1798,19 @@ async function route(request: Request): Promise<Response> {
       600,
     );
     if (tokenRateLimit) return tokenRateLimit;
+    if (BOOKING_PAYMENT_GATEWAY === "fiuu") {
+      return startFiuuPayment(request, token, body?.return_path);
+    }
+    if (BOOKING_PAYMENT_GATEWAY !== "billplz" || !BILLPLZ_CONFIGURED) {
+      return fail(request, "Payment is not configured yet.", 503);
+    }
     try {
+      const fiuuAttempt = await supabase.from("booking_payment_attempts")
+        .select("id").eq("hold_token", token).limit(1);
+      if (fiuuAttempt.error) throw fiuuAttempt.error;
+      if (fiuuAttempt.data?.length) {
+        return fail(request, "This booking already has a different payment link.", 409);
+      }
       const binding = await bookingBillBinding(token);
       if (!binding) return fail(request, "Booking reference not found", 404);
       if (bindingIsExpired(binding)) {
