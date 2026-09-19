@@ -13,6 +13,22 @@ import {
   type FiuuReversalResponse,
   type FiuuStatusResponse,
 } from "./fiuu.ts";
+import {
+  automaticRetryDelaySeconds,
+  BOOKING_EMAIL_CONTACT_EMAIL,
+  BOOKING_EMAIL_TERMS_URL,
+  bookingEmailConfigurationIssue,
+  bookingEmailDisplayReference,
+  bookingEmailLogoUrl,
+  bookingEmailPaymentMethod,
+  bookingEmailRecipient,
+  bookingEmailSettings,
+  BookingEmailDeliveryError,
+  isBookingEmailAddress,
+  sendBookingConfirmationEmail,
+  type BookingConfirmationEmailPayload,
+  type BookingEmailSettings,
+} from "./booking_email.ts";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -31,6 +47,9 @@ function secretKey(): string {
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
 const supabase = createClient(supabaseUrl, secretKey(), { auth: { persistSession: false, autoRefreshToken: false } });
+const SUPABASE_ANON_KEY = (
+  Deno.env.get("SUPABASE_ANON_KEY") ?? Deno.env.get("SUPABASE_PUBLISHABLE_KEY") ?? ""
+).trim();
 
 // Public unpaid auto-confirm is permanently disabled. Paid conversion is only
 // reached from a signature-verified gateway notification below.
@@ -433,6 +452,113 @@ function rpcErrorCode(error: unknown): string | null {
     if (match) return match[1];
   }
   return null;
+}
+
+function databaseErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  const code = (error as Record<string, unknown>).code;
+  return typeof code === "string" ? code : null;
+}
+
+async function userScopedSupabaseClient(request: Request) {
+  const authorization = request.headers.get("authorization") ?? "";
+  const match = authorization.match(/^Bearer\s+(.+)$/i);
+  if (!match || !SUPABASE_ANON_KEY) return null;
+  const token = match[1].trim();
+  if (!token) return null;
+  const userResult = await supabase.auth.getUser(token);
+  if (userResult.error || !userResult.data.user) return null;
+  return createClient(supabaseUrl, SUPABASE_ANON_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+}
+
+async function handleManualBookingEmailResend(request: Request): Promise<Response> {
+  if (!SUPABASE_ANON_KEY) {
+    return fail(request, "Authenticated staff actions are not configured", 503);
+  }
+  const userClient = await userScopedSupabaseClient(request);
+  if (!userClient) return fail(request, "Staff sign-in is required", 401);
+  const body = await request.json().catch(() => null) as Record<string, unknown> | null;
+  const attemptId = uuid(body?.attempt_id);
+  if (!attemptId) return fail(request, "A valid payment attempt is required", 400);
+  const settings = bookingEmailSettings(fiuuEnvironment());
+  const requestedRecipient = String(body?.recipient_email ?? "").trim();
+  if (settings.environment === "sandbox" && requestedRecipient) {
+    return fail(request, "The recipient cannot be changed in STAGING", 400);
+  }
+  if (
+    settings.environment === "live" && requestedRecipient &&
+    !isBookingEmailAddress(requestedRecipient)
+  ) {
+    return fail(request, "Enter a valid recipient email address", 400);
+  }
+
+  const requestResult = await userClient.rpc("request_manual_booking_email", {
+    p_payment_attempt_id: attemptId,
+    p_recipient_email: settings.environment === "live"
+      ? requestedRecipient || null
+      : null,
+  });
+  if (requestResult.error) {
+    const code = databaseErrorCode(requestResult.error);
+    if (code === "42501") return fail(request, "Staff access is required", 403);
+    if (code === "55P03") return fail(request, "Please wait before requesting another resend", 429);
+    if (code === "P0002") return fail(request, "Confirmed booking was not found", 404);
+    if (code === "22023") return fail(request, "A confirmation email is available only for a confirmed booking", 409);
+    console.error("Manual booking email request failed", bookingEmailErrorLabel(requestResult.error));
+    return fail(request, "The confirmation email could not be requested", 422);
+  }
+
+  const requested = requestResult.data && typeof requestResult.data === "object"
+    ? requestResult.data as Record<string, unknown>
+    : null;
+  const deliveryId = uuid(requested?.delivery_id);
+  if (!deliveryId) return fail(request, "The confirmation email could not be queued", 500);
+  const delivery = await rpcScalar<BookingEmailManualAttempt>(
+    "claim_manual_booking_email_delivery",
+    { p_delivery_id: deliveryId },
+  );
+  if (!delivery?.id) {
+    return json(request, { ok: true, status: "already_processing" });
+  }
+  const attempt = await fiuuAttemptById(delivery.payment_attempt_id);
+  if (!attempt || attempt.status !== "confirmed") {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: "Confirmed payment attempt was not found",
+    });
+    return fail(request, "Confirmed booking was not found", 404);
+  }
+  try {
+    const payload = manualBookingEmailPayload(
+      await bookingConfirmationEmailPayload(attempt, ""),
+      delivery,
+      settings,
+    );
+    const status = await deliverManualBookingEmail(delivery, payload, settings);
+    if (status === "sent") {
+      return json(request, {
+        ok: true,
+        status,
+        recipient_mode: settings.environment === "sandbox"
+          ? "staging_test_recipient"
+          : "customer",
+      });
+    }
+    if (status === "disabled") return fail(request, "Booking email delivery is disabled", 503);
+    return fail(request, "The confirmation email was not sent", 502);
+  } catch (error) {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: bookingEmailErrorLabel(error),
+    }).catch((recordError) => {
+      console.error("Unable to record manual booking email failure", errorMessage(recordError));
+    });
+    console.error("Manual booking email delivery failed", bookingEmailErrorLabel(error));
+    return fail(request, "The confirmation email was not sent", 502);
+  }
 }
 
 function isPromotionError(error: unknown): boolean {
@@ -909,6 +1035,536 @@ async function fiuuAttemptByOrder(orderId: string): Promise<FiuuAttempt | null> 
   return result.data as FiuuAttempt | null;
 }
 
+async function fiuuAttemptById(attemptId: string): Promise<FiuuAttempt | null> {
+  const result = await supabase.from("booking_payment_attempts")
+    .select("id,hold_token,outlet_id,merchant_id,order_id,amount,expires_at,status,gateway_transaction_id")
+    .eq("id", attemptId).maybeSingle();
+  if (result.error) throw result.error;
+  return result.data as FiuuAttempt | null;
+}
+
+type BookingEmailHold = {
+  public_token: string;
+  booking_group_token: string | null;
+  outlet_id: string;
+  customer_name: string;
+  customer_phone: string;
+  customer_email: string;
+  service_items: unknown;
+  start_at: string;
+  end_at: string;
+  guest_index: number | null;
+  guest_name: string;
+  notes: string;
+  subtotal_amount: number | null;
+  discount_amount: number;
+  total_amount: number;
+  promotion_code: string | null;
+};
+
+type BookingEmailOutboxJob = {
+  id: string;
+  payment_attempt_id: string;
+  hold_token: string;
+  provider_transaction_id: string | null;
+  idempotency_key: string;
+  intended_recipient_email: string | null;
+  actual_delivery_recipient: string | null;
+  status: string;
+  attempt_count: number;
+  manual_resend_count: number;
+  last_attempt_at: string | null;
+  next_retry_at: string | null;
+};
+
+type BookingEmailManualAttempt = {
+  id: string;
+  payment_attempt_id: string;
+  hold_token: string;
+  idempotency_key: string;
+  intended_recipient_email: string | null;
+  actual_delivery_recipient: string | null;
+  status: string;
+  attempt_count: number;
+};
+
+const BOOKING_EMAIL_HOLD_COLUMNS =
+  "public_token,booking_group_token,outlet_id,customer_name,customer_phone,customer_email,service_items,start_at,end_at,guest_index,guest_name,notes,subtotal_amount,discount_amount,total_amount,promotion_code";
+
+async function bookingEmailHolds(holdToken: string): Promise<BookingEmailHold[]> {
+  const groupResult = await supabase
+    .from("booking_holds")
+    .select(BOOKING_EMAIL_HOLD_COLUMNS)
+    .eq("booking_group_token", holdToken)
+    .order("guest_index", { ascending: true });
+  if (groupResult.error) throw groupResult.error;
+  if (groupResult.data?.length) return groupResult.data as BookingEmailHold[];
+
+  const singleResult = await supabase
+    .from("booking_holds")
+    .select(BOOKING_EMAIL_HOLD_COLUMNS)
+    .eq("public_token", holdToken)
+    .limit(1);
+  if (singleResult.error) throw singleResult.error;
+  return (singleResult.data ?? []) as BookingEmailHold[];
+}
+
+async function bookingEmailOutlet(outletId: string): Promise<{
+  code: string;
+  name: string;
+}> {
+  const result = await supabase
+    .from("outlets")
+    .select("code,name")
+    .eq("id", outletId)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  const code = String(result.data?.code ?? "").trim().toLowerCase();
+  const fallbackName = code === "taman-wahyu"
+    ? "Taman Wahyu"
+    : code === "pv128"
+    ? "PV128"
+    : "The Best Family Wellness";
+  return {
+    code,
+    name: String(result.data?.name ?? "").trim() || fallbackName,
+  };
+}
+
+function serviceName(value: unknown): string | null {
+  if (typeof value === "string") return value.trim() || null;
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  for (const key of ["service_name", "serviceName", "name", "title", "public_name"]) {
+    const candidate = String(row[key] ?? "").trim();
+    if (candidate) return candidate;
+  }
+  return null;
+}
+
+function serviceDuration(value: unknown): number | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as Record<string, unknown>;
+  for (const key of ["duration", "duration_minutes", "durationMinutes"]) {
+    const candidate = Number(row[key]);
+    if (Number.isFinite(candidate) && candidate > 0) return Math.round(candidate);
+  }
+  return null;
+}
+
+function serviceDisplayName(
+  value: unknown,
+  fallbackDuration: number | null = null,
+): string | null {
+  const name = serviceName(value);
+  if (!name) return null;
+  const duration = serviceDuration(value) ?? fallbackDuration;
+  if (!duration || /\b\d+\s*(?:min|mins|minute|minutes)\b/i.test(name)) {
+    return name;
+  }
+  return `${name} · ${duration} min`;
+}
+
+function bookingEmailHoldDuration(row: BookingEmailHold): number | null {
+  const start = new Date(row.start_at).getTime();
+  const end = new Date(row.end_at).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return null;
+  }
+  const minutes = Math.round((end - start) / 60_000);
+  return minutes > 0 && minutes <= 24 * 60 ? minutes : null;
+}
+
+function bookingEmailServiceLines(rows: BookingEmailHold[]): string[] {
+  const lines: string[] = [];
+  for (const row of rows) {
+    const items = Array.isArray(row.service_items) ? row.service_items : [];
+    const fallbackDuration = bookingEmailHoldDuration(row);
+    const names = items
+      .map((item) => serviceDisplayName(item, fallbackDuration))
+      .filter((value): value is string => Boolean(value));
+    const resolved = names.length ? names : ["Booked wellness service"];
+    for (const name of resolved) {
+      const guest = rows.length > 1 ? String(row.guest_name ?? "").trim() : "";
+      lines.push(guest ? `${guest} — ${name}` : name);
+    }
+  }
+  return lines;
+}
+
+function localAppointmentParts(startAt: string): {
+  date: string;
+  time: string;
+} {
+  const value = new Date(startAt);
+  if (Number.isNaN(value.getTime())) {
+    return { date: "To be confirmed", time: "To be confirmed" };
+  }
+  return {
+    date: new Intl.DateTimeFormat("en-MY", {
+      timeZone: "Asia/Kuala_Lumpur",
+      dateStyle: "medium",
+    }).format(value),
+    time: new Intl.DateTimeFormat("en-MY", {
+      timeZone: "Asia/Kuala_Lumpur",
+      timeStyle: "short",
+    }).format(value),
+  };
+}
+
+async function trustedBookingEmailPaymentChannel(attemptId: string): Promise<string> {
+  const result = await supabase
+    .from("booking_payment_events")
+    .select("channel")
+    .eq("attempt_id", attemptId)
+    .eq("outcome", "confirmed")
+    .not("channel", "is", null)
+    .order("received_at", { ascending: false })
+    .order("id", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (result.error) throw result.error;
+  return String(result.data?.channel ?? "").trim();
+}
+
+async function bookingConfirmationEmailPayload(
+  attempt: FiuuAttempt,
+  channel: string,
+): Promise<BookingConfirmationEmailPayload> {
+  const rows = await bookingEmailHolds(attempt.hold_token);
+  if (!rows.length) throw new Error("Confirmed booking details were not found");
+  const first = rows[0];
+  const outlet = await bookingEmailOutlet(attempt.outlet_id);
+  const parts = localAppointmentParts(first.start_at);
+  const trustedChannel = channel.trim() ||
+    await trustedBookingEmailPaymentChannel(attempt.id);
+  const serviceTotal = rows.reduce(
+    (total, row) => total + Number(row.subtotal_amount ?? row.total_amount ?? 0),
+    0,
+  );
+  const promotionDiscount = rows.reduce(
+    (total, row) => total + Number(row.discount_amount ?? 0),
+    0,
+  );
+  const promotionCode = [...new Set(rows
+    .map((row) => String(row.promotion_code ?? "").trim())
+    .filter(Boolean))].join(", ");
+  const emailEnvironment = fiuuEnvironment();
+  return {
+    customerName: String(first.customer_name ?? "").trim() || "Customer",
+    customerEmail: String(first.customer_email ?? "").trim(),
+    customerPhone: String(first.customer_phone ?? "").trim(),
+    customerNotes: [...new Set(rows
+      .map((row) => String(row.notes ?? "").trim())
+      .filter(Boolean))].join(" · "),
+    bookingReference: bookingEmailDisplayReference(attempt.order_id),
+    outletName: outlet.name,
+    serviceLines: bookingEmailServiceLines(rows),
+    appointmentDate: parts.date,
+    appointmentTime: parts.time,
+    guestCount: rows.length,
+    serviceTotal: `RM ${serviceTotal.toFixed(2)}`,
+    promotionCode,
+    promotionDiscount: promotionDiscount > 0
+      ? `-RM ${promotionDiscount.toFixed(2)}`
+      : "",
+    amount: `RM ${Number(attempt.amount).toFixed(2)}`,
+    paymentMethod: bookingEmailPaymentMethod(trustedChannel),
+    logoUrl: bookingEmailLogoUrl(emailEnvironment),
+    termsUrl: BOOKING_EMAIL_TERMS_URL,
+    contactEmail: BOOKING_EMAIL_CONTACT_EMAIL,
+  };
+}
+
+function manualBookingEmailPayload(
+  payload: BookingConfirmationEmailPayload,
+  delivery: BookingEmailManualAttempt,
+  settings: BookingEmailSettings,
+): BookingConfirmationEmailPayload {
+  if (settings.environment !== "live") return payload;
+  const recipient = String(delivery.intended_recipient_email ?? "").trim();
+  return isBookingEmailAddress(recipient)
+    ? { ...payload, customerEmail: recipient }
+    : payload;
+}
+
+function bookingEmailErrorLabel(error: unknown): string {
+  const message = errorMessage(error).replace(/[\r\n]+/g, " ").trim();
+  const limit = error instanceof BookingEmailDeliveryError ? 1200 : 240;
+  return message.slice(0, limit) || "Booking email delivery failed";
+}
+
+async function updateBookingEmailOutbox(
+  jobId: string,
+  values: Record<string, unknown>,
+): Promise<void> {
+  const result = await supabase
+    .from("booking_email_outbox")
+    .update({ ...values, updated_at: new Date().toISOString() })
+    .eq("id", jobId);
+  if (result.error) throw result.error;
+}
+
+async function updateBookingEmailManualAttempt(
+  deliveryId: string,
+  values: Record<string, unknown>,
+): Promise<void> {
+  const result = await supabase
+    .from("booking_email_delivery_attempts")
+    .update({ ...values, updated_at: new Date().toISOString() })
+    .eq("id", deliveryId);
+  if (result.error) throw result.error;
+}
+
+function bookingEmailRetryAt(
+  attemptCount: number,
+  error: unknown,
+): string | null {
+  if (!(error instanceof BookingEmailDeliveryError) || !error.retryable) return null;
+  if (attemptCount >= 5) return null;
+  const delaySeconds = automaticRetryDelaySeconds(
+    attemptCount,
+    error.retryAfterSeconds,
+  );
+  return new Date(Date.now() + delaySeconds * 1000).toISOString();
+}
+
+async function deliverAutomaticBookingEmail(
+  job: BookingEmailOutboxJob,
+  payload: BookingConfirmationEmailPayload,
+  settings: BookingEmailSettings,
+): Promise<"sent" | "failed" | "disabled"> {
+  if (!settings.enabled) {
+    await updateBookingEmailOutbox(job.id, {
+      status: "disabled",
+      last_error: null,
+      next_retry_at: null,
+    });
+    return "disabled";
+  }
+  const issue = bookingEmailConfigurationIssue(settings, payload.customerEmail);
+  if (issue) {
+    await updateBookingEmailOutbox(job.id, {
+      status: "failed",
+      last_error: issue,
+      next_retry_at: null,
+    });
+    console.error("Booking confirmation email configuration failed", issue);
+    return "failed";
+  }
+  const actualRecipient = bookingEmailRecipient(settings, payload.customerEmail);
+  if (!actualRecipient) {
+    await updateBookingEmailOutbox(job.id, {
+      status: "failed",
+      last_error: "Email recipient is missing",
+      next_retry_at: null,
+    });
+    return "failed";
+  }
+  await updateBookingEmailOutbox(job.id, {
+    actual_delivery_recipient: actualRecipient,
+  });
+  try {
+    const result = await sendBookingConfirmationEmail(
+      payload,
+      settings,
+      job.idempotency_key,
+    );
+    await updateBookingEmailOutbox(job.id, {
+      status: "sent",
+      resend_email_id: result.id,
+      last_error: null,
+      next_retry_at: null,
+      sent_at: new Date().toISOString(),
+    });
+    return "sent";
+  } catch (error) {
+    const retryAt = bookingEmailRetryAt(job.attempt_count, error);
+    await updateBookingEmailOutbox(job.id, {
+      status: "failed",
+      last_error: bookingEmailErrorLabel(error),
+      next_retry_at: retryAt,
+    });
+    console.error(
+      "Booking confirmation email delivery failed",
+      job.id,
+      bookingEmailErrorLabel(error),
+    );
+    return "failed";
+  }
+}
+
+async function deliverManualBookingEmail(
+  delivery: BookingEmailManualAttempt,
+  payload: BookingConfirmationEmailPayload,
+  settings: BookingEmailSettings,
+): Promise<"sent" | "failed" | "disabled"> {
+  if (!settings.enabled) {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "disabled",
+      last_error: null,
+      next_retry_at: null,
+    });
+    return "disabled";
+  }
+  const issue = bookingEmailConfigurationIssue(settings, payload.customerEmail);
+  if (issue) {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: issue,
+      next_retry_at: null,
+    });
+    console.error("Manual booking email configuration failed", issue);
+    return "failed";
+  }
+  const actualRecipient = bookingEmailRecipient(settings, payload.customerEmail);
+  if (!actualRecipient) {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: "Email recipient is missing",
+      next_retry_at: null,
+    });
+    return "failed";
+  }
+  await updateBookingEmailManualAttempt(delivery.id, {
+    actual_delivery_recipient: actualRecipient,
+  });
+  try {
+    const result = await sendBookingConfirmationEmail(
+      payload,
+      settings,
+      delivery.idempotency_key,
+    );
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "sent",
+      resend_email_id: result.id,
+      last_error: null,
+      next_retry_at: null,
+      sent_at: new Date().toISOString(),
+    });
+    return "sent";
+  } catch (error) {
+    const retryAt = bookingEmailRetryAt(delivery.attempt_count, error);
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: bookingEmailErrorLabel(error),
+      next_retry_at: retryAt,
+    });
+    console.error(
+      "Manual booking email delivery failed",
+      delivery.id,
+      bookingEmailErrorLabel(error),
+    );
+    return "failed";
+  }
+}
+
+async function queueAndDeliverBookingConfirmationEmail(
+  attempt: FiuuAttempt,
+  channel: string,
+  providerTransactionId: string,
+): Promise<void> {
+  const environment = fiuuEnvironment();
+  const settings = bookingEmailSettings(environment);
+  const payload = await bookingConfirmationEmailPayload(attempt, channel);
+  const queued = await rpcScalar<{ job_id?: string; created?: boolean }>(
+    "queue_booking_confirmation_email",
+    {
+      p_payment_attempt_id: attempt.id,
+      p_hold_token: attempt.hold_token,
+      p_provider_transaction_id: providerTransactionId,
+      p_recipient_email: payload.customerEmail || null,
+    },
+  );
+  const jobId = uuid(queued?.job_id);
+  if (!jobId) throw new Error("Booking confirmation email job was not created");
+  if (!queued?.created) {
+    console.info("Booking confirmation email already queued", attempt.order_id);
+    return;
+  }
+  const job = await rpcScalar<BookingEmailOutboxJob>("claim_booking_email_delivery", {
+    p_job_id: jobId,
+  });
+  if (!job?.id) return;
+  await deliverAutomaticBookingEmail(job, payload, settings);
+}
+
+async function processNextBookingEmailRetry(): Promise<Record<string, unknown> | null> {
+  const job = await rpcScalar<BookingEmailOutboxJob>("claim_next_booking_email_delivery");
+  if (!job?.id) return null;
+  try {
+    const attempt = await fiuuAttemptById(job.payment_attempt_id);
+    if (!attempt || attempt.status !== "confirmed") {
+      await updateBookingEmailOutbox(job.id, {
+        status: "failed",
+        last_error: "Confirmed payment attempt was not found",
+        next_retry_at: null,
+      });
+      return { job_id: job.id, status: "failed" };
+    }
+    const settings = bookingEmailSettings(fiuuEnvironment());
+    const payload = await bookingConfirmationEmailPayload(attempt, "");
+    const status = await deliverAutomaticBookingEmail(job, payload, settings);
+    return { job_id: job.id, status };
+  } catch (error) {
+    await updateBookingEmailOutbox(job.id, {
+      status: "failed",
+      last_error: bookingEmailErrorLabel(error),
+      next_retry_at: null,
+    }).catch((recordError) => {
+      console.error("Unable to record booking email retry failure", errorMessage(recordError));
+    });
+    console.error("Booking email retry failed", job.id, bookingEmailErrorLabel(error));
+    return { job_id: job.id, status: "failed" };
+  }
+}
+
+async function processNextManualBookingEmailRetry(): Promise<Record<string, unknown> | null> {
+  const delivery = await rpcScalar<BookingEmailManualAttempt>(
+    "claim_next_manual_booking_email_delivery",
+  );
+  if (!delivery?.id) return null;
+  try {
+    const attempt = await fiuuAttemptById(delivery.payment_attempt_id);
+    if (!attempt || attempt.status !== "confirmed") {
+      await updateBookingEmailManualAttempt(delivery.id, {
+        status: "failed",
+        last_error: "Confirmed payment attempt was not found",
+        next_retry_at: null,
+      });
+      return { delivery_id: delivery.id, status: "failed" };
+    }
+    const settings = bookingEmailSettings(fiuuEnvironment());
+    const payload = manualBookingEmailPayload(
+      await bookingConfirmationEmailPayload(attempt, ""),
+      delivery,
+      settings,
+    );
+    const status = await deliverManualBookingEmail(delivery, payload, settings);
+    return { delivery_id: delivery.id, status };
+  } catch (error) {
+    await updateBookingEmailManualAttempt(delivery.id, {
+      status: "failed",
+      last_error: bookingEmailErrorLabel(error),
+      next_retry_at: null,
+    }).catch((recordError) => {
+      console.error("Unable to record manual booking email retry failure", errorMessage(recordError));
+    });
+    console.error(
+      "Manual booking email retry failed",
+      delivery.id,
+      bookingEmailErrorLabel(error),
+    );
+    return { delivery_id: delivery.id, status: "failed" };
+  }
+}
+
+async function processBookingEmailRetries(): Promise<Record<string, unknown>> {
+  const automatic = await processNextBookingEmailRetry();
+  const manual = await processNextManualBookingEmailRetry();
+  return { automatic, manual };
+}
+
 async function startFiuuPayment(
   request: Request,
   token: string,
@@ -1091,6 +1747,21 @@ async function handleFiuuNotification(
     p_channel: response.channel || null,
   });
   if (!outcome) return fail(request, "Payment notification was not recorded", 500);
+  if (outcome === "confirmed") {
+    try {
+      await queueAndDeliverBookingConfirmationEmail(
+        attempt,
+        response.channel,
+        response.tranID,
+      );
+    } catch (error) {
+      // Payment and booking conversion already committed. A queue failure is
+      // retried by the gateway notification or the protected maintenance path;
+      // it must never roll back or alter the confirmed booking.
+      console.error("Unable to queue booking confirmation email", bookingEmailErrorLabel(error));
+      return fail(request, "Booking confirmation email was not queued", 503, "BOOKING_EMAIL_QUEUE_FAILED");
+    }
+  }
   if (outcome === "refund_required") {
     const queued = await rpcScalar<FiuuRefund>("queue_fiuu_refund_reconciliation", {
       p_order_id: response.orderid,
@@ -1297,10 +1968,11 @@ async function maintainFiuuRefunds(): Promise<Record<string, unknown>> {
   const staleSubmissions = await rpcScalar<number>(
     "mark_stale_fiuu_refund_submissions_for_review",
   ) ?? 0;
-  // Fiuu documents a maximum query frequency. Process at most one gateway API
-  // request per maintenance call, checking its own expiry/refund result first.
-  const statusResult = await checkNextFiuuRefundStatus();
-  const result = statusResult ?? await submitNextFiuuRefund();
+  // Late successful payments are queued for automatic refund. Submit that
+  // request on the next scheduled maintenance run before polling older
+  // refunds, while still making at most one gateway API request per run.
+  const submissionResult = await submitNextFiuuRefund();
+  const result = submissionResult ?? await checkNextFiuuRefundStatus();
   return {
     stale_refund_submissions: staleSubmissions,
     refund_action: result,
@@ -1542,12 +2214,27 @@ async function route(request: Request): Promise<Response> {
       return fail(request, "Forbidden", 403);
     }
     if (BOOKING_PAYMENT_GATEWAY === "fiuu") {
-      return json(request, { ok: true, ...(await maintainFiuuRefunds()) });
+      const refundMaintenance = await maintainFiuuRefunds();
+      const bookingEmail = await processBookingEmailRetries().catch((error) => {
+        console.error("Booking email maintenance failed", bookingEmailErrorLabel(error));
+        return { status: "failed", error: "booking email maintenance failed" };
+      });
+      return json(request, {
+        ok: true,
+        ...refundMaintenance,
+        booking_email: bookingEmail,
+      });
     }
     return json(request, { ok: true, ...(await cleanupExpiredPaymentHolds()) });
   }
   const rateLimitResponse = await enforceIpRateLimit(request, path);
   if (rateLimitResponse) return rateLimitResponse;
+  if (request.method === "POST" && path === "/") {
+    const body = await request.clone().json().catch(() => null) as Record<string, unknown> | null;
+    if (body?.action === "manual_resend_confirmation") {
+      return handleManualBookingEmailResend(request);
+    }
+  }
   if (request.method === "POST" && path === "/fiuu/return") {
     return handleFiuuNotification(request, "return");
   }
