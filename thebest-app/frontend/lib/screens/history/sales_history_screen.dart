@@ -6,6 +6,7 @@ import '../../data/repositories/commission_repository.dart';
 import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/transaction_repository.dart';
+import '../../widgets/receipt_business_identity.dart';
 import '../customers/customer_screen.dart';
 import 'history_listing_logic.dart';
 
@@ -1466,8 +1467,9 @@ class _HistoryOrder {
       case 'others':
         return 'Others';
       case 'billplz':
+      case 'fiuu':
       case 'online':
-        return 'Online';
+        return 'Online payment';
       default:
         return paymentMethod.isEmpty ? 'Payment' : paymentMethod;
     }
@@ -2925,17 +2927,6 @@ class _HistoryOrderCard extends StatelessWidget {
                       fontWeight: FontWeight.w700,
                     ),
                   ),
-                if (!order.isVoided && order.hasMonetaryPromotion) ...[
-                  const SizedBox(height: 3),
-                  Text(
-                    '${order.promotionCode.isEmpty ? 'Promotion' : order.promotionCode} · ${_money(order.discountAmount)} discount',
-                    style: const TextStyle(
-                      color: Color(0xFF4D8B45),
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                    ),
-                  ),
-                ],
               ],
             ),
           ],
@@ -3013,17 +3004,6 @@ class _HistoryOrderCard extends StatelessWidget {
             fontWeight: FontWeight.w700,
           ),
         ),
-        if (!order.isVoided && order.hasMonetaryPromotion) ...[
-          const SizedBox(height: 3),
-          Text(
-            '${order.promotionCode.isEmpty ? 'Promotion' : order.promotionCode} · ${_money(order.discountAmount)} discount',
-            style: const TextStyle(
-              color: Color(0xFF4D8B45),
-              fontSize: 11,
-              fontWeight: FontWeight.w800,
-            ),
-          ),
-        ],
         const SizedBox(height: 10),
         Row(
           children: [
@@ -3283,40 +3263,23 @@ class _OrderDetailSheet extends StatelessWidget {
             _DetailInfoCard(
               children: [
                 _DetailRow(
-                  'Payment',
+                  'Payment method',
                   order.isVoided
                       ? '${order.paymentLabel} - Voided'
                       : order.paymentLabel,
                 ),
-                if (order.hasMonetaryPromotion) ...[
+                _DetailRow('Service Net', _money(order.servicePrice)),
+                _DetailRow('SST', _money(order.sstAmount)),
+                if (order.hasMonetaryPromotion)
                   _DetailRow(
-                    'Original service price',
-                    _money(order.grossAmount),
-                  ),
-                  _DetailRow(
-                    'Promo code',
-                    order.promotionCode.isEmpty
-                        ? 'Promotion applied'
-                        : order.promotionCode,
-                  ),
-                  _DetailRow(
-                    'Discount',
+                    'Promotion',
                     '-${_money(order.discountAmount)}',
                   ),
-                  _DetailRow(
-                    'Final paid',
-                    _money(order.totalAmount),
-                    strong: true,
-                  ),
-                ] else ...[
-                  _DetailRow('Service Net', _money(order.servicePrice)),
-                  _DetailRow('SST', _money(order.sstAmount)),
-                  _DetailRow(
-                    'Total paid',
-                    _money(order.totalAmount),
-                    strong: true,
-                  ),
-                ],
+                _DetailRow(
+                  'Total paid',
+                  _money(order.totalAmount),
+                  strong: true,
+                ),
               ],
             ),
             if (isAdmin && order.isServiceCompleted && !order.isVoided) ...[
@@ -3453,17 +3416,7 @@ class _BillReceiptHeader extends StatelessWidget {
         children: [
           Row(
             children: [
-              const Icon(Icons.receipt_long_outlined, size: 17, color: _teal),
-              const SizedBox(width: 7),
-              const Text(
-                'BILL RECEIPT',
-                style: TextStyle(
-                  color: _teal,
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-              const Spacer(),
+              const Expanded(child: ReceiptBusinessIdentity()),
               if (order.isVoided) const _VoidedChip(),
             ],
           ),

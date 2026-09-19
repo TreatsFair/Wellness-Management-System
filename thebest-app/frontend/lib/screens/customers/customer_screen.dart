@@ -5,6 +5,7 @@ import '../../data/repositories/customer_repository.dart';
 import '../../data/repositories/dashboard_repository.dart';
 import '../../data/repositories/repository_utils.dart';
 import '../../data/repositories/transaction_repository.dart';
+import '../../widgets/receipt_business_identity.dart';
 
 DateTime _stripDate(DateTime date) => DateTime(date.year, date.month, date.day);
 
@@ -2995,24 +2996,7 @@ class _CustomerBillReceiptHeader extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
-            children: [
-              Icon(
-                Icons.receipt_long_outlined,
-                size: 17,
-                color: Color(0xFF1B6B72),
-              ),
-              SizedBox(width: 7),
-              Text(
-                'BILL RECEIPT',
-                style: TextStyle(
-                  color: Color(0xFF1B6B72),
-                  fontSize: 11,
-                  fontWeight: FontWeight.w900,
-                ),
-              ),
-            ],
-          ),
+          const ReceiptBusinessIdentity(),
           const SizedBox(height: 12),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
