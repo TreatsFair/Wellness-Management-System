@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'core/accessibility/accessibility_settings.dart';
+import 'core/environment/app_environment.dart';
 import 'core/outlets/outlet_context.dart';
 import 'core/services/service_category_order.dart';
 import 'core/theme/app_theme.dart';
@@ -16,17 +17,20 @@ class TreatsAppConfiguration {
     required this.supabaseUrl,
     required this.supabasePublishableKey,
     required this.appTitle,
+    required this.isStaging,
     this.environmentBannerText,
   });
 
   final String supabaseUrl;
   final String supabasePublishableKey;
   final String appTitle;
+  final bool isStaging;
   final String? environmentBannerText;
 }
 
 Future<void> runTreatsApp(TreatsAppConfiguration configuration) async {
   WidgetsFlutterBinding.ensureInitialized();
+  AppEnvironment.initialize(isStaging: configuration.isStaging);
   await ServiceCategoryOrderController.instance.initialize();
 
   await Supabase.initialize(

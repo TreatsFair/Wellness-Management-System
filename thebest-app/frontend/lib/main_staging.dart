@@ -7,6 +7,7 @@ Future<void> main() {
       supabaseUrl: SupabaseConfig.url,
       supabasePublishableKey: SupabaseConfig.publishableKey,
       appTitle: 'Treats — STAGING',
+      isStaging: true,
       environmentBannerText: 'STAGING — DUMMY DATA',
     ),
   );

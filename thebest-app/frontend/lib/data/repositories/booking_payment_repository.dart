@@ -24,4 +24,26 @@ class BookingPaymentRepository {
         .map((row) => Map<String, dynamic>.from(row))
         .toList();
   }
+
+  Future<bool> resendConfirmationEmail(
+    String attemptId, {
+    String? recipientEmail,
+  }) async {
+    final result = await _client.functions.invoke(
+      'booking-api',
+      body: {
+        'action': 'manual_resend_confirmation',
+        'attempt_id': attemptId,
+        if (recipientEmail != null) 'recipient_email': recipientEmail.trim(),
+      },
+    );
+    final data = result.data;
+    if (data is Map && data['ok'] == true && data['status'] == 'sent') {
+      return data['recipient_mode'] == 'staging_test_recipient';
+    }
+    final message = data is Map ? data['error']?.toString() : null;
+    throw Exception(message == null || message.isEmpty
+        ? 'The confirmation email could not be sent.'
+        : message);
+  }
 }

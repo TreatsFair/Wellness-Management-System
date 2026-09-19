@@ -7,6 +7,7 @@ Future<void> main() {
       supabaseUrl: ProductionSupabaseConfig.url,
       supabasePublishableKey: ProductionSupabaseConfig.publishableKey,
       appTitle: 'Treats',
+      isStaging: false,
     ),
   );
 }

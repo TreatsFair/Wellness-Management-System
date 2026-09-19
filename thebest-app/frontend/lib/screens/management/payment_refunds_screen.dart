@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
+import '../../core/environment/app_environment.dart';
 import '../../core/outlets/outlet_context.dart';
 import '../../core/theme/app_theme.dart';
 import '../../data/repositories/booking_payment_repository.dart';
@@ -34,6 +35,7 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
   bool _refreshing = false;
   DateTime? _lastSyncedAt;
   String? _error;
+  String? _resendingAttemptId;
 
   @override
   void initState() {
@@ -67,8 +69,14 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
     try {
       final rows = await _repository.listForActiveOutlet();
       if (!mounted) return;
+      final records = rows.map(_PaymentRecord.fromMap).toList()
+        ..sort((a, b) {
+          final byTransaction = b.transactionAt.compareTo(a.transactionAt);
+          if (byTransaction != 0) return byTransaction;
+          return b.paymentCreatedOrEpoch.compareTo(a.paymentCreatedOrEpoch);
+        });
       setState(() {
-        _records = rows.map(_PaymentRecord.fromMap).toList();
+        _records = records;
         _loading = false;
         _lastSyncedAt = DateTime.now();
         _error = null;
@@ -182,6 +190,56 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
       _customDateRange = selected;
       _dateFilter = _PaymentDateFilter.custom;
     });
+  }
+
+  Future<void> _resendConfirmationEmail(_PaymentRecord record) async {
+    if (_resendingAttemptId != null || !record.isConfirmed) return;
+    final email = record.customerEmail.trim();
+    if (email.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('This booking does not have a customer email address.'),
+          ),
+        );
+      }
+      return;
+    }
+    final isStaging = AppEnvironment.isStaging;
+    final recipientEmail = await showDialog<String>(
+      context: context,
+      builder: (_) => _ResendConfirmationDialog(
+        initialEmail: email,
+        isStaging: isStaging,
+      ),
+    );
+    if (recipientEmail == null || !mounted) return;
+    setState(() => _resendingAttemptId = record.attemptId);
+    try {
+      final sentToStagingRecipient =
+          await _repository.resendConfirmationEmail(
+            record.attemptId,
+            recipientEmail: isStaging ? null : recipientEmail,
+          );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            sentToStagingRecipient
+                ? 'Confirmation email sent to the configured STAGING test recipient.'
+                : 'Confirmation email sent to $recipientEmail.',
+          ),
+        ),
+      );
+      await _load(silent: true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Confirmation email was not sent: $error')),
+      );
+    } finally {
+      if (mounted) setState(() => _resendingAttemptId = null);
+    }
   }
 
   @override
@@ -359,6 +417,11 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
                       record: filtered[index],
                       currency: _currency,
                       dateTime: _dateTime,
+                      onResendConfirmation: filtered[index].isConfirmed
+                          ? () => _resendConfirmationEmail(filtered[index])
+                          : null,
+                      resending:
+                          _resendingAttemptId == filtered[index].attemptId,
                     ),
                   ),
                 ),
@@ -370,8 +433,103 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
   }
 }
 
+class _ResendConfirmationDialog extends StatefulWidget {
+  const _ResendConfirmationDialog({
+    required this.initialEmail,
+    required this.isStaging,
+  });
+
+  final String initialEmail;
+  final bool isStaging;
+
+  @override
+  State<_ResendConfirmationDialog> createState() =>
+      _ResendConfirmationDialogState();
+}
+
+class _ResendConfirmationDialogState
+    extends State<_ResendConfirmationDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _recipientController;
+
+  @override
+  void initState() {
+    super.initState();
+    _recipientController = TextEditingController(text: widget.initialEmail);
+  }
+
+  @override
+  void dispose() {
+    _recipientController.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    if (!(_formKey.currentState?.validate() ?? false)) return;
+    Navigator.of(context).pop(_recipientController.text.trim());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('Resend confirmation email?'),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextFormField(
+                controller: _recipientController,
+                readOnly: widget.isStaging,
+                keyboardType: TextInputType.emailAddress,
+                autofillHints: const [AutofillHints.email],
+                decoration: InputDecoration(
+                  labelText: widget.isStaging
+                      ? 'Customer email (read-only in STAGING)'
+                      : 'Send confirmation to',
+                  helperText: widget.isStaging
+                      ? 'Delivery is redirected to the configured STAGING test recipient.'
+                      : 'Editing this changes only this resend, not the booking record.',
+                ),
+                validator: (value) {
+                  final candidate = value?.trim() ?? '';
+                  if (candidate.isEmpty) return 'Enter an email address.';
+                  if (!RegExp(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+                      .hasMatch(candidate)) {
+                    return 'Enter a valid email address.';
+                  }
+                  return null;
+                },
+                onFieldSubmitted: (_) => _submit(),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              const Text(
+                'This creates a new intentional delivery attempt for the confirmed booking.',
+              ),
+            ],
+          ),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          onPressed: _submit,
+          child: const Text('Resend email'),
+        ),
+      ],
+    );
+  }
+}
+
 class _PaymentRecord {
   const _PaymentRecord({
+    required this.attemptId,
     required this.orderId,
     required this.amount,
     required this.paymentStatus,
@@ -397,6 +555,7 @@ class _PaymentRecord {
     DateTime? date(String key) =>
         DateTime.tryParse(row[key]?.toString() ?? '')?.toLocal();
     return _PaymentRecord(
+      attemptId: row['attempt_id']?.toString() ?? '',
       orderId: row['order_id']?.toString() ?? '',
       amount: num.tryParse(row['amount']?.toString() ?? '') ?? 0,
       paymentStatus: row['payment_status']?.toString() ?? 'created',
@@ -419,6 +578,7 @@ class _PaymentRecord {
     );
   }
 
+  final String attemptId;
   final String orderId;
   final num amount;
   final String paymentStatus;
@@ -445,6 +605,14 @@ class _PaymentRecord {
       paymentUpdated ??
       paymentReceived ??
       paymentCreated;
+
+  DateTime get transactionAt =>
+      paymentReceived ?? paymentCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
+
+  DateTime get paymentCreatedOrEpoch =>
+      paymentCreated ?? DateTime.fromMillisecondsSinceEpoch(0);
+
+  bool get isConfirmed => paymentStatus == 'confirmed' && attemptId.isNotEmpty;
 
   bool get needsAttention =>
       refundStatus == 'needs_review' ||
@@ -484,6 +652,8 @@ class _PaymentRecord {
     return switch (paymentStatus) {
       'confirmed' => 'Paid',
       'failed' => 'Payment failed',
+      'expired' => 'Payment expired',
+      'cancelled' => 'Payment cancelled',
       'pending' => 'Payment pending',
       'created' => 'Awaiting payment',
       'refund_required' => 'Refund required',
@@ -527,7 +697,13 @@ class _PaymentRecord {
     if (statusLabel == 'Paid' || statusLabel == 'Refunded') {
       return AppColors.success;
     }
-    if (statusLabel == 'Payment failed') return AppColors.muted;
+    if (const {
+      'Payment failed',
+      'Payment expired',
+      'Payment cancelled',
+    }.contains(statusLabel)) {
+      return AppColors.muted;
+    }
     return AppColors.info;
   }
 
@@ -805,11 +981,15 @@ class _PaymentCard extends StatelessWidget {
     required this.record,
     required this.currency,
     required this.dateTime,
+    required this.onResendConfirmation,
+    required this.resending,
   });
 
   final _PaymentRecord record;
   final NumberFormat currency;
   final DateFormat dateTime;
+  final VoidCallback? onResendConfirmation;
+  final bool resending;
 
   String _date(DateTime? value) =>
       value == null ? 'Not available' : dateTime.format(value);
@@ -861,8 +1041,18 @@ class _PaymentCard extends StatelessWidget {
                 ),
               ],
             ),
-            const SizedBox(height: AppSpacing.lg),
-            _RefundStatusPanel(record: record, dateTime: dateTime),
+            if (record.hasRefundActivity) ...[
+              const SizedBox(height: AppSpacing.lg),
+              _RefundStatusPanel(record: record, dateTime: dateTime),
+            ],
+            if (record.isConfirmed) ...[
+              const SizedBox(height: AppSpacing.lg),
+              _ConfirmationEmailPanel(
+                email: record.customerEmail,
+                onResend: onResendConfirmation,
+                busy: resending,
+              ),
+            ],
             const SizedBox(height: AppSpacing.lg),
             Container(
               width: double.infinity,
@@ -885,6 +1075,11 @@ class _PaymentCard extends StatelessWidget {
                     _ReferenceLine(
                       label: 'Transaction',
                       value: record.transactionId,
+                    ),
+                  if (record.paymentReceived != null)
+                    _ReferenceLine(
+                      label: 'Transaction date',
+                      value: _date(record.paymentReceived),
                     ),
                   if (record.refundId.isNotEmpty)
                     _ReferenceLine(label: 'Refund', value: record.refundId),
@@ -911,6 +1106,74 @@ class _PaymentCard extends StatelessWidget {
             ],
           ],
         ),
+      ),
+    );
+  }
+}
+
+class _ConfirmationEmailPanel extends StatelessWidget {
+  const _ConfirmationEmailPanel({
+    required this.email,
+    required this.onResend,
+    required this.busy,
+  });
+
+  final String email;
+  final VoidCallback? onResend;
+  final bool busy;
+
+  @override
+  Widget build(BuildContext context) {
+    final hasEmail = email.trim().isNotEmpty;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(AppSpacing.md),
+      decoration: BoxDecoration(
+        color: context.appCanvas,
+        borderRadius: BorderRadius.circular(AppRadius.control),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final compact = constraints.maxWidth < 560;
+          final action = FilledButton.icon(
+            onPressed: hasEmail ? onResend : null,
+            icon: busy
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.mark_email_read_outlined, size: 18),
+            label: Text(busy ? 'Sending…' : 'Resend confirmation'),
+          );
+          final detail = Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Customer confirmation email',
+                  style: AppText.label.copyWith(color: context.appText),
+                ),
+                const SizedBox(height: AppSpacing.xs),
+                Text(
+                  hasEmail ? email : 'No customer email recorded',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppText.caption.copyWith(color: context.appMuted),
+                ),
+              ],
+            ),
+          );
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [detail, const SizedBox(height: AppSpacing.sm), action],
+            );
+          }
+          return Row(
+            children: [detail, const SizedBox(width: AppSpacing.md), action],
+          );
+        },
       ),
     );
   }
@@ -975,11 +1238,6 @@ class _PaymentCardHeader extends StatelessWidget {
                         label: record.statusLabel,
                         foreground: record.statusColor,
                         background: record.statusSoftColor,
-                      ),
-                      const _StatusPill(
-                        label: 'Fiuu',
-                        foreground: AppColors.primary,
-                        background: AppColors.primarySoft,
                       ),
                     ],
                   ),
