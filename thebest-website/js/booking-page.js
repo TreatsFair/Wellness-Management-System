@@ -1086,7 +1086,7 @@ function setDialogIcon(kind) {
   else if (kind === "failed") { mark.classList.add("is-failed"); mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 8l8 8M16 8l-8 8" /></svg>'; }
   else mark.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 12 3 3 7-7" /></svg>';
 }
-function showPaymentStatus(kind, { reference = "" } = {}) {
+function showPaymentStatus(kind) {
   const dialog = document.querySelector("#confirmation-dialog");
   const title = document.querySelector("#confirmation-title");
   const message = document.querySelector("#confirmation-message");
@@ -1094,7 +1094,7 @@ function showPaymentStatus(kind, { reference = "" } = {}) {
   dialog.dataset.paymentState = kind;
   close.style.display = kind === "checking" ? "none" : "";
   if (kind === "checking") { setDialogIcon("pending"); setConfirmationEyebrow("Confirming your payment"); title.textContent = "Just a moment..."; message.textContent = "We're confirming your booking."; }
-  else if (kind === "confirmed") { setDialogIcon("success"); setConfirmationEyebrow("Booking confirmed"); title.textContent = "Your booking is confirmed."; message.textContent = `Payment received${reference ? ` - reference ${reference}` : ""}`; close.textContent = "Done"; close.dataset.action = "home"; }
+  else if (kind === "confirmed") { setDialogIcon("success"); setConfirmationEyebrow("Booking confirmed"); title.textContent = "Your booking is confirmed."; message.replaceChildren(document.createTextNode("Payment received"), document.createElement("br"), document.createTextNode("Booking confirmation has been sent to your email.")); close.textContent = "Done"; close.dataset.action = "home"; }
   else if (kind === "failed") { setDialogIcon("failed"); setConfirmationEyebrow("Payment not completed"); title.textContent = "We couldn't confirm your booking."; message.textContent = "Your booking was unsuccessful. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
   else { setDialogIcon("pending"); setConfirmationEyebrow("Still confirming"); title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
@@ -1105,11 +1105,8 @@ async function pollPaymentStatus(token) {
   try {
     const payload = await api.getHoldStatus(token);
     if (payload.hold?.status === "confirmed") {
-      // Same receipt number the app shows for this booking's transaction; falls
-      // back to the hold's own reference only if the webhook hasn't landed yet.
-      const reference = payload.hold.receipt_number || String(token).slice(0, 8).toUpperCase();
       try { sessionStorage.removeItem(BOOKING_SESSION_KEY); } catch (_) { /* Optional browser storage. */ }
-      showPaymentStatus("confirmed", { reference });
+      showPaymentStatus("confirmed");
       return;
     }
     if (["payment_failed", "cancelled", "expired"].includes(payload.hold?.status)) { showPaymentStatus("failed"); return; }
@@ -1425,9 +1422,7 @@ async function submitHold() {
         return;
       }
       if (status === "confirmed") {
-        showPaymentStatus("confirmed", {
-          reference: payload.hold.receipt_number || String(state.hold.token).slice(0, 8).toUpperCase(),
-        });
+        showPaymentStatus("confirmed");
         return;
       }
       if (stillPending || ["payment_failed", "cancelled"].includes(status)) {
@@ -1638,9 +1633,7 @@ async function initializeBooking() {
       if (payload?.hold?.status === "pending_payment" && holdRemainingMs() > 0) {
         startHoldCountdown();
       } else if (payload?.hold?.status === "confirmed") {
-        showPaymentStatus("confirmed", {
-          reference: payload.hold.receipt_number || String(state.hold.token).slice(0, 8).toUpperCase(),
-        });
+        showPaymentStatus("confirmed");
         clearActiveHold();
       } else {
         clearActiveHold();

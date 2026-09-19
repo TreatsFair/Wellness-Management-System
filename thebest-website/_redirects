@@ -1,3 +1,7 @@
 /booking              /booking.html  200
 /booking-taman-wahyu  /booking.html  200
 /booking-pv128         /booking.html  200
+
+# Permanent homepage fallback for paths that do not match an existing file or
+# one of the valid routes above. Keep this rule last.
+/*                    /                301
