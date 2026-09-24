@@ -74,6 +74,17 @@ export type FiuuStatusResponse = {
   ErrorDesc: string;
 };
 
+export type FiuuAdvancedRefundResponse = {
+  RefundType: string;
+  MerchantID: string;
+  RefID: string;
+  RefundID: string;
+  TxnID: string;
+  Amount: string;
+  Status: string;
+  Signature: string;
+};
+
 function md5(value: string): string {
   return createHash("md5").update(value, "utf8").digest("hex");
 }
@@ -254,6 +265,124 @@ export function fiuuReversalRequest(
       type: "2",
     },
   };
+}
+
+// Fiuu API Spec v13.93, Advanced Full/Partial Refund. A full refund passes
+// the original amount; RefID must be stored before the network request.
+export function fiuuAdvancedRefundRequest(
+  transactionId: string,
+  referenceId: string,
+  amount: string,
+  credentials: FiuuCredentials,
+): { fields: Record<string, string> } {
+  if (!TRANSACTION_ID.test(transactionId) ||
+      !/^[A-Za-z0-9_-]{1,100}$/.test(referenceId) ||
+      !validAmount(amount) || !MERCHANT_ID.test(credentials.merchantId) ||
+      !credentials.secretKey) {
+    throw new Error("Invalid Fiuu refund request");
+  }
+  return { fields: {
+    RefundType: "P",
+    MerchantID: credentials.merchantId,
+    RefID: referenceId,
+    TxnID: transactionId,
+    Amount: amount,
+    Signature: md5("P" + credentials.merchantId + referenceId +
+      transactionId + amount + credentials.secretKey),
+  } };
+}
+
+export function verifyFiuuAdvancedRefundResponse(
+  response: FiuuAdvancedRefundResponse,
+  transactionId: string,
+  referenceId: string,
+  amount: string,
+  credentials: FiuuCredentials,
+): boolean {
+  if (response.RefundType !== "P" ||
+      response.MerchantID !== credentials.merchantId ||
+      response.RefID !== referenceId || response.TxnID !== transactionId ||
+      response.Amount !== amount || !TRANSACTION_ID.test(response.RefundID) ||
+      !["00", "11", "22"].includes(response.Status)) return false;
+  return equalHash(response.Signature, md5(
+    response.RefundType + response.MerchantID + response.RefID +
+    response.RefundID + response.TxnID + response.Amount +
+    response.Status + credentials.secretKey,
+  ));
+}
+
+export function fiuuAdvancedRefundInquiryRequest(
+  referenceId: string,
+  credentials: FiuuCredentials,
+): { fields: Record<string, string> } {
+  if (!/^[A-Za-z0-9_-]{1,100}$/.test(referenceId) ||
+      !MERCHANT_ID.test(credentials.merchantId) || !credentials.verifyKey) {
+    throw new Error("Invalid Fiuu refund inquiry");
+  }
+  return { fields: {
+    RefID: referenceId,
+    MerchantID: credentials.merchantId,
+    Signature: md5(referenceId + credentials.merchantId + credentials.verifyKey),
+  } };
+}
+
+export function fiuuRefundInquiryByTransactionRequest(
+  transactionId: string,
+  credentials: FiuuCredentials,
+): { fields: Record<string, string> } {
+  if (!TRANSACTION_ID.test(transactionId) ||
+      !MERCHANT_ID.test(credentials.merchantId) || !credentials.verifyKey) {
+    throw new Error("Invalid Fiuu refund transaction inquiry");
+  }
+  return { fields: {
+    TxnID: transactionId,
+    MerchantID: credentials.merchantId,
+    Signature: md5(transactionId + credentials.merchantId + credentials.verifyKey),
+  } };
+}
+
+export function fiuuRefundInquiryResultByTransaction(
+  response: unknown,
+  transactionId: string,
+  refundId: string,
+): "pending" | "processing" | "rejected" | "success" | null {
+  const entries = Array.isArray(response) ? response : [response];
+  const matches = entries.filter((entry: unknown) => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return false;
+    }
+    const record = entry as Record<string, unknown>;
+    return String(record.TxnID ?? "") === transactionId &&
+      String(record.RefundID ?? "") === refundId;
+  });
+  if (matches.length !== 1) return null;
+  const status = String((matches[0] as Record<string, unknown>).Status ?? "")
+    .toLowerCase();
+  return status === "pending" || status === "processing" ||
+      status === "rejected" || status === "success" ? status : null;
+}
+
+// Fiuu's inquiry endpoint may return one refund as a single-element JSON array.
+// Never pick an item from a multi-result response without an unambiguous match.
+export function fiuuAdvancedRefundInquiryResult(
+  response: unknown,
+  transactionId: string,
+  referenceId: string,
+  refundId: string,
+): "pending" | "processing" | "rejected" | "success" | null {
+  const value = Array.isArray(response)
+    ? (response.length === 1 ? response[0] : null)
+    : response;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (String(record.RefID ?? "") !== referenceId ||
+      String(record.TxnID ?? "") !== transactionId ||
+      String(record.RefundID ?? "") !== refundId) return null;
+  const status = String(record.Status ?? "").toLowerCase();
+  return status === "pending" || status === "processing" ||
+      status === "rejected" || status === "success" ? status : null;
 }
 
 export function verifyFiuuReversalResponse(

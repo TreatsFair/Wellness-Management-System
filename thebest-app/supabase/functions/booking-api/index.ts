@@ -1,15 +1,22 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 import {
   fiuuHostedPaymentRequest,
+  fiuuAdvancedRefundRequest,
+  fiuuAdvancedRefundInquiryRequest,
+  fiuuAdvancedRefundInquiryResult,
+  fiuuRefundInquiryByTransactionRequest,
+  fiuuRefundInquiryResultByTransaction,
   fiuuReversalRequest,
   fiuuResponseFromForm,
   fiuuResponseValidationIssue,
   fiuuStatusRequest,
   fiuuReturnProof,
   verifyFiuuReversalResponse,
+  verifyFiuuAdvancedRefundResponse,
   verifyFiuuReturnProof,
   verifyFiuuStatusResponse,
   type FiuuCredentials,
+  type FiuuAdvancedRefundResponse,
   type FiuuReversalResponse,
   type FiuuStatusResponse,
 } from "./fiuu.ts";
@@ -1799,7 +1806,21 @@ type FiuuRefund = {
   claim_token: string | null;
   gateway_refund_id: string | null;
   requested_at: string | null;
+  refund_kind: string;
+  merchant_ref_id: string | null;
 };
+
+function fiuuAdvancedRefundUrl(): string {
+  return `${fiuuApiBaseUrl()}/RMS/API/refundAPI/index.php`;
+}
+
+function fiuuAdvancedRefundInquiryUrl(): string {
+  return `${fiuuApiBaseUrl()}/RMS/API/refundAPI/q_by_refID.php`;
+}
+
+function fiuuRefundInquiryByTransactionUrl(): string {
+  return `${fiuuApiBaseUrl()}/RMS/API/refundAPI/q_by_txn.php`;
+}
 
 function fiuuReversalUrl(): string {
   return `${fiuuApiBaseUrl()}/RMS/API/refundAPI/refund.php`;
@@ -1873,7 +1894,98 @@ async function checkNextFiuuRefundStatus(): Promise<Record<string, unknown> | nu
   if (!refund.claim_token) throw new Error("Fiuu refund status claim is incomplete");
   const credentials = fiuuCredentials();
   const amount = Number(refund.amount).toFixed(2);
+  if (refund.refund_kind === "admin_full") {
+    if (refund.requested_at &&
+        Date.now() - Date.parse(refund.requested_at) > 30 * 24 * 60 * 60 * 1000) {
+      await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+        p_claim_token: refund.claim_token,
+        p_error: "Refund remains unresolved after 30 days; review with Fiuu",
+        p_needs_review: true,
+      });
+      return { action: "refund_inquiry", outcome: "needs_review" };
+    }
+    try {
+      if (!refund.merchant_ref_id || !refund.gateway_refund_id) {
+        throw new Error("Manual refund identity is missing");
+      }
+      const request = fiuuAdvancedRefundInquiryRequest(
+        refund.merchant_ref_id, credentials,
+      );
+      const payload = await postFiuuJson(
+        fiuuAdvancedRefundInquiryUrl(), request.fields,
+      );
+      const result = fiuuAdvancedRefundInquiryResult(
+        payload, refund.gateway_transaction_id, refund.merchant_ref_id,
+        refund.gateway_refund_id,
+      );
+      if (!result) {
+        await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+          p_claim_token: refund.claim_token,
+          p_error: "Fiuu refund inquiry identity or status did not match",
+          p_needs_review: true,
+        });
+        return { action: "refund_inquiry", outcome: "needs_review" };
+      }
+      const outcome = await rpcScalar<string>("complete_admin_fiuu_refund_inquiry", {
+        p_claim_token: refund.claim_token,
+        p_result: result,
+        p_gateway_refund_id: refund.gateway_refund_id,
+      });
+      return { action: "refund_inquiry", outcome };
+    } catch (error) {
+      await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+        p_claim_token: refund.claim_token,
+        p_error: errorMessage(error),
+        p_needs_review: false,
+      });
+      return { action: "refund_inquiry", outcome: "retry_scheduled" };
+    }
+  }
   try {
+    if (refund.refund_kind === "late_reversal" && refund.requested_at) {
+      if (Date.now() - Date.parse(refund.requested_at) > 30 * 24 * 60 * 60 * 1000 ||
+          !refund.gateway_refund_id) {
+        await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+          p_claim_token: refund.claim_token,
+          p_error: "Reversal refund requires manual review",
+          p_needs_review: true,
+        });
+        return { action: "refund_inquiry", outcome: "needs_review" };
+      }
+      const inquiry = fiuuRefundInquiryByTransactionRequest(
+        refund.gateway_transaction_id, credentials,
+      );
+      const inquiryPayload = await postFiuuJson(
+        fiuuRefundInquiryByTransactionUrl(), inquiry.fields,
+      );
+      const result = fiuuRefundInquiryResultByTransaction(
+        inquiryPayload, refund.gateway_transaction_id, refund.gateway_refund_id,
+      );
+      if (!result) {
+        await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+          p_claim_token: refund.claim_token,
+          p_error: "Fiuu reversal refund inquiry identity or status did not match",
+          p_needs_review: true,
+        });
+        return { action: "refund_inquiry", outcome: "needs_review" };
+      }
+      if (result === "rejected") {
+        await rpcScalar<boolean>("fail_fiuu_refund_status_check", {
+          p_claim_token: refund.claim_token,
+          p_error: "Fiuu rejected the reversal refund",
+          p_needs_review: true,
+        });
+        return { action: "refund_inquiry", outcome: "needs_review" };
+      }
+      const outcome = await rpcScalar<string>("complete_fiuu_refund_status_check", {
+        p_claim_token: refund.claim_token,
+        p_gateway_status: result === "success" ? "00" : "22",
+        p_status_name: result === "success" ? "refunded" : "pending",
+        p_error_code: "",
+        p_error: "",
+      });
+      return { action: "refund_inquiry", outcome: outcome ?? "unknown" };
+    }
     const request = fiuuStatusRequest(
       refund.gateway_transaction_id,
       amount,
@@ -1917,6 +2029,62 @@ async function submitNextFiuuRefund(): Promise<Record<string, unknown> | null> {
   if (!refund || !refund.id) return null;
   if (!refund.claim_token) throw new Error("Fiuu refund submission claim is incomplete");
   const credentials = fiuuCredentials();
+  if (refund.refund_kind === "admin_full") {
+    try {
+      if (!refund.merchant_ref_id) throw new Error("Manual refund reference is missing");
+      const amount = Number(refund.amount).toFixed(2);
+      const request = fiuuAdvancedRefundRequest(
+        refund.gateway_transaction_id, refund.merchant_ref_id, amount,
+        credentials,
+      );
+      const payload = await postFiuuJson(fiuuAdvancedRefundUrl(), request.fields);
+      if (typeof payload.error_code === "string") {
+        await rpcScalar<string>("complete_fiuu_refund_submission", {
+          p_claim_token: refund.claim_token,
+          p_gateway_refund_id: null,
+          p_gateway_status: null,
+          p_accepted: false,
+          p_error_code: String(payload.error_code).slice(0, 20),
+          p_error: "Fiuu rejected the refund request",
+        });
+        return { action: "refund_submission", outcome: "needs_review" };
+      }
+      const response: FiuuAdvancedRefundResponse = {
+        RefundType: String(payload.RefundType ?? ""),
+        MerchantID: String(payload.MerchantID ?? ""),
+        RefID: String(payload.RefID ?? ""),
+        RefundID: String(payload.RefundID ?? ""),
+        TxnID: String(payload.TxnID ?? ""),
+        Amount: String(payload.Amount ?? ""),
+        Status: String(payload.Status ?? ""),
+        Signature: String(payload.Signature ?? ""),
+      };
+      if (!verifyFiuuAdvancedRefundResponse(
+        response, refund.gateway_transaction_id, refund.merchant_ref_id,
+        amount, credentials,
+      )) {
+        throw new Error("Fiuu refund response signature or identity was invalid");
+      }
+      const accepted = response.Status === "22" || response.Status === "00";
+      const outcome = await rpcScalar<string>("complete_fiuu_refund_submission", {
+        p_claim_token: refund.claim_token,
+        p_gateway_refund_id: response.RefundID,
+        p_gateway_status: response.Status,
+        p_accepted: accepted,
+        p_error_code: accepted ? null : response.Status,
+        p_error: accepted ? null : "Fiuu rejected the refund request",
+      });
+      return { action: "refund_submission", outcome: outcome ?? "unknown" };
+    } catch (error) {
+      // A timeout or invalid response may follow a successful provider action.
+      // Never automatically submit a second refund for this RefID.
+      await rpcScalar<boolean>("fail_fiuu_refund_submission", {
+        p_claim_token: refund.claim_token,
+        p_error: errorMessage(error),
+      });
+      return { action: "refund_submission", outcome: "needs_review" };
+    }
+  }
   try {
     const request = fiuuReversalRequest(
       refund.gateway_transaction_id,
