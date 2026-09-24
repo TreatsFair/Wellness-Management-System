@@ -47,6 +47,20 @@ class BookingPaymentRepository {
         : message);
   }
 
+  Future<List<Map<String, dynamic>>> listConfirmationEmailHistory(
+    String attemptId,
+  ) async {
+    final result = await _client.rpc(
+      'list_admin_booking_email_history',
+      params: {'p_attempt_id': attemptId},
+    );
+    if (result is! List) return const [];
+    return result
+        .whereType<Map>()
+        .map((row) => Map<String, dynamic>.from(row))
+        .toList();
+  }
+
   Future<void> requestFullFiuuRefund(String attemptId, String reason) async {
     await _client.rpc(
       'request_admin_fiuu_full_refund',

@@ -218,6 +218,7 @@ class _ScheduleAppointment {
   final String receiptNumber;
   final String paymentMethod;
   final String paymentStatus;
+  final bool refundPending;
   final double paidAmount;
   final double originalPaidAmount;
   final double paidAddOnAmount;
@@ -274,6 +275,7 @@ class _ScheduleAppointment {
     required this.receiptNumber,
     required this.paymentMethod,
     required this.paymentStatus,
+    required this.refundPending,
     required this.paidAmount,
     required this.originalPaidAmount,
     required this.paidAddOnAmount,
@@ -461,6 +463,7 @@ class _ScheduleAppointment {
       // instead of inferring "paid" from whether a transaction row happened to
       // join fixes paid online bookings that used to show as Payment Pending.
       paymentStatus: data['paymentStatus']?.toString() ?? 'unpaid',
+      refundPending: data['refundPending'] == true,
       paidAmount: paidTransactions.fold<double>(
         0,
         (total, transaction) =>
@@ -888,6 +891,9 @@ class _ScheduleAppointment {
   // payment_status on the appointment (043) is the single source of truth.
   bool get hasPayment => paymentStatus.toLowerCase() == 'paid';
   bool get isRefunded => paymentStatus.toLowerCase() == 'refunded';
+  bool get blocksDirectCancellation =>
+      (hasPayment && receiptNumber.toUpperCase().startsWith('FIUU-')) ||
+      refundPending;
   bool get isAwaiting => isPending && hasPayment;
   String get durationLabel => _durationLabel(displayDurationMinutes);
   bool get isGuestAccount =>
@@ -1053,6 +1059,8 @@ class _AppointmentGroup {
   }
 
   String get receiptNumber => primary.receiptNumber;
+  bool get blocksDirectCancellation =>
+      appointments.any((appointment) => appointment.blocksDirectCancellation);
   String get paymentMethod => primary.paymentMethod;
   String get paymentStatus => primary.paymentStatus;
   String get paymentStatusLabel => primary.paymentStatusLabel;
@@ -1830,6 +1838,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   Future<void> _cancelAppointment(_ScheduleAppointment appointment) async {
+    if (appointment.blocksDirectCancellation) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Paid online bookings must be refunded in Management > Payments & Refunds before cancellation. The slot stays reserved while the refund is pending.'),
+      ));
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1874,6 +1888,12 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
   }
 
   Future<void> _cancelAppointmentGroup(_AppointmentGroup group) async {
+    if (group.blocksDirectCancellation) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Paid online bookings must be refunded in Management > Payments & Refunds before cancellation. The slot stays reserved while the refund is pending.'),
+      ));
+      return;
+    }
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -2540,7 +2560,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                       Navigator.pop(routeContext);
                       await _openTherapistSwitch(appointment);
                     },
-                    onCancel: group.isCompleted
+                    onCancel: group.isCompleted || group.blocksDirectCancellation
                         ? null
                         : () async {
                             Navigator.pop(routeContext);
@@ -2565,7 +2585,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                             Navigator.pop(routeContext);
                             await _openTherapistSwitch(group.primary);
                           },
-                    onCancel: group.isCompleted
+                    onCancel: group.isCompleted || group.blocksDirectCancellation
                         ? null
                         : () async {
                             Navigator.pop(routeContext);
@@ -2770,7 +2790,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                                   activeAppointmentId: appointment.id,
                                 ),
                                 onSwitchPax: _openTherapistSwitch,
-                                onCancel: _selectedGroup!.isCompleted
+                                onCancel: _selectedGroup!.isCompleted || _selectedGroup!.blocksDirectCancellation
                                     ? null
                                     : () => _cancelAppointmentGroup(
                                         _selectedGroup!,
@@ -2791,7 +2811,7 @@ class _AppointmentsScreenState extends State<AppointmentsScreen> {
                                     : () => _openTherapistSwitch(
                                         _selectedGroup!.primary,
                                       ),
-                                onCancel: _selectedGroup!.isCompleted
+                                onCancel: _selectedGroup!.isCompleted || _selectedGroup!.blocksDirectCancellation
                                     ? null
                                     : () => _cancelAppointment(
                                         _selectedGroup!.primary,

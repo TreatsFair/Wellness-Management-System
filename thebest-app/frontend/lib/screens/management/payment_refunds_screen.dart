@@ -212,6 +212,7 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
       builder: (_) => _ResendConfirmationDialog(
         initialEmail: email,
         isStaging: isStaging,
+        history: _repository.listConfirmationEmailHistory(record.attemptId),
       ),
     );
     if (recipientEmail == null || !mounted) return;
@@ -468,10 +469,12 @@ class _ResendConfirmationDialog extends StatefulWidget {
   const _ResendConfirmationDialog({
     required this.initialEmail,
     required this.isStaging,
+    required this.history,
   });
 
   final String initialEmail;
   final bool isStaging;
+  final Future<List<Map<String, dynamic>>> history;
 
   @override
   State<_ResendConfirmationDialog> createState() =>
@@ -539,6 +542,37 @@ class _ResendConfirmationDialogState
               const SizedBox(height: AppSpacing.md),
               const Text(
                 'This creates a new intentional delivery attempt for the confirmed booking.',
+              ),
+              const SizedBox(height: AppSpacing.md),
+              FutureBuilder<List<Map<String, dynamic>>>(
+                future: widget.history,
+                builder: (context, snapshot) {
+                  if (snapshot.connectionState != ConnectionState.done) {
+                    return const Text('Checking previous email attempts…');
+                  }
+                  if (snapshot.hasError) {
+                    return const Text('Previous email attempts are unavailable.');
+                  }
+                  final sent = (snapshot.data ?? const <Map<String, dynamic>>[])
+                      .where((row) => row['status'] == 'sent' && row['sent_at'] != null)
+                      .toList();
+                  if (sent.isEmpty) {
+                    return const Text('No previous provider-accepted confirmation recorded.');
+                  }
+                  final latest = sent.first;
+                  final sentAt = DateTime.tryParse(latest['sent_at'].toString())?.toLocal();
+                  final recipient = (latest['actual_delivery_recipient'] ??
+                          latest['intended_recipient_email'] ?? 'unknown recipient')
+                      .toString();
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('Last email accepted by provider'),
+                      Text('${sentAt == null ? 'Unknown time' : DateFormat('d MMM yyyy, h:mm a').format(sentAt)} · $recipient'),
+                      const Text('Accepted does not confirm inbox delivery.'),
+                    ],
+                  );
+                },
               ),
             ],
           ),

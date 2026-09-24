@@ -681,6 +681,7 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   bool _showAllStandardSlots = false;
   int _slotRequestSerial = 0;
   bool _didApplyEditPayload = false;
+  bool _preservedTimeCheckPending = false;
 
   // Data
   List<_Service> _services = [];
@@ -1483,7 +1484,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       if (matchingSlot == null &&
           requestedStart != null &&
           (_isOriginalEditStart(requestPaxIndex, requestedStart) ||
-              requestedIsLateStartNow)) {
+              requestedIsLateStartNow) &&
+          !(_preservedTimeCheckPending && widget.editPayload?.isGroup == true)) {
         final requestedEnd = _bookingMinutesToTime(
           _bookingTimeToMinutes(requestedStart) + duration,
         );
@@ -1526,9 +1528,15 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
           }
         }
       });
+      final dateChangeConflict = _preservedTimeCheckPending &&
+          requestedStart != null && matchingSlot == null;
+      _preservedTimeCheckPending = false;
+      if (dateChangeConflict) {
+        unawaited(_showPreservedTimeConflict(requestedStart));
+      }
       if (requestedStart != null &&
           matchingSlot == null &&
-          !requestedIsLateStartNow) {
+          !requestedIsLateStartNow && !dateChangeConflict) {
         AppToast.error(
           context,
           'Pax ${requestPaxIndex + 1} no longer fits at the selected time. Choose another time, therapist, or room.',
@@ -1542,7 +1550,9 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         setState(() {
           _slots = [];
           _scheduleBlocks = [];
+          _selectedSlot = null;
         });
+        _preservedTimeCheckPending = false;
         AppToast.error(context, 'Unable to load available slots: $e');
       }
     } finally {
@@ -2119,7 +2129,8 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
       if (selected == null &&
           requestedStart != null &&
           (requestedIsLateStartNow ||
-              _isOriginalEditStart(_activePaxIndex, requestedStart))) {
+              _isOriginalEditStart(_activePaxIndex, requestedStart)) &&
+          !(_preservedTimeCheckPending && payload?.isGroup == true)) {
         final duration = _serviceDuration;
         final reservedEnd = _bookingMinutesToTime(
           _bookingTimeToMinutes(requestedStart) +
@@ -2154,12 +2165,19 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
         _slots = slots;
         _selectedSlot = selected;
       });
+      final dateChangeConflict = _preservedTimeCheckPending &&
+          requestedStart != null && selected == null;
+      _preservedTimeCheckPending = false;
+      if (dateChangeConflict) {
+        unawaited(_showPreservedTimeConflict(requestedStart));
+      }
     } catch (error) {
       if (mounted && requestSerial == _slotRequestSerial) {
         setState(() {
           _slots = [];
           _selectedSlot = null;
         });
+        _preservedTimeCheckPending = false;
         AppToast.error(
           context,
           friendlyErrorMessage(error),
@@ -2449,14 +2467,31 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
   }
 
   void _setSelectedDate(DateTime date) {
+    final editAllocations = widget.editPayload?.allocations;
+    final editAllocation = editAllocations != null &&
+            _activePaxIndex < editAllocations.length
+        ? editAllocations[_activePaxIndex]
+        : null;
+    final canCheckTime = _selectedServices.isNotEmpty &&
+        _selectedTherapist != null && _selectedRoom != null &&
+        (!_usesConcreteAssignmentUi || _allPaxResourcesReady);
+    final retainedSlot = _isEditing && canCheckTime
+        ? _selectedSlot ?? (editAllocation == null ? null : _TimeSlot(
+            start: _bookingCleanTime(editAllocation.startTime),
+            end: _bookingCleanTime(editAllocation.endTime),
+            isRecommended: false,
+            isAvailable: true,
+          ))
+        : null;
     _slotRequestSerial++;
     setState(() {
       _selectedDate = _stripDate(date);
-      _selectedSlot = null;
+      _selectedSlot = retainedSlot;
+      _preservedTimeCheckPending = retainedSlot != null;
       _slots = [];
       _capacitySlotLoadError = null;
       _scheduleBlocks = [];
-      _loadingSlots = false;
+      _loadingSlots = retainedSlot != null;
     });
     if (_isCapacityMode) {
       if (_capacityRequirementsComplete) {
@@ -2466,11 +2501,34 @@ class _NewAppointmentScreenState extends State<NewAppointmentScreen> {
     }
     _loadTherapists();
     _loadRooms();
-    if (_selectedServices.isNotEmpty &&
-        _selectedTherapist != null &&
-        _selectedRoom != null) {
+    if (canCheckTime) {
       _generateSlots();
+    } else {
+      setState(() {
+        _selectedSlot = null;
+        _preservedTimeCheckPending = false;
+        _loadingSlots = false;
+      });
     }
+  }
+
+  Future<void> _showPreservedTimeConflict(String start) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Same time is unavailable'),
+        content: Text(
+          '${_bookingTimeLabel(start)} on ${DateFormat('d MMM yyyy').format(_selectedDate)} conflicts with the selected therapist or room. Choose another time or therapist. Your original booking has not changed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Choose another time'),
+          ),
+        ],
+      ),
+    );
   }
 
   int get _serviceDuration =>
