@@ -1,5 +1,6 @@
 import unittest
 import json
+import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -91,6 +92,17 @@ class ReleasePreflightLogicTests(unittest.TestCase):
         self.assertEqual(ahead["alignment"], "ahead")
         self.assertEqual(behind["alignment"], "behind")
         self.assertEqual(diverged["alignment"], "diverged")
+
+    def test_source_hash_ignores_line_endings_and_terminal_blank_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            left = Path(temporary) / "left.ts"
+            right = Path(temporary) / "right.ts"
+            left.write_bytes(b"const value = 1;\r\n")
+            right.write_bytes(b"const value = 1;\n\n")
+            self.assertEqual(
+                preflight.normalized_sha256(left),
+                preflight.normalized_sha256(right),
+            )
 
     def test_migration_list_parser_keeps_local_and_remote_columns(self) -> None:
         parsed = preflight.parse_migration_list(
@@ -184,6 +196,76 @@ class ReleasePreflightLogicTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=Response()):
             result = preflight.remote_health_check("staging", config)
         self.assertEqual(result.status, preflight.UNKNOWN)
+
+    def test_health_check_accepts_expected_fiuu_environment(self) -> None:
+        class Response:
+            status = 200
+            headers = {"sb-project-ref": "hvyzexmsaxwendcexehx"}
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "payment_enabled": True,
+                    "payment_gateway": "fiuu",
+                    "payment_environment": "sandbox",
+                    "payment_cleanup_enabled": True,
+                    "fiuu_refund_reconciliation_enabled": True,
+                    "auto_confirm": False,
+                }).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        config = {
+            "environments": {
+                "staging": {
+                    "project_ref": "hvyzexmsaxwendcexehx",
+                    "supabase_url": "https://hvyzexmsaxwendcexehx.supabase.co",
+                    "expected_payment_gateway": "fiuu",
+                    "expected_payment_environment": "sandbox",
+                }
+            }
+        }
+        with patch("urllib.request.urlopen", return_value=Response()):
+            result = preflight.remote_health_check("staging", config)
+        self.assertEqual(result.status, preflight.PASS)
+
+    def test_health_check_blocks_wrong_fiuu_environment(self) -> None:
+        class Response:
+            status = 200
+            headers = {"sb-project-ref": "erjttzhownsxohpvzjbs"}
+
+            def read(self) -> bytes:
+                return json.dumps({
+                    "payment_enabled": True,
+                    "payment_gateway": "fiuu",
+                    "payment_environment": "sandbox",
+                    "payment_cleanup_enabled": True,
+                    "fiuu_refund_reconciliation_enabled": True,
+                    "auto_confirm": False,
+                }).encode("utf-8")
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+        config = {
+            "environments": {
+                "production": {
+                    "project_ref": "erjttzhownsxohpvzjbs",
+                    "supabase_url": "https://erjttzhownsxohpvzjbs.supabase.co",
+                    "expected_payment_gateway": "fiuu",
+                    "expected_payment_environment": "live",
+                }
+            }
+        }
+        with patch("urllib.request.urlopen", return_value=Response()):
+            result = preflight.remote_health_check("production", config)
+        self.assertEqual(result.status, preflight.BLOCKED)
 
 
 if __name__ == "__main__":

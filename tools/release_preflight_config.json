@@ -30,7 +30,8 @@
       "project_ref": null,
       "supabase_url": null,
       "flutter_entrypoint": "thebest-app/frontend/lib/main.dart",
-      "expected_billplz_mode": null,
+      "expected_payment_gateway": null,
+      "expected_payment_environment": null,
       "db_url_env": null
     },
     "staging": {
@@ -38,7 +39,8 @@
       "project_ref": "hvyzexmsaxwendcexehx",
       "supabase_url": "https://hvyzexmsaxwendcexehx.supabase.co",
       "flutter_entrypoint": "thebest-app/frontend/lib/main_staging.dart",
-      "expected_billplz_mode": "sandbox",
+      "expected_payment_gateway": "fiuu",
+      "expected_payment_environment": "sandbox",
       "db_url_env": "PREFLIGHT_STAGING_DB_URL"
     },
     "production": {
@@ -46,7 +48,8 @@
       "project_ref": "erjttzhownsxohpvzjbs",
       "supabase_url": "https://erjttzhownsxohpvzjbs.supabase.co",
       "flutter_entrypoint": "thebest-app/frontend/lib/main_production.dart",
-      "expected_billplz_mode": "live",
+      "expected_payment_gateway": "fiuu",
+      "expected_payment_environment": "live",
       "db_url_env": "PREFLIGHT_PRODUCTION_DB_URL"
     }
   },
@@ -146,15 +149,26 @@
   ],
   "known_blockers": [
     {
-      "id": "payment.stale_hosted_checkout",
+      "id": "payment.billplz_stale_hosted_checkout",
+      "status": "RESOLVED",
+      "active": false,
+      "severity": "P0",
+      "release_scope": "production",
+      "applies_to": ["local", "staging", "production"],
+      "summary": "The former Billplz stale-hosted-checkout path is dormant while Fiuu is selected.",
+      "reason": "Fiuu uses the authoritative hold deadline and late verified success enters durable refund reconciliation.",
+      "state": "superseded_by_fiuu"
+    },
+    {
+      "id": "payment.fiuu_live_end_to_end",
       "status": "BLOCKED",
       "active": true,
       "severity": "P0",
       "release_scope": "production",
-      "applies_to": ["local", "staging", "production"],
-      "summary": "Hosted checkout may remain payable after the application booking hold expires.",
-      "reason": "The stale Mastercard checkout experiment was TEST_CONFIRMED_UNSAFE; mitigation is still pending.",
-      "state": "awaiting_mitigation"
+      "applies_to": ["production"],
+      "summary": "Public Production checkout must remain disabled until one controlled live Fiuu payment is server-verified.",
+      "reason": "Live Notification/Callback, appointment conversion, receipt linkage, and operational visibility have not yet been proven together.",
+      "state": "awaiting_controlled_live_payment"
     }
   ]
 }

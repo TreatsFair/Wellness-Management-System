@@ -472,7 +472,11 @@ def normalize_line_endings(data: bytes) -> bytes:
 
 
 def normalized_sha256(path: Path) -> str:
-    return hashlib.sha256(normalize_line_endings(path.read_bytes())).hexdigest()
+    lines = normalize_line_endings(path.read_bytes()).split(b"\n")
+    while lines and not lines[-1].strip():
+        lines.pop()
+    normalized = b"\n".join(lines) + b"\n"
+    return hashlib.sha256(normalized).hexdigest()
 
 
 def migration_integrity(
@@ -1334,13 +1338,13 @@ def remote_function_source_check(
             "edge.booking_api_source_match",
             "EDGE FUNCTIONS",
             PASS if matches else BLOCKED,
-            f"{target.upper()} booking-api deployed source {'matches' if matches else 'differs from'} repository after CRLF/LF normalization"
+            f"{target.upper()} booking-api deployed source {'matches' if matches else 'differs from'} repository after line-ending and terminal-blank-line normalization"
             + (f" (version {version})" if version else ""),
             {
                 "local_hash": local_hash,
                 "deployed_hash": remote_hash,
                 "version": version,
-                "normalization": "CRLF/LF line endings only",
+                "normalization": "line endings and terminal blank lines only",
                 "download_command": command_details(download_argv),
             },
             severity="high" if not matches else "info",
@@ -1421,9 +1425,15 @@ def remote_health_check(target: str, config: dict[str, Any]) -> CheckResult:
             severity="high",
             blocking=True,
         )
-    missing_fields = [
-        field for field in ("payment_enabled", "auto_confirm") if field not in payload
-    ]
+    required_health_fields = (
+        "payment_enabled",
+        "payment_gateway",
+        "payment_environment",
+        "payment_cleanup_enabled",
+        "fiuu_refund_reconciliation_enabled",
+        "auto_confirm",
+    )
+    missing_fields = [field for field in required_health_fields if field not in payload]
     if missing_fields:
         return CheckResult(
             "edge.booking_api_health",
@@ -1440,7 +1450,14 @@ def remote_health_check(target: str, config: dict[str, Any]) -> CheckResult:
         )
     auto_confirm = payload.get("auto_confirm")
     payment_enabled = payload.get("payment_enabled")
-    if not isinstance(auto_confirm, bool) or not isinstance(payment_enabled, bool):
+    payment_cleanup_enabled = payload.get("payment_cleanup_enabled")
+    refund_reconciliation_enabled = payload.get("fiuu_refund_reconciliation_enabled")
+    if not all(isinstance(value, bool) for value in (
+        auto_confirm,
+        payment_enabled,
+        payment_cleanup_enabled,
+        refund_reconciliation_enabled,
+    )):
         return CheckResult(
             "edge.booking_api_health",
             "EDGE FUNCTIONS",
@@ -1451,15 +1468,38 @@ def remote_health_check(target: str, config: dict[str, Any]) -> CheckResult:
                 "http_status": status_code,
                 "observed_project_ref": response_project_ref,
                 "payment_enabled_type": type(payment_enabled).__name__,
+                "payment_cleanup_enabled_type": type(payment_cleanup_enabled).__name__,
+                "fiuu_refund_reconciliation_enabled_type": type(refund_reconciliation_enabled).__name__,
                 "auto_confirm_type": type(auto_confirm).__name__,
             },
             severity="high",
         )
     problems: list[str] = []
+    expected_gateway = str(env_cfg.get("expected_payment_gateway") or "").lower()
+    expected_payment_environment = str(
+        env_cfg.get("expected_payment_environment") or ""
+    ).lower()
+    observed_gateway = str(payload.get("payment_gateway") or "").lower()
+    observed_payment_environment = str(
+        payload.get("payment_environment") or ""
+    ).lower()
     if auto_confirm is True:
         problems.append("auto-confirm is enabled")
     if payment_enabled is False:
         problems.append("payment is disabled")
+    if expected_gateway and observed_gateway != expected_gateway:
+        problems.append(
+            f"payment gateway is {observed_gateway or 'missing'}, expected {expected_gateway}"
+        )
+    if expected_payment_environment and observed_payment_environment != expected_payment_environment:
+        problems.append(
+            "payment environment is "
+            f"{observed_payment_environment or 'missing'}, expected {expected_payment_environment}"
+        )
+    if expected_gateway == "fiuu" and payment_cleanup_enabled is not True:
+        problems.append("payment cleanup is disabled")
+    if expected_gateway == "fiuu" and refund_reconciliation_enabled is not True:
+        problems.append("Fiuu refund reconciliation is disabled")
     if problems:
         return CheckResult(
             "edge.booking_api_health",
@@ -1471,8 +1511,11 @@ def remote_health_check(target: str, config: dict[str, Any]) -> CheckResult:
                 "http_status": status_code,
                 "observed_project_ref": response_project_ref,
                 "payment_enabled": payment_enabled,
+                "payment_gateway": observed_gateway,
+                "payment_environment": observed_payment_environment,
                 "payment_collection_mode": payload.get("payment_collection_mode"),
-                "payment_cleanup_enabled": payload.get("payment_cleanup_enabled"),
+                "payment_cleanup_enabled": payment_cleanup_enabled,
+                "fiuu_refund_reconciliation_enabled": refund_reconciliation_enabled,
                 "auto_confirm": auto_confirm,
             },
             severity="high",
@@ -1488,8 +1531,11 @@ def remote_health_check(target: str, config: dict[str, Any]) -> CheckResult:
             "http_status": status_code,
             "observed_project_ref": response_project_ref,
             "payment_enabled": payment_enabled,
+            "payment_gateway": observed_gateway,
+            "payment_environment": observed_payment_environment,
             "payment_collection_mode": payload.get("payment_collection_mode"),
-            "payment_cleanup_enabled": payload.get("payment_cleanup_enabled"),
+            "payment_cleanup_enabled": payment_cleanup_enabled,
+            "fiuu_refund_reconciliation_enabled": refund_reconciliation_enabled,
             "auto_confirm": auto_confirm,
         },
     )
@@ -1644,57 +1690,6 @@ def remote_security_check(root: Path, target: str, config: dict[str, Any]) -> Ch
         PASS,
         f"{target.upper()} promotion metadata RPC ACL/RLS invariants verified read-only",
         {"observed": metadata, "expected": required_values},
-    )
-
-
-def billplz_mode_check(target: str, config: dict[str, Any]) -> CheckResult:
-    if target == "local":
-        return CheckResult(
-            "payment.billplz_mode",
-            "PAYMENT CONFIG",
-            PASS,
-            "Billplz mode is not applicable to LOCAL-only checks; no payment call made",
-            {"mode": None, "remote_call": False},
-            required=False,
-        )
-    expected = str(config["environments"][target].get("expected_billplz_mode") or "").lower()
-    marker_name = f"PREFLIGHT_BILLPLZ_MODE_{target.upper()}"
-    observed = os.environ.get(marker_name, "").strip().lower()
-    if not observed:
-        return CheckResult(
-            "payment.billplz_mode",
-            "PAYMENT CONFIG",
-            UNKNOWN,
-            f"BILLPLZ_MODE: UNKNOWN ({marker_name} not configured; secrets are not read)",
-            {"mode": None, "expected": expected, "marker": marker_name},
-            severity="high",
-        )
-    if observed not in {"sandbox", "live"}:
-        return CheckResult(
-            "payment.billplz_mode",
-            "PAYMENT CONFIG",
-            BLOCKED,
-            "Billplz mode marker is invalid; refusing to infer environment safety",
-            {"mode": "UNKNOWN", "expected": expected, "marker": marker_name},
-            severity="high",
-            blocking=True,
-        )
-    if observed != expected:
-        return CheckResult(
-            "payment.billplz_mode",
-            "PAYMENT CONFIG",
-            BLOCKED,
-            f"BILLPLZ_MODE: {observed.upper()} conflicts with {target.upper()} policy ({expected.upper()})",
-            {"mode": observed, "expected": expected, "marker": marker_name},
-            severity="high",
-            blocking=True,
-        )
-    return CheckResult(
-        "payment.billplz_mode",
-        "PAYMENT CONFIG",
-        PASS,
-        f"BILLPLZ_MODE: {observed.upper()} matches {target.upper()} policy",
-        {"mode": observed, "expected": expected, "marker": marker_name, "remote_call": False},
     )
 
 
@@ -1987,7 +1982,6 @@ def run_preflight(root: Path, target: str, config: dict[str, Any], extended: boo
         results.append(remote_health_check(target, config))
         results.append(remote_function_source_check(root, target, config))
         results.append(remote_security_check(root, target, config))
-        results.append(billplz_mode_check(target, config))
     else:
         if target in {"staging", "production"}:
             results.extend(
@@ -2024,18 +2018,8 @@ def run_preflight(root: Path, target: str, config: dict[str, Any], extended: boo
                         required=True,
                         severity="high",
                     ),
-                    CheckResult(
-                        "payment.billplz_mode",
-                        "PAYMENT CONFIG",
-                        NOT_RUN,
-                        f"{target.upper()} payment mode stopped after environment identity failure",
-                        required=True,
-                        severity="high",
-                    ),
                 ]
             )
-        else:
-            results.append(billplz_mode_check(target, config))
 
     results.extend(integration_checks(root, target, config, extended))
     results.append(production_delta_check(target, results))

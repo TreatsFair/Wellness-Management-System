@@ -13,7 +13,7 @@ The command is read-only. `local` checks the repository and static gates;
 `staging` adds safe observational ledger, health, source, security and payment
 checks; `production` is observational only and never deploys, relinks, repairs
 or applies migrations, writes the database, changes Git, creates appointments,
-or calls Billplz. Remote evidence that is not safely configured is reported as
+or calls Fiuu or Billplz. Remote evidence that is not safely configured is reported as
 `NOT_RUN` or `UNKNOWN`, never as `PASS`.
 
 Non-secret configuration lives in
