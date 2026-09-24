@@ -76,6 +76,7 @@ replay_pid*.log
 # =========================================================
 thebest-app/supabase/.temp/
 /supabase/.temp/
+/thebest-app/supabase/supabase/
 
 # =========================================================
 # Claude Code / Codex local tool state
