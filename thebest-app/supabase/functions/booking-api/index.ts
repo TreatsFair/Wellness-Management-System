@@ -1754,6 +1754,20 @@ async function handleFiuuNotification(
     p_channel: response.channel || null,
   });
   if (!outcome) return fail(request, "Payment notification was not recorded", 500);
+  if (outcome === "failed") {
+    // Only the verified server notification may release a Fiuu payment hold.
+    // A browser return, pending status, or transient inquiry error is not
+    // evidence of failure. The RPCs update pending holds only, so retries are
+    // idempotent and cannot cancel an appointment already confirmed.
+    const binding = await bookingBillBinding(attempt.hold_token);
+    if (!binding) return fail(request, "Failed payment booking hold was not found", 500);
+    await rpc(
+      binding.booking_group_token
+        ? "mark_booking_group_payment_failed"
+        : "mark_booking_hold_payment_failed",
+      { p_token: attempt.hold_token },
+    );
+  }
   if (outcome === "confirmed") {
     try {
       await queueAndDeliverBookingConfirmationEmail(
@@ -2867,9 +2881,18 @@ async function route(request: Request): Promise<Response> {
     ) as Array<Record<string, unknown>>;
     const payment = paymentRows[0];
     const pricing = await publicBookingPricing(token);
+    let paymentFailed = false;
+    if (BOOKING_PAYMENT_GATEWAY === "fiuu") {
+      const attempt = await supabase.from("booking_payment_attempts")
+        .select("status").eq("hold_token", token).eq("gateway", "fiuu")
+        .maybeSingle();
+      if (attempt.error) throw attempt.error;
+      paymentFailed = attempt.data?.status === "failed";
+    }
     return json(request, { hold: {
       token: hold.token,
       status: hold.status,
+      payment_failed: paymentFailed,
       expires_at: hold.expires_at,
       total_price: Number(pricing?.final_amount ?? payment?.total_amount ?? hold.total_price),
       start_at: hold.start_at,
