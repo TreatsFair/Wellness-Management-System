@@ -464,7 +464,7 @@ export function renderBookingConfirmationEmail(
             </table>
           </td></tr>
           <tr><td class="email-content" style="padding:12px 24px 6px;">
-            <p style="margin:0;color:#4f4541;font-size:13px;line-height:1.5;"><strong>Arrival reminder:</strong> Please arrive 10 minutes before your appointment.</p>
+            <p style="margin:0;color:#4f4541;font-size:13px;line-height:1.5;"><strong>Arrival reminder:</strong> Please arrive about 10 minutes before your appointment.</p>
           </td></tr>
           <tr><td class="email-footer email-content" style="padding:16px 24px 22px;color:#756660;font-size:11px;line-height:1.55;">
             <p class="email-footer-title" style="margin:0 0 7px;color:#4f4541;font-size:12px;font-weight:700;">Contact Information</p>
