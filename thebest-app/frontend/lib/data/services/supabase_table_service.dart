@@ -6,6 +6,7 @@ const Map<String, String> _snakeToCamelAliases = {
   'appointment_id': 'appointmentId',
   'appointment_date': 'date',
   'appointment_group_id': 'appointmentGroupId',
+  'refund_pending': 'refundPending',
   'assignment_source': 'assignmentSource',
   'therapist_assignment_state': 'therapistAssignmentState',
   'room_assignment_state': 'roomAssignmentState',

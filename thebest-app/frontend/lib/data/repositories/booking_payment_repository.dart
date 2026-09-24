@@ -46,4 +46,11 @@ class BookingPaymentRepository {
         ? 'The confirmation email could not be sent.'
         : message);
   }
+
+  Future<void> requestFullFiuuRefund(String attemptId, String reason) async {
+    await _client.rpc(
+      'request_admin_fiuu_full_refund',
+      params: {'p_attempt_id': attemptId, 'p_reason': reason.trim()},
+    );
+  }
 }

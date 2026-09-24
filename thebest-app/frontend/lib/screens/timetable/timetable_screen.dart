@@ -1001,6 +1001,7 @@ class _TimetableEntry {
   final String roomUnitName;
   final String type;
   final String status;
+  final bool refundPending;
   final String startTime;
   final String endTime;
   final DateTime? startAt;
@@ -1042,6 +1043,7 @@ class _TimetableEntry {
     required this.roomUnitName,
     required this.type,
     required this.status,
+    required this.refundPending,
     required this.startTime,
     required this.endTime,
     required this.startAt,
@@ -1156,6 +1158,7 @@ class _TimetableEntry {
       roomUnitName: asString(row['roomUnitName']),
       type: asString(row['type']).toLowerCase(),
       status: asString(row['status']).toLowerCase(),
+      refundPending: asBool(row['refundPending']),
       startTime: _cleanTime(asString(row['startTime'], '09:00')),
       endTime: _cleanTime(asString(row['endTime'], '10:00')),
       startAt: asDateTime(row['startAt']),
@@ -1500,6 +1503,7 @@ class _TimetableEntry {
   String get operationalStatus {
     if (isVoided) return 'Voided';
     if (isCancelled) return 'Cancelled';
+    if (refundPending) return 'Refund pending';
     if (isNoShow) return 'No Show';
     if (status == 'completed' ||
         isWalkInCompletedByTime ||
@@ -9055,6 +9059,13 @@ _StatusStyle _statusStyle(_TimetableEntry entry) {
       color: Color(0xFF6B7280),
       background: Color(0xFFF3F4F6),
       border: Color(0xFFD1D5DB),
+    );
+  }
+  if (entry.refundPending) {
+    return const _StatusStyle(
+      color: Color(0xFF92400E),
+      background: Color(0xFFFFF3CD),
+      border: Color(0xFFF59E0B),
     );
   }
   if (entry.isNoShow) {

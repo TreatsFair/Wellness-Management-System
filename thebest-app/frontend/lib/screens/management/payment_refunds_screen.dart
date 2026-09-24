@@ -36,6 +36,7 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
   DateTime? _lastSyncedAt;
   String? _error;
   String? _resendingAttemptId;
+  String? _refundingAttemptId;
 
   @override
   void initState() {
@@ -242,6 +243,31 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
     }
   }
 
+  Future<void> _requestFullRefund(_PaymentRecord record) async {
+    if (_refundingAttemptId != null || !record.canRequestFullRefund) return;
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (_) => _FullRefundDialog(record: record, currency: _currency),
+    );
+    if (reason == null || !mounted) return;
+    setState(() => _refundingAttemptId = record.attemptId);
+    try {
+      await _repository.requestFullFiuuRefund(record.attemptId, reason);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('Full refund queued. The appointment stays reserved until Fiuu confirms it.'),
+      ));
+      await _load(silent: true);
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('Refund was not queued: $error'),
+      ));
+    } finally {
+      if (mounted) setState(() => _refundingAttemptId = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final wide = MediaQuery.sizeOf(context).width >= 900;
@@ -257,7 +283,7 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
         : 'Synced ${_syncTime.format(_lastSyncedAt!)}';
     return ManagementCatalogueShell(
       moduleTitle: 'Payments & Refunds',
-      moduleSubtitle: '${OutletContext.activeOutlet.name} · Read-only activity',
+      moduleSubtitle: '${OutletContext.activeOutlet.name} · Fiuu payments and refunds',
       contentTitle: contentTitle,
       itemCountLabel:
           '$filteredCount ${filteredCount == 1 ? 'record' : 'records'} · $_dateFilterLabel',
@@ -422,6 +448,11 @@ class _PaymentRefundsScreenState extends State<PaymentRefundsScreen> {
                           : null,
                       resending:
                           _resendingAttemptId == filtered[index].attemptId,
+                      onRequestRefund: filtered[index].canRequestFullRefund
+                          ? () => _requestFullRefund(filtered[index])
+                          : null,
+                      refunding:
+                          _refundingAttemptId == filtered[index].attemptId,
                     ),
                   ),
                 ),
@@ -527,6 +558,75 @@ class _ResendConfirmationDialogState
   }
 }
 
+class _FullRefundDialog extends StatefulWidget {
+  const _FullRefundDialog({required this.record, required this.currency});
+
+  final _PaymentRecord record;
+  final NumberFormat currency;
+
+  @override
+  State<_FullRefundDialog> createState() => _FullRefundDialogState();
+}
+
+class _FullRefundDialogState extends State<_FullRefundDialog> {
+  final _reason = TextEditingController();
+  final _formKey = GlobalKey<FormState>();
+
+  @override
+  void dispose() {
+    _reason.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        title: const Text('Request full Fiuu refund?'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 470),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Customer: ${widget.record.customerName}'),
+                Text('Amount: ${widget.currency.format(widget.record.amount)}'),
+                Text('Transaction: ${widget.record.transactionId}'),
+                const SizedBox(height: AppSpacing.md),
+                const Text(
+                  'This requests a full refund from Fiuu. The appointment keeps its slot while processing; it is cancelled only after Fiuu confirms success.',
+                ),
+                const SizedBox(height: AppSpacing.md),
+                TextFormField(
+                  controller: _reason,
+                  maxLength: 500,
+                  maxLines: 3,
+                  decoration: const InputDecoration(labelText: 'Reason (required)'),
+                  validator: (value) => (value?.trim().length ?? 0) < 8
+                      ? 'Enter at least 8 characters.'
+                      : null,
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Keep booking'),
+          ),
+          FilledButton(
+            onPressed: () {
+              if (_formKey.currentState?.validate() ?? false) {
+                Navigator.of(context).pop(_reason.text.trim());
+              }
+            },
+            child: const Text('Request full refund'),
+          ),
+        ],
+      );
+}
+
 class _PaymentRecord {
   const _PaymentRecord({
     required this.attemptId,
@@ -614,6 +714,14 @@ class _PaymentRecord {
 
   bool get isConfirmed => paymentStatus == 'confirmed' && attemptId.isNotEmpty;
 
+  bool get canRequestFullRefund => isConfirmed &&
+      refundStatus.isEmpty &&
+      channel == 'TNG-EWALLET' &&
+      transactionId.isNotEmpty &&
+      bookingStart != null && bookingStart!.isAfter(DateTime.now()) &&
+      paymentReceived != null &&
+      paymentReceived!.isAfter(DateTime.now().subtract(const Duration(days: 180)));
+
   bool get needsAttention =>
       refundStatus == 'needs_review' ||
       refundStatus == 'failed' ||
@@ -643,6 +751,10 @@ class _PaymentRecord {
     if (refundStatus == 'failed') return 'Refund failed';
     if (refundStatus == 'succeeded' || paymentStatus == 'refunded') {
       return 'Refunded';
+    }
+    if (isConfirmed && const {'queued', 'submitting', 'requested', 'checking'}
+        .contains(refundStatus)) {
+      return 'Refund pending · slot held';
     }
     if (refundStatus == 'requested') return 'Refund requested';
     if (const {'awaiting_gateway', 'queued', 'submitting', 'checking'}
@@ -983,6 +1095,8 @@ class _PaymentCard extends StatelessWidget {
     required this.dateTime,
     required this.onResendConfirmation,
     required this.resending,
+    required this.onRequestRefund,
+    required this.refunding,
   });
 
   final _PaymentRecord record;
@@ -990,6 +1104,8 @@ class _PaymentCard extends StatelessWidget {
   final DateFormat dateTime;
   final VoidCallback? onResendConfirmation;
   final bool resending;
+  final VoidCallback? onRequestRefund;
+  final bool refunding;
 
   String _date(DateTime? value) =>
       value == null ? 'Not available' : dateTime.format(value);
@@ -1050,7 +1166,9 @@ class _PaymentCard extends StatelessWidget {
               _ConfirmationEmailPanel(
                 email: record.customerEmail,
                 onResend: onResendConfirmation,
-                busy: resending,
+                resending: resending,
+                onRequestRefund: onRequestRefund,
+                refunding: refunding,
               ),
             ],
             const SizedBox(height: AppSpacing.lg),
@@ -1115,12 +1233,16 @@ class _ConfirmationEmailPanel extends StatelessWidget {
   const _ConfirmationEmailPanel({
     required this.email,
     required this.onResend,
-    required this.busy,
+    required this.resending,
+    required this.onRequestRefund,
+    required this.refunding,
   });
 
   final String email;
   final VoidCallback? onResend;
-  final bool busy;
+  final bool resending;
+  final VoidCallback? onRequestRefund;
+  final bool refunding;
 
   @override
   Widget build(BuildContext context) {
@@ -1136,42 +1258,79 @@ class _ConfirmationEmailPanel extends StatelessWidget {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 560;
-          final action = FilledButton.icon(
+          final resendAction = FilledButton.icon(
             onPressed: hasEmail ? onResend : null,
-            icon: busy
+            icon: resending
                 ? const SizedBox.square(
                     dimension: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
                 : const Icon(Icons.mark_email_read_outlined, size: 18),
-            label: Text(busy ? 'Sending…' : 'Resend confirmation'),
+            label: Text(resending ? 'Sending…' : 'Resend'),
           );
-          final detail = Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Customer confirmation email',
-                  style: AppText.label.copyWith(color: context.appText),
+          final actions = Wrap(
+            spacing: AppSpacing.sm,
+            runSpacing: AppSpacing.sm,
+            alignment: compact ? WrapAlignment.start : WrapAlignment.end,
+            children: [
+              resendAction,
+              if (onRequestRefund != null)
+                Tooltip(
+                  message: 'Request full Fiuu refund',
+                  child: FilledButton.icon(
+                    style: FilledButton.styleFrom(
+                      backgroundColor: AppColors.danger,
+                      foregroundColor: Colors.white,
+                      disabledBackgroundColor: AppColors.danger,
+                      disabledForegroundColor: Colors.white,
+                    ),
+                    onPressed: refunding ? null : onRequestRefund,
+                    icon: refunding
+                        ? const SizedBox.square(
+                            dimension: 16,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
+                          )
+                        : const Icon(Icons.currency_exchange_rounded, size: 18),
+                    label: Text(refunding ? 'Queuing…' : 'Refund'),
+                  ),
                 ),
-                const SizedBox(height: AppSpacing.xs),
-                Text(
-                  hasEmail ? email : 'No customer email recorded',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppText.caption.copyWith(color: context.appMuted),
-                ),
-              ],
-            ),
+            ],
+          );
+          final detail = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'Customer confirmation email',
+                style: AppText.label.copyWith(color: context.appText),
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                hasEmail ? email : 'No customer email recorded',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: AppText.caption.copyWith(color: context.appMuted),
+              ),
+            ],
           );
           if (compact) {
             return Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [detail, const SizedBox(height: AppSpacing.sm), action],
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(width: double.infinity, child: detail),
+                const SizedBox(height: AppSpacing.sm),
+                actions,
+              ],
             );
           }
           return Row(
-            children: [detail, const SizedBox(width: AppSpacing.md), action],
+            children: [
+              Expanded(child: detail),
+              const SizedBox(width: AppSpacing.md),
+              actions,
+            ],
           );
         },
       ),

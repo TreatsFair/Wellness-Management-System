@@ -238,7 +238,7 @@ class ManagementScreen extends StatelessWidget {
                       color: AppColors.warning,
                       title: 'Payments & Refunds',
                       subtitle:
-                          'Read-only Fiuu payment, refund, and review status',
+                          'Fiuu payments, full refund requests, and review status',
                       onTap: () => Navigator.push(
                         context,
                         MaterialPageRoute(
