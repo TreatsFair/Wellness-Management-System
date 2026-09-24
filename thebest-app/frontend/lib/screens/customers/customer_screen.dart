@@ -980,7 +980,7 @@ class _PhoneListCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.end,
                   children: [
                     Text(
-                      'RM ${customer.totalSales.toStringAsFixed(0)}',
+                      'RM ${customer.totalSales.toStringAsFixed(2)}',
                       style: const TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
@@ -1233,7 +1233,7 @@ class _DetailPanel extends StatelessWidget {
                         iconBg: const Color(0xFFE3F2FD),
                         iconColor: const Color(0xFF1B6B72),
                         label: 'Total Sales',
-                        value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
+                        value: 'RM ${customer.totalSales.toStringAsFixed(2)}',
                       ),
                     ),
                     const SizedBox(width: 12),
@@ -1267,7 +1267,7 @@ class _DetailPanel extends StatelessWidget {
                         iconBg: const Color(0xFFE3F2FD),
                         iconColor: const Color(0xFF1B6B72),
                         label: 'Total Sales',
-                        value: 'RM ${customer.totalSales.toStringAsFixed(0)}',
+                        value: 'RM ${customer.totalSales.toStringAsFixed(2)}',
                       ),
                     ),
                     const SizedBox(width: 12),
