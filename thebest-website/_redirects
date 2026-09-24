@@ -1,7 +1,10 @@
+/index.html           /                301!
 /booking              /booking.html  200
 /booking-taman-wahyu  /booking.html  200
 /booking-pv128         /booking.html  200
 
-# Permanent homepage fallback for paths that do not match an existing file or
-# one of the valid routes above. Keep this rule last.
-/*                    /                301
+# Netlify ignores a wildcard redirect straight back to `/` as a possible
+# self-redirect. Send unknown paths to the real homepage file first; the
+# forced canonical rule above then changes `/index.html` to `/`.
+# Keep this non-forced fallback last so real files continue to be served.
+/*                    /index.html      302
