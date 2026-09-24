@@ -67,6 +67,7 @@ const detailsForm = document.querySelector("#details-form");
 const billingPhone = document.querySelector("#billing-phone");
 const billingEmail = document.querySelector("#billing-email");
 const promotionCodeField = document.querySelector("#promotion-code");
+const promotionChoiceDialog = document.querySelector("#promotion-choice-dialog");
 const promotionApplyButton = document.querySelector("#promotion-apply");
 const promotionRemoveButton = document.querySelector("#promotion-remove");
 const promotionStatus = document.querySelector("#promotion-status");
@@ -343,6 +344,12 @@ function minimumSpendPromotionMessage(error) {
     : "Minimum spend is required to use this code.";
 }
 function promotionErrorMessage(error) {
+  if (error?.status === 429) {
+    const seconds = Number(error.retryAfterSeconds);
+    return Number.isFinite(seconds) && seconds > 0
+      ? `Too many booking or promotion attempts. Please try again in ${seconds} seconds.`
+      : "Too many booking or promotion attempts. Please wait before trying again.";
+  }
   const code = String(error?.code || "");
   const messages = {
     PROMOTION_CODE_REQUIRED: "Enter a promotion code first.",
@@ -852,8 +859,7 @@ function canContinue() {
   if (state.step === 4) return Boolean(state.date && state.time) && !state.loadingTimes;
   if (state.step === 5) {
     validateBillingFields();
-    const promotionReady = !api.configured || !promotionCodeValue() || promotionAppliedForCurrentBooking();
-    return detailsForm.checkValidity() && promotionReady;
+    return detailsForm.checkValidity() && !state.promotionBusy;
   }
   return false;
 }
@@ -1077,8 +1083,10 @@ function startHoldCountdown() {
 
 let paymentPollTimer = null;
 let paymentPollAttempts = 0;
+let paymentPollStartedAt = 0;
 const PAYMENT_POLL_INTERVAL_MS = 2000;
-const PAYMENT_POLL_MAX_ATTEMPTS = 60;
+const PAYMENT_POLL_MAX_ATTEMPTS = 10;
+const PAYMENT_POLL_MAX_DURATION_MS = 30000;
 function setDialogIcon(kind) {
   const mark = document.querySelector(".success-mark");
   mark.classList.remove("is-pending", "is-failed");
@@ -1095,30 +1103,52 @@ function showPaymentStatus(kind) {
   close.style.display = kind === "checking" ? "none" : "";
   if (kind === "checking") { setDialogIcon("pending"); setConfirmationEyebrow("Confirming your payment"); title.textContent = "Just a moment..."; message.textContent = "We're confirming your booking."; }
   else if (kind === "confirmed") { setDialogIcon("success"); setConfirmationEyebrow("Booking confirmed"); title.textContent = "Your booking is confirmed."; message.replaceChildren(document.createTextNode("Payment received"), document.createElement("br"), document.createTextNode("Booking confirmation has been sent to your email.")); close.textContent = "Done"; close.dataset.action = "home"; }
-  else if (kind === "failed") { setDialogIcon("failed"); setConfirmationEyebrow("Payment not completed"); title.textContent = "We couldn't confirm your booking."; message.textContent = "Your booking was unsuccessful. Please try again."; close.textContent = "Try booking again"; close.dataset.action = "retry"; }
+  else if (kind === "failed") {
+    setDialogIcon("failed");
+    setConfirmationEyebrow("Payment not completed");
+    title.textContent = "Your appointment was not confirmed.";
+    const support = document.createElement("a");
+    support.href = "https://wa.me/60122872238";
+    support.textContent = "WhatsApp customer support";
+    message.replaceChildren(
+      document.createTextNode("No payment was confirmed for this booking. If money was deducted from your account, please "),
+      support,
+      document.createTextNode(" with your transaction details before trying again."),
+    );
+    close.textContent = "Back to booking";
+    close.dataset.action = "retry";
+  }
   else { setDialogIcon("pending"); setConfirmationEyebrow("Still confirming"); title.textContent = "This is taking longer than expected."; message.textContent = "Your payment may still be processing."; close.textContent = "Check again"; close.dataset.action = "recheck"; }
   if (!dialog.open) dialog.showModal();
 }
 function stopPaymentPoll() { if (paymentPollTimer) clearTimeout(paymentPollTimer); paymentPollTimer = null; }
 async function pollPaymentStatus(token) {
   stopPaymentPoll(); paymentPollAttempts += 1;
+  const controller = new AbortController();
+  const requestTimeout = setTimeout(() => controller.abort(), 8000);
   try {
-    const payload = await api.getHoldStatus(token);
+    const payload = await api.getHoldStatus(token, { signal: controller.signal });
     if (payload.hold?.status === "confirmed") {
       try { sessionStorage.removeItem(BOOKING_SESSION_KEY); } catch (_) { /* Optional browser storage. */ }
       showPaymentStatus("confirmed");
       return;
     }
-    if (["payment_failed", "cancelled", "expired"].includes(payload.hold?.status)) { showPaymentStatus("failed"); return; }
+    if (["payment_failed", "cancelled", "expired"].includes(payload.hold?.status) || payload.hold?.payment_failed === true) { showPaymentStatus("failed"); return; }
   } catch (_) { /* Retry transient failures. */ }
-  if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS) { showPaymentStatus("timeout"); return; }
+  finally { clearTimeout(requestTimeout); }
+  if (paymentPollAttempts >= PAYMENT_POLL_MAX_ATTEMPTS ||
+      Date.now() - paymentPollStartedAt >= PAYMENT_POLL_MAX_DURATION_MS) {
+    showPaymentStatus("timeout");
+    return;
+  }
   paymentPollTimer = setTimeout(() => pollPaymentStatus(token), PAYMENT_POLL_INTERVAL_MS);
 }
 function initializePaymentReturn() {
   const token = new URLSearchParams(window.location.search).get("bp_token");
   if (!token) return false;
   document.querySelector(".booking-shell").style.display = "none";
-  paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); return true;
+  paymentPollAttempts = 0; paymentPollStartedAt = Date.now();
+  showPaymentStatus("checking"); pollPaymentStatus(token); return true;
 }
 
 function setPromotionMessage(message, isError = false, temporaryMs = 0) {
@@ -1399,9 +1429,8 @@ async function submitHold() {
   const form = new FormData(detailsForm);
   const requestedPromotionCode = promotionCodeValue();
   if (requestedPromotionCode && !promotionAppliedForCurrentBooking()) {
-    setPromotionMessage("Apply the promo code before continuing to payment.", true);
     setPromotionExpanded(true);
-    promotionCodeField?.focus();
+    promotionChoiceDialog.showModal();
     updateUi();
     return;
   }
@@ -1496,6 +1525,40 @@ nextButton.addEventListener("click", async () => {
   if (state.step === 3 && canContinue()) await loadDates();
   if (canContinue()) showStep(state.step + 1);
 });
+document.querySelector("#promotion-choice-back")?.addEventListener("click", () => promotionChoiceDialog.close());
+document.querySelector("#promotion-choice-apply")?.addEventListener("click", async () => {
+  promotionChoiceDialog.close();
+  await applyPromotionCode();
+});
+document.querySelector("#promotion-choice-continue")?.addEventListener("click", async () => {
+  promotionChoiceDialog.close();
+  if (state.promotionBusy) return;
+  state.promotionBusy = true;
+  updateUi();
+  try {
+    if (state.hold?.token && state.hold?.pricing?.promotion_code) {
+      const current = await api.getHoldStatus(state.hold.token);
+      if (current?.hold?.status === "pending_payment" && holdRemainingMs() > 0) {
+        const removed = await api.removePromotion(state.hold.token);
+        state.hold = { ...state.hold, total_price: Number(removed.pricing?.final_amount), pricing: removed.pricing, promotion: null };
+      } else {
+        clearActiveHold();
+      }
+    }
+    promotionCodeField.value = "";
+    state.promotion = null;
+    state.paymentHandoff = null;
+    persistBookingSession();
+  } catch (error) {
+    setPromotionMessage(promotionErrorMessage(error), true);
+    setPromotionExpanded(true);
+    return;
+  } finally {
+    state.promotionBusy = false;
+    updateUi();
+  }
+  await submitHold();
+});
 backButton.addEventListener("click", () => showStep(state.step - 1));
 detailsForm.addEventListener("input", (event) => {
   if (event.target === billingPhone || event.target === billingEmail) {
@@ -1583,7 +1646,7 @@ document.querySelector("#close-dialog").addEventListener("click", () => {
   }
   if (close.dataset.action === "retry") { window.location.href = BOOKING_RETURN_PATH; return; }
   if (close.dataset.action === "home") { window.location.href = "https://thebestwellness.my"; return; }
-  if (close.dataset.action === "recheck") { const token = new URLSearchParams(window.location.search).get("bp_token"); if (token) { paymentPollAttempts = 0; showPaymentStatus("checking"); pollPaymentStatus(token); } return; }
+  if (close.dataset.action === "recheck") { const token = new URLSearchParams(window.location.search).get("bp_token"); if (token) { paymentPollAttempts = 0; paymentPollStartedAt = Date.now(); showPaymentStatus("checking"); pollPaymentStatus(token); } return; }
   document.querySelector("#confirmation-dialog").close();
 });
 document.querySelector("#confirmation-dialog").addEventListener("cancel", (event) => { if (event.currentTarget.dataset.paymentState === "checking") event.preventDefault(); });

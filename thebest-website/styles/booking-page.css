@@ -368,6 +368,11 @@ fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
 .confirmation-dialog h2 { margin: 0.3rem 0 0.8rem; font: 600 2rem var(--font-display); }
 .confirmation-dialog > p:not(.eyebrow) { color: var(--muted); font-size: 0.8rem; line-height: 1.6; }
 .confirmation-dialog .primary-button { margin-top: 1rem; }
+.promotion-choice-dialog { width: min(470px, calc(100% - 2rem)); padding: 2rem; border: 0; border-radius: 22px; color: var(--ink); background: var(--paper); box-shadow: 0 30px 100px rgba(0,0,0,0.24); }
+.promotion-choice-dialog::backdrop { background: rgba(24, 27, 23, 0.62); backdrop-filter: blur(4px); }
+.promotion-choice-dialog h2 { margin: 0 0 0.75rem; font: 600 1.6rem var(--font-display); }
+.promotion-choice-dialog p { color: var(--muted); line-height: 1.6; }
+.promotion-choice-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 0.7rem; margin-top: 1.5rem; }
 .success-mark { width: 58px; height: 58px; margin: 0 auto 1rem; display: grid; place-items: center; border-radius: 50%; color: white; background: var(--green); }
 .success-mark svg { width: 30px; fill: none; stroke: currentColor; stroke-width: 2; }
 .success-mark.is-pending { background: var(--muted); }

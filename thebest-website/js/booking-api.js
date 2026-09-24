@@ -6,12 +6,13 @@
   const baseUrl = configured ? `${supabaseUrl}/functions/v1/booking-api` : "";
 
   class BookingApiError extends Error {
-    constructor(message, status, code = "", details = null) {
+    constructor(message, status, code = "", details = null, retryAfterSeconds = null) {
       super(message);
       this.name = "BookingApiError";
       this.status = status;
       this.code = code;
       this.details = details;
+      this.retryAfterSeconds = retryAfterSeconds;
     }
   }
 
@@ -32,6 +33,7 @@
         response.status,
         payload.code || "",
         payload.details || null,
+        Number(response.headers.get("Retry-After")) || null,
       );
     }
     return payload;
@@ -96,6 +98,6 @@
       method: "POST",
       body: JSON.stringify({ token }),
     }),
-    getHoldStatus: (token) => request(`/booking-holds/status?token=${encodeURIComponent(token)}`),
+    getHoldStatus: (token, options = {}) => request(`/booking-holds/status?token=${encodeURIComponent(token)}`, options),
   };
 })();
